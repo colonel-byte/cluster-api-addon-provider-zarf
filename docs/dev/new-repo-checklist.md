@@ -25,7 +25,7 @@ The placeholder sweep is the first section of the root [`AGENTS.md`](../../AGENT
 ## The parts that can be scripted
 
 ```sh
-REPO=OWNER/REPO
+REPO=colonel-byte/cluster-api-addon-provider-zarf
 
 # Labels the issue forms name.
 for l in bug ci test-flake enhancement documentation stack-task; do
@@ -58,7 +58,7 @@ gh api "repos/$REPO/rules/branches/main"        # [] means nothing is enforced o
 gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 ```
 
-Then open `https://github.com/OWNER/REPO/issues/new/choose` on a branch after changing an issue form. A malformed form is reported as a banner on that page and nowhere else - parsing as YAML is not enough to know it renders.
+Then open `https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/new/choose` on a branch after changing an issue form. A malformed form is reported as a banner on that page and nowhere else - parsing as YAML is not enough to know it renders.
 
 ## First run, in order
 

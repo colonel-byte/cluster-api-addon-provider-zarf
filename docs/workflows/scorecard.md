@@ -1,12 +1,12 @@
 # Scorecards supply-chain security
 
-[`.github/workflows/scorecard.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/scorecard.yaml) runs [OpenSSF Scorecard](https://securityscorecards.dev/) over the repository and publishes the result three ways: to the public API behind the `README.md` badge, to GitHub's code-scanning dashboard as SARIF, and as a run artifact kept for five days.
+[`.github/workflows/scorecard.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/scorecard.yaml) runs [OpenSSF Scorecard](https://securityscorecards.dev/) over the repository and publishes the result three ways: to the public API behind the `README.md` badge, to GitHub's code-scanning dashboard as SARIF, and as a run artifact kept for five days.
 
 It fires on pushes to `main`, weekly on Saturday at 01:30 UTC, and whenever a branch protection rule changes - that last trigger exists because the Branch-Protection check reads settings rather than files, so a protection change is the only thing that would otherwise move the score with no commit behind it.
 
 ## It only works on the default branch
 
-Scorecard scores `main` and nothing else. A pull request cannot move the published score, and the score a reviewer sees is always the last merge's. To check a change before it lands, score the working tree by hand instead - [`.github/AGENTS.md`](https://github.com/OWNER/REPO/blob/main/.github/AGENTS.md) has the `--local` invocation and the handful of checks worth running.
+Scorecard scores `main` and nothing else. A pull request cannot move the published score, and the score a reviewer sees is always the last merge's. To check a change before it lands, score the working tree by hand instead - [`.github/AGENTS.md`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/AGENTS.md) has the `--local` invocation and the handful of checks worth running.
 
 ## `publish_results: true` is what the badge needs
 

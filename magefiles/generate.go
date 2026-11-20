@@ -18,7 +18,7 @@
 package main
 
 import (
-	"github.com/OWNER/REPO/magefiles/pkg/gen/docs"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/magefiles/pkg/gen/docs"
 	"github.com/magefile/mage/mg"
 )
 

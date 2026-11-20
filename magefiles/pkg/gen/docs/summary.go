@@ -71,8 +71,8 @@ var summarySections = []struct {
 	// is the one that needs indent. Cobra names a subcommand's page after its whole command
 	// path joined with underscores, so the pattern captures the tail:
 	//
-	//   {title: "Commands", folder: "commands", pattern: `<project>_(.+)\.md`, indent: true,
-	//    extra: "- [<project>](commands/<project>.md)"},
+	//   {title: "Commands", folder: "commands", pattern: `cluster-api-addon-provider-zarf_(.+)\.md`, indent: true,
+	//    extra: "- [cluster-api-addon-provider-zarf](commands/cluster-api-addon-provider-zarf.md)"},
 	{
 		title:   "Development",
 		folder:  "dev",

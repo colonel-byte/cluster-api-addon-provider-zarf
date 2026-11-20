@@ -1,51 +1,20 @@
 # Working in this repository
 
-<!-- One paragraph: what this project is, who runs it, and what it is not. Link README.md for the full pitch, and the two or three docs that explain the model an agent has to hold to make a correct change. -->
+This repository is `cluster-api-addon-provider-zarf` (CAAPZ), a Cluster API add-on provider that deploys [Zarf](https://github.com/zarf-dev/zarf) packages onto CAPI workload clusters. A platform team declares a `ZarfPackageProxy` on the management cluster; the controller matches it to clusters, pulls the package from an OCI registry, verifies its Cosign signature, and deploys it over the wire via Zarf's Go SDK, tracking per-cluster state in `ZarfPackageRelease`. [`README.md`](README.md) is the full pitch and [`docs/dev/architecture.md`](docs/dev/architecture.md) is the design an agent needs to hold to make a correct change. It is a controller, not a CLI: the binary takes manager flags and runs forever, and there is no interactive surface.
 
-<!-- One paragraph on the operating assumptions that are not obvious from the code - where it runs, what it may and may not reach, what is staged ahead of time. -->
-
-## First, if this repository was just created from the template
-
-This file came from [`colonel-byte/template`](https://github.com/colonel-byte/template) and still carries its placeholders. Replace them before doing anything else, and treat it as one change rather than a thing to come back to - a placeholder that survives the first commit is a wrong URL nothing will ever fail on.
-
-```sh
-grep -rn 'OWNER/REPO\|OWNER\.github\.io\|<project>' . --exclude-dir=.git --exclude-dir=vendor
-```
-
-- **`OWNER/REPO`** - the new repository's slug. It appears in the issue-tracker section below, in [`.github/AGENTS.md`](.github/AGENTS.md) (the Scorecard viewer link, the advisory URL, the `gh label list` snippet), in [`.github/ISSUE_TEMPLATE/config.yml`](.github/ISSUE_TEMPLATE/config.yml), in [`.github/ISSUE_TEMPLATE/01-failing-build.yml`](.github/ISSUE_TEMPLATE/01-failing-build.yml), in the `docs/workflows/` pages, in [`.goreleaser.yaml`](.goreleaser.yaml) (the `release.github` block, the `-ldflags -X` module path, and the `cosign.pub` link in the footer), in **the three badges at the top of [`README.md`](README.md)**, and in **[`book.toml`](book.toml)**.
-- **`OWNER.github.io`** - the published book's host, in `docs/AGENTS.md` and the issue chooser's documentation link.
-- **`<project>`** - the binary and module name, in the layout table below, the help-text examples, and the reproduction steps in [`.github/ISSUE_TEMPLATE/03-bug.yml`](.github/ISSUE_TEMPLATE/03-bug.yml).
-
-**The badges and [`book.toml`](book.toml) are the two worth checking by eye**, because they are where a wrong value produces something that builds, renders, and looks right. A badge left on the template's slug reports another repository's release and security posture as this one's, at the top of the front page; `README.md` says what each badge needs before it resolves at all.
-
-As for `book.toml`: `git-repository-url` is the repository icon in the book's header and `edit-url-template` is the pencil beside every page; pointed at the template's own slug, both silently send a reader to the wrong repository. Set them both to the new slug, and change `main` in each if the default branch is named something else:
-
-```toml
-git-repository-url   = "https://github.com/OWNER/REPO/tree/main"
-edit-url-template    = "https://github.com/OWNER/REPO/edit/main/{path}"
-```
-
-Also in `book.toml`: `[book] authors` and the copyright header, which are the template author's, not necessarily this project's.
-
-**The placeholders are only half of it.** Generating a repository from a template copies files, not settings, so several of the files that just arrived are inert: `.github/CODEOWNERS` requires nothing until a ruleset says so, the workflows have no secrets, the labels the issue forms name do not exist, and the book 404s until Pages is enabled. [`docs/dev/new-repo-checklist.md`](docs/dev/new-repo-checklist.md) is the list, with the `gh` commands for the parts that can be scripted and the order to do the first run in.
-
-Then work through the `<!-- ... -->` comments in this file. They mark the five things that cannot be templated - what the project is, the layout table, the build and test commands, which test invocations are forbidden, and the quirks worth knowing - and a rule left as a comment is a rule nobody follows. Delete the sections whose machinery this repository does not have, rather than leaving them pointing at files that are not there; [`README.md`](README.md) lists which sections depend on what.
-
-Delete this whole section once it is done.
+It runs in the management cluster of air-gapped enterprise environments. At runtime it may reach the management cluster API, the workload cluster APIs (via the `<cluster-name>-kubeconfig` secrets CAPI maintains), and an internal OCI registry - nothing public. Everything it deploys is staged into that registry ahead of time as a self-contained Zarf package.
 
 ## Layout
 
-<!-- One row per directory an agent will touch. Say what lives there, not what it is named. -->
-
-| Path                     | What lives there                                                                                           |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `cmd/`                   | Cobra commands, and `cmd/<project>`, the released binary's `main`                                          |
-| `pkg/`                   | Packages usable from anywhere in the module                                                                |
-| `internal/`              | Go packages private to this module                                                                         |
-| `test/`                  | The shared e2e harness and its suites                                                                      |
-| `magefiles/`             | The mage task runner's source - build, test, and generate targets                                          |
-| `docs/`                  | The mdBook source. Generated subpaths must not be hand-edited                                              |
-| `docs/agent/choice-*.md` | Records of non-obvious decisions and the tradeoffs behind them - read before reversing one                 |
+| Path                     | What lives there                                                                           |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| `api/v1alpha1/`          | The CRD Go types - `ZarfPackageProxy`, `ZarfPackageRelease` - and their generated deepcopy |
+| `cmd/`                   | `cmd/cluster-api-addon-provider-zarf`, the controller manager's `main`                     |
+| `internal/controller/`   | The reconcilers, private to this module                                                    |
+| `config/`                | Kustomize manifests - generated CRDs under `config/crd/bases`, RBAC, manager deployment    |
+| `magefiles/`             | The mage task runner's source - build, test, and generate targets                          |
+| `docs/`                  | The mdBook source. Generated subpaths must not be hand-edited                              |
+| `docs/agent/choice-*.md` | Records of non-obvious decisions and the tradeoffs behind them - read before reversing one |
 
 Several directories carry their own `AGENTS.md` with rules specific to that directory. Check the closest one before editing. Keep this table in sync when adding or removing one -- add a row for a new `AGENTS.md`, and remove its row when the file goes away.
 
@@ -71,7 +40,7 @@ go run ./magefiles/core dev:verifyVendor    # go mod verify, then a GOPROXY=off 
 
 Plain Go commands work for anything mage doesn't wrap - `go build ./...`, `go vet ./...` - but exclude `./magefiles/...` from those, since it fails a bare build for the reason above.
 
-<!-- TEMPLATE: name the test invocations that are forbidden and why. The usual one: never run `go test ./...` without `-short`, because it pulls in the suites that need real infrastructure. -->
+No test invocation is forbidden yet: there are no suites that need real infrastructure. If one arrives (envtest, a kind cluster), name the forbidden invocation here in the same change.
 
 ### The build is vendored and offline, and that is a requirement
 
@@ -140,10 +109,9 @@ So when a change touches something a document describes, check what that documen
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | A path, file, or directory that moved or went  | `ls`/`find` the path as written                                                                                                    |
 | A Go symbol that was renamed or unexported     | `grep -rn --include='*.go' '<name>' .`, or `go doc`. An unexported-to-exported rename is the easy one to miss                      |
-| A module asserted to be present or absent      | `grep -n '<module>' go.mod vendor/modules.txt`, and `go list -deps ./cmd/<project>` for whether it is linked                       |
+| A module asserted to be present or absent      | `grep -n '<module>' go.mod vendor/modules.txt`, and `go list -deps ./cmd/cluster-api-addon-provider-zarf` for whether it is linked                       |
 | A mage target that does not exist              | `go run ./magefiles/core -l`                                                                                                       |
-| A command or flag that does not exist          | `grep -rn '<flag>' cmd/`. Check the command's `Use:` line, not your memory of the command tree                                     |
-| A config key with no backing field             | It must be in the config struct, the viper defaults, and the sample config file                                                    |
+| A manager flag that does not exist             | `grep -rn '<flag>' cmd/ internal/`. Check the `flag.String` registration, not your memory                                          |
 | A quoted error or log string                   | `grep -rn '<fragment>'` for the literal. Quoting these from memory is how a guide ends up printing an error the code does not emit |
 | A relative link between pages                  | `ls` the target. Nothing in the build catches a dead one                                                                           |
 | A count, version, or pin given as current fact | Read the thing being counted. A number that was measured once and never re-measured is the default state of every count in a tree  |
@@ -157,69 +125,6 @@ Report what you find the way the section above says: name the file, the line, an
 - **A configuration entry a removed document justified** is a separate question with its own blast radius, and it is not yours to fold into a documentation change. A stale Scorecard annotation or Dependabot ignore is doing nothing, but removing it changes what CI measures. Flag it and let the operator decide.
 
 When a change removes a module, moves a package out of the tree, or renames a type, the documentation sweep is part of it - and `grep -rn '<old-name>' --include='*.md' .` is the whole technique.
-
-## A new flag belongs in the config file too
-
-A flag on a cobra command is one half of how this project is configured. The other half is the config struct that `v.Unmarshal(&resolvedConfig)` decodes the config file, the environment and the viper defaults into - and `resolvedConfig` is what a flag registration reads for its default value. A flag wired only into cobra works, which is why it is easy to stop there, and it leaves an operator restating on every invocation something their whole fleet has one answer to.
-
-So adding a flag that carries a setting rather than a one-off instruction means all of:
-
-- **a field in the right section of the config struct**, with the `json` and `mapstructure` tags that name its key. The doc comment is the generated schema's description, so write it for an operator authoring YAML, and say which commands honour it when not all of them do.
-- **a `v.SetDefault(...)` beside the other defaults**, even when the default is the Go zero value. `Unmarshal` builds its result from `v.AllKeys()`, so a key with no default registered is invisible to it and silently loses environment-variable support.
-- **the flag's default read from `resolvedConfig`**, not a literal. This is the line that makes the config file take effect, and the ordering falls out of it for free: flag beats config beats default.
-- **home-path expansion, for a path-valued field.** A shell expands a leading `~` in a flag value before the binary sees it; nothing expands one in a config file or an environment variable, so `~/.cache/...` reaches `os.Open` as a literal and fails naming a path a shell would have found. Add the field to the expansion helper and a case to its test, which compares the whole struct and so fails until the expectation is written out.
-- **a line in the sample config at the repository root.** It is what an operator copies and what the `README.md` examples point `--config` at, so a key missing from it is a key nobody discovers. Add it commented out, with its one-line explanation, where the setting should not be on by default - a sample that writes files or changes host state on a first run is worse than one that is incomplete. A config under `test/` is a fixture rather than a sample: change it only when a suite needs the key.
-- **a `README.md` snippet showing the config-file form**, per the section above, and a regenerated schema.
-
-Not every flag qualifies. `--confirm` and `--dry-run` are decisions about one invocation, and a config file that answered them standingly would be a hazard rather than a convenience; they stay cobra-only. The test is whether an operator would give the same answer every time they run the command.
-
-**Where the key goes is a question for the person, not a guess.** The section a field lands in is the key an operator types, it ships in a generated schema, and moving it later breaks every config file that set it - while from inside the code two or three placements usually look equally defensible. Say which one you think is right and why, show the YAML it produces, and ask before writing it.
-
-## Help text has a budget, and flag help has a hard cap
-
-`--help` is the whole interface. This tool runs from a terminal, often on a host with no UI and no hosted docs to tab over to - so what `--help` prints is what an operator has. It is also the one surface nothing tests: a 600-character flag description compiles, generates clean documentation, and passes every hook.
-
-### Flag help: 125 characters, hard cap
-
-One sentence. It has to fit the hanging-indent column of an 80-column terminal, which is about a line and a half. Over the cap, the detail goes into a guide under `docs/guides/` and the flag string names it:
-
-```go
-// Good: one sentence, then where the rest lives.
-CmdCreateFlagContentStore = "`PATH` of a content store to resolve images and files from instead of the network. See docs/guides/content-store.md."
-```
-
-**The trap is that the cap is invisible from where the string is written.** The same constant feeds `--help` and the generated page under `docs/commands/`, and the page renders 600 characters as a tidy paragraph. So check the terminal, not the page:
-
-```sh
-COLUMNS=80 go run . create --help
-```
-
-Two further things about the measurement:
-
-- **Cobra appends `(default ...)` to the rendered line**, so a string at 120 characters can still produce a 130-character line. Where the default is long or machine-specific, leave room for it.
-- **The constant name is not a reliable filter.** Flag help with no `Flag` in the name is missed entirely by a grep for `Flag\w* = "`. Measure the rendered `--help`, which cannot be fooled.
-
-### `Long` and `Example`: a budget, not a number
-
-These are deliberately not capped. A `Long` has real work to do, and trimming good prose to fit an arbitrary count loses information. What matters is whether the whole of `--help` can be read without scrolling, because what gets scrolled past does not get read.
-
-- **Aim for the whole `--help` under about 45 lines.** Check it after changing a `Long`, an `Example`, or a flag string - the number to watch is the total, not any one part.
-- **Three to five examples.** Pick the common cases; an example per flag combination belongs in a guide. The house form is two lines each, a `#` comment then a runnable `$ <project> ...` line.
-- **`Long` says what the command does and what an operator must know before running it.** A walkthrough, a worked scenario, or an enumeration of how several flags interact is a guide.
-
-### None of this is enforced in CI, on purpose
-
-A gate would be raised the first time it blocked something urgent, and the useful behaviour is a person noticing. Measure it when you touch it:
-
-```sh
-go run . <command> --help | sed -n 's/^  *-\{1,2\}[^ ]*.*  \{2,\}\(.*\)$/\1/p' | awk 'length > 125'
-```
-
-## Exit codes are a compatibility promise
-
-`cmd/exit.go` maps an error to a process exit code, and `README.md` publishes the table. This tool is driven from scripts, and a code that means "nothing was touched and a retry is safe" is a promise a wrapper relies on - so the numbers are an interface, not an implementation detail.
-
-Adding a classification means adding a code. Do not repurpose or renumber an existing one, and update the mapping, the `README.md` table and the test together. A new error that nobody classified falls through to `1`, which is the right default: a caller sees "something failed" rather than a wrong promise.
 
 ## Pinned versions, digests, and checksums
 
@@ -302,10 +207,10 @@ Names are used verbatim by `gh stack add`, so there is nothing to correct afterw
 
 ## Tracking work in issues
 
-Work here is tracked in issues on the main repository, [`OWNER/REPO`](https://github.com/OWNER/REPO). Before starting a task, check for a related issue - someone may already have filed it, or filed something that overlaps enough to change the approach:
+Work here is tracked in issues on the main repository, [`colonel-byte/cluster-api-addon-provider-zarf`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf). Before starting a task, check for a related issue - someone may already have filed it, or filed something that overlaps enough to change the approach:
 
 ```sh
-gh issue list --repo OWNER/REPO --search "<keywords>" --state all
+gh issue list --repo colonel-byte/cluster-api-addon-provider-zarf --search "<keywords>" --state all
 ```
 
 If there is no issue covering the work, ask the person whether they would like one submitted before continuing. Don't open one unprompted, and don't treat a missing issue as a reason to stop - they may well say no.
@@ -315,8 +220,6 @@ When work is being broken up into a stacked PR, the issue structure should mirro
 Only the top-most PR in the stack closes the parent issue - each lower PR closes its own subissue and nothing more, so the parent stays open until the whole change has landed. Don't move that closing reference to an earlier PR unless the operator asks for it.
 
 ## Quirks worth knowing
-
-<!-- The things that have cost somebody an afternoon and are invisible from the code. Delete the ones that do not apply here; the three below apply to most Go repositories in this org. -->
 
 ### Relative-path fixture constants don't move themselves
 

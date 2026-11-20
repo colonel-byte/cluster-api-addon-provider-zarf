@@ -1,6 +1,6 @@
 # CodeQL
 
-[`.github/workflows/codeql.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/codeql.yaml) runs GitHub's CodeQL analysis on pushes to `main`, on pull requests, on the merge queue, and weekly. Results land in the repository's Security tab. The weekly run is not redundant: it picks up queries and advisories published after a commit landed.
+[`.github/workflows/codeql.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/codeql.yaml) runs GitHub's CodeQL analysis on pushes to `main`, on pull requests, on the merge queue, and weekly. Results land in the repository's Security tab. The weekly run is not redundant: it picks up queries and advisories published after a commit landed.
 
 Two languages are analyzed, with different build modes:
 
@@ -23,4 +23,4 @@ Today that is `./magefiles/pkg/...` and nothing else, because `magefiles/*.go` i
 
 ## Permissions
 
-`security-events: write` to upload the results, `actions: read` for the `actions` language to read workflow files, and `packages: read` for any private module the build resolves. All three are on the job, not the file - see [`.github/AGENTS.md`](https://github.com/OWNER/REPO/blob/main/.github/AGENTS.md), where a top-level write zeroes Scorecard's Token-Permissions check.
+`security-events: write` to upload the results, `actions: read` for the `actions` language to read workflow files, and `packages: read` for any private module the build resolves. All three are on the job, not the file - see [`.github/AGENTS.md`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/AGENTS.md), where a top-level write zeroes Scorecard's Token-Permissions check.

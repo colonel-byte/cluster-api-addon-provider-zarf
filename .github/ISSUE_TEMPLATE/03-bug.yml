@@ -20,8 +20,8 @@ body:
       label: Steps to reproduce
       description: The commands you ran, in order. Include the config or the relevant part of it.
       placeholder: |
-        1. <project> create ./config.yaml
-        2. <project> apply --inventory ./inventory.yaml
+        1. kubectl apply -f zarfpackageproxy.yaml
+        2. kubectl get zarfpackagereleases -A
         3. ...
     validations:
       required: true

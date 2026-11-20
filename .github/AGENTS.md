@@ -16,15 +16,15 @@ Three things in those forms go stale silently, and GitHub fails none of them in 
 
 - The `Which CI job` dropdown in [`ISSUE_TEMPLATE/01-failing-build.yml`](ISSUE_TEMPLATE/01-failing-build.yml) lists the `name:` a workflow displays in the checks list, not its filename. Adding, renaming, or removing a workflow means updating that list in the same pull request.
 - The dropdowns that enumerate parts of the tree - the subsystem list in [`ISSUE_TEMPLATE/03-bug.yml`](ISSUE_TEMPLATE/03-bug.yml), the suite list in [`ISSUE_TEMPLATE/02-flaky-test.yml`](ISSUE_TEMPLATE/02-flaky-test.yml) - track directories in the repository. A new subsystem or suite belongs in both the code and the form.
-- Every label a form names in `labels:` has to exist on the repository. GitHub drops an unknown label from the created issue without reporting anything, so the issue arrives unlabelled and nothing says why. Check with `gh label list --repo OWNER/REPO`.
+- Every label a form names in `labels:` has to exist on the repository. GitHub drops an unknown label from the created issue without reporting anything, so the issue arrives unlabelled and nothing says why. Check with `gh label list --repo colonel-byte/cluster-api-addon-provider-zarf`.
 
-A malformed form is reported as a banner on <https://github.com/OWNER/REPO/issues/new/choose> and nowhere else. Open that page on the branch after changing a form; parsing as YAML is not enough to know it renders.
+A malformed form is reported as a banner on <https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/new/choose> and nowhere else. Open that page on the branch after changing a form; parsing as YAML is not enough to know it renders.
 
 Security reports are a `contact_links` entry in [`ISSUE_TEMPLATE/config.yml`](ISSUE_TEMPLATE/config.yml) pointing at the draft advisory form, not an issue form. [`SECURITY.md`](SECURITY.md) says not to open a public issue for a vulnerability; do not add a template that invites one.
 
 ## Checking a workflow against OpenSSF Scorecard
 
-This repository publishes an [OpenSSF Scorecard](https://securityscorecards.dev/viewer/?uri=github.com/OWNER/REPO), and [`workflows/scorecard.yaml`](workflows/scorecard.yaml) recomputes it on every push to `main`. A workflow change can move that score without anything failing in CI, so run the checks that read workflows before opening the pull request, and name the ones you ran in the description.
+This repository publishes an [OpenSSF Scorecard](https://securityscorecards.dev/viewer/?uri=github.com/colonel-byte/cluster-api-addon-provider-zarf), and [`workflows/scorecard.yaml`](workflows/scorecard.yaml) recomputes it on every push to `main`. A workflow change can move that score without anything failing in CI, so run the checks that read workflows before opening the pull request, and name the ones you ran in the description.
 
 The published score only refreshes after a merge, so score the working tree instead. Prefer the release binary over `gcr.io/openssf/scorecard`, which is not reliably pullable.
 

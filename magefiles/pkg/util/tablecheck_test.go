@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OWNER/REPO/magefiles/pkg/util"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/magefiles/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

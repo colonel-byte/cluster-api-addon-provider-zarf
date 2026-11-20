@@ -17,6 +17,7 @@
 
 - [README](dev/README.md)
 - [adding-ci](dev/adding-ci.md)
+- [architecture](dev/architecture.md)
 - [new-repo-checklist](dev/new-repo-checklist.md)
 
 -----------

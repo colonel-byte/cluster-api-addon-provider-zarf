@@ -22,8 +22,8 @@ fold.enable          = false
 additional-css       = [ "docs/css/root.css", "docs/css/print.css" ]
 no-section-label     = true
 admonitions          = true
-git-repository-url   = "https://github.com/OWNER/REPO/tree/main"
-edit-url-template    = "https://github.com/OWNER/REPO/edit/main/{path}"
+git-repository-url   = "https://github.com/colonel-byte/cluster-api-addon-provider-zarf/tree/main"
+edit-url-template    = "https://github.com/colonel-byte/cluster-api-addon-provider-zarf/edit/main/{path}"
 sidebar-header-nav   = false
 hash-files           = true
 

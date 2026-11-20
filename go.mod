@@ -1,4 +1,4 @@
-module github.com/OWNER/REPO
+module github.com/colonel-byte/cluster-api-addon-provider-zarf
 
 go 1.27.4
 

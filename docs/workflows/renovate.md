@@ -1,6 +1,6 @@
 # Renovate
 
-[`.github/workflows/renovate.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/renovate.yaml) runs Renovate against this repository and nothing else, every four hours and on demand. It replaces the hosted `renovate[bot]` GitHub App: the bot is not installed, and the config in [`.github/renovate.json5`](https://github.com/OWNER/REPO/blob/main/.github/renovate.json5) is read by this run rather than by Mend's servers.
+[`.github/workflows/renovate.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/renovate.yaml) runs Renovate against this repository and nothing else, every four hours and on demand. It replaces the hosted `renovate[bot]` GitHub App: the bot is not installed, and the config in [`.github/renovate.json5`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5) is read by this run rather than by Mend's servers.
 
 ## Why it runs self-hosted
 
