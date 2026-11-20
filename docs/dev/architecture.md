@@ -172,6 +172,24 @@ Borrowing from core CAPI's `ClusterResourceSet.spec.strategy`, CAAPZ supports tw
    - The controller will **never re-execute** this package against that cluster, even if the proxy's spec or variables change.
    - Ideal for Day-0/Day-1 cluster bootstrap hooks and registration payloads.
 
+#### Where the "never re-execute" record actually lives
+
+The `ZarfPackageRelease` is a cache of the guarantee, not the guarantee itself: it is deliberately garbage-collected with its owning `Cluster` (§7), and a `Cluster` object is deleted *without the infrastructure being wiped* during `clusterctl move` and de-import/re-import - exactly the imported-cluster flows seed packages target. The durable record is the one Zarf itself writes on the workload cluster: every deploy stores a `zarf-package-<name>` secret (labeled `package-deploy-info`) in the `zarf` namespace, which survives management-cluster churn because it lives on the physical cluster being guarded.
+
+So the seed check is two-tier:
+
+- `status.applied: true` on an existing release short-circuits the reconcile with no workload-cluster round trip.
+- When the release is missing or not yet applied - the only states in which a deploy would fire - the controller first probes the workload cluster for the package's deployed-package secret. If present, the release is marked `Completed`/`applied: true` **without re-executing** (adoption); only a cluster with no record is seeded.
+
+Consequences, all deliberate:
+
+- Re-importing a live cluster re-creates its releases but does not re-run its seed packages.
+- Hand-deleting a `ZarfPackageRelease` does not re-run the seed; the recreated release adopts the existing record.
+- The escape hatch for intentionally re-seeding is removing the package's record on the workload cluster (`zarf package remove`, or deleting the `zarf-package-<name>` secret) - an explicit operator action against the cluster being re-seeded.
+- Wiping and rebuilding infrastructure behind the same `Cluster` object re-seeds, because the rebuilt cluster carries no record. That is the desired reading of "once per physical cluster".
+
+One restriction follows: Zarf only stores the deployed-package record when the package has at least one cluster-touching component, so **an ApplyOnce package must include one**. A pure-actions package would leave no durable record, silently degrading the guarantee to the garbage-collectable release; the controller surfaces a condition on the release when a completed seed deploy left no record behind.
+
 ---
 
 ## 4. Native `zarf.dev/v1beta1` Package Support
@@ -250,7 +268,7 @@ For each workload cluster:
 2. **Kubeconfig Resolution**:
    CAAPZ retrieves the cluster's administrative kubeconfig secret (`<cluster-name>-kubeconfig`) using CAPI's cluster client cache.
 3. **Seed Check**:
-   If `spec.strategy == ApplyOnce`, verify if a completed `ZarfPackageRelease` already exists. If yes, skip execution.
+   If `spec.strategy == ApplyOnce`, skip execution when the release is already `applied: true`. Otherwise probe the workload cluster for the package's `zarf-package-<name>` deployed-package secret in the `zarf` namespace; if present, mark the release `Completed` without deploying (see §3, "Where the 'never re-execute' record actually lives").
 4. **OCI Pull & Signature Verification**:
    The package is fetched from the OCI registry to local cache storage on the controller pod. If `signatureKeySecretRef` is set, verify the Cosign signature against the public key before extracting layers.
 5. **Auto-Init Check**:
@@ -273,7 +291,7 @@ A critical architectural pitfall in add-on controllers (including earlier versio
 
 ### B. Graceful Degradation on Unreachable Clusters
 - When an infrastructure provider tears down VMs (or when connectivity to the workload API drops), attempts to uninstall or communicate will fail (`connection refused` or `context deadline exceeded`).
-- CAAPZ treats cluster deletion as an infrastructure-level wipe: since destroying the cluster destroys all underlying compute and storage (disks, nodes, namespaces), attempting an orderly Zarf uninstall over the wire is neither necessary nor desirable. The controller discards state without blocking CAPI or Machine deletion.
+- CAAPZ treats cluster deletion as an infrastructure-level wipe for *teardown* purposes: attempting an orderly Zarf uninstall over the wire is neither necessary nor desirable, and the controller discards its state without blocking CAPI or Machine deletion. But Cluster-object deletion is **not always** an infrastructure wipe - `clusterctl move` and de-import/re-import delete the object while the cluster lives on - which is why the ApplyOnce guarantee is anchored on the workload cluster itself rather than on anything garbage-collected in this cascade (§3).
 
 ---
 
