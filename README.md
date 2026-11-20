@@ -19,7 +19,7 @@ CAAPZ runs as a controller in the management cluster. A platform team declares a
 | `ZarfPackageRelease` | The controller | One cluster's deployment of one proxy - its phase, deployed version, conditions |
 
 ```yaml
-apiVersion: addons.cluster.x-k8s.io/v1alpha1
+apiVersion: addons.colonel-byte.dev/v1alpha1
 kind: ZarfPackageProxy
 metadata:
   name: security-baseline

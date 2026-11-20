@@ -229,6 +229,10 @@ Test files and YAML fixtures hand-encode `../` depth to reach the repository roo
 
 OpenSSF Scorecard's `isTestdataFile` logic excludes anything under a `src/test/` or `testdata/` prefix from every check, by path convention. A plain `test/` prefix gets no such exclusion - so don't rely on a `test/`-adjacent path to keep something out of a check. Read `isTestdataFile` in `checks/fileparser/listing.go` upstream if it matters.
 
+### Package pulls need a large writable cache directory
+
+A quirk inherited from cluster-api-provider-cargoship: Zarf packages are whole-platform OCI artifacts, routinely tens of gigabytes, and the controller pulls them to local disk before deploying. The `--cache-path` flag (default `/var/lib/caapz/cache`) must point at a mount sized for the largest package plus its extraction - a default `emptyDir` on a small node disk fills silently and the failure surfaces as an OCI pull error, not a disk error. The manager deployment manifest carries that volume; size it with the operator, not by guess.
+
 ### `docs/agent/choice-*.md` are constraints, not history
 
 When a decision looks reversible from the code alone, check `docs/agent/` first. These are usually the record of a tradeoff already made on purpose, not an oversight waiting to be cleaned up.
