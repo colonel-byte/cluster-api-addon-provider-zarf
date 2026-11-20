@@ -17,6 +17,7 @@ package v1alpha1
 import (
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -139,6 +140,48 @@ type ComponentSelector struct {
 	Flavor string `json:"flavor,omitempty"`
 }
 
+// DeployJobOptions customizes the Kubernetes Job the controller runs each deploy in. Every
+// field is optional; the defaults are a restricted pod security profile and an emptyDir cache
+// volume. Supply a volume named "zarf-cache" to replace the default cache emptyDir - the quirk
+// in AGENTS.md on package sizes is the reason to.
+type DeployJobOptions struct {
+	// image overrides the deploy pod's image. Defaults to the controller's --deploy-image.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// serviceAccountName is the service account the deploy pod runs as.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// podSecurityContext overrides the pod-level security context (default: runAsNonRoot,
+	// RuntimeDefault seccomp).
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// securityContext overrides the deploy container's security context (default: no privilege
+	// escalation, all capabilities dropped, read-only root filesystem).
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// volumes are added to the deploy pod. A volume named "zarf-cache" replaces the default
+	// emptyDir cache volume and is mounted at the cache path.
+	// +optional
+	Volumes []corev1.Volume `json:"volumes,omitempty"`
+
+	// volumeMounts are added to the deploy container, alongside the cache and kubeconfig mounts.
+	// +optional
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
+	// nodeSelector constrains which nodes the deploy pod schedules to - for example, nodes with
+	// disks sized for the package cache.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// tolerations are added to the deploy pod.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+}
+
 // ZarfPackageProxySpec declares a package's desired state across every matching cluster.
 // +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package.api) && self.package.api == 'v1alpha1')",message="spec.set requires spec.package.api: v1alpha1; v1beta1 packages take spec.values"
 type ZarfPackageProxySpec struct {
@@ -182,6 +225,10 @@ type ZarfPackageProxySpec struct {
 	// templating as values. Deprecated on the same schedule as v1alpha1 package support.
 	// +optional
 	Set map[string]string `json:"set,omitempty"`
+
+	// deployJob customizes the Kubernetes Job each deploy runs in.
+	// +optional
+	DeployJob *DeployJobOptions `json:"deployJob,omitempty"`
 }
 
 // ZarfPackageProxyStatus is the observed state across matching clusters.
