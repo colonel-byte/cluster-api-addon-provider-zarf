@@ -29,12 +29,25 @@ import (
 // against CAPI Clusters and stamps one ZarfPackageRelease per match.
 type ZarfPackageProxyReconciler struct {
 	client.Client
+
+	// CachePath is the directory pulled Zarf packages are cached in. It must sit on a mount
+	// sized for the largest package plus its extraction - see AGENTS.md's quirks section.
+	CachePath string
+
+	// ClusterNamespaces are the namespaces other than a proxy's own it may select Clusters in;
+	// "*" allows any. Empty refuses every cross-namespace selection, surfaced as a condition
+	// with reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
+	ClusterNamespaces []string
+
+	// SecretNamespaces are the namespaces other than a proxy's own it may name a secret in;
+	// same semantics as ClusterNamespaces, mirroring cargoship's --secret-namespaces.
+	SecretNamespaces []string
 }
 
-// +kubebuilder:rbac:groups=addons.cluster.x-k8s.io,resources=zarfpackageproxies,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=addons.cluster.x-k8s.io,resources=zarfpackageproxies/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=addons.cluster.x-k8s.io,resources=zarfpackagereleases,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=addons.cluster.x-k8s.io,resources=zarfpackagereleases/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackageproxies,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackageproxies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackagereleases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackagereleases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 

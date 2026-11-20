@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -32,12 +33,38 @@ import (
 	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/controller"
 )
 
+// namespaceListFlag registers a comma-separated namespace list flag and returns the parsed list.
+// Whitespace is trimmed and empty entries dropped; nil until flag.Parse runs.
+func namespaceListFlag(name, usage string) *[]string {
+	list := &[]string{}
+	flag.Func(name, usage, func(v string) error {
+		*list = nil
+		for _, ns := range strings.Split(v, ",") {
+			if ns = strings.TrimSpace(ns); ns != "" {
+				*list = append(*list, ns)
+			}
+		}
+		return nil
+	})
+	return list
+}
+
 func main() {
-	var metricsAddr, probeAddr string
+	var metricsAddr, probeAddr, cachePath string
 	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to, or 0 to disable")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address the probe endpoint binds to")
+	// Zarf packages are whole-platform OCI artifacts, routinely tens of gigabytes; this mount
+	// has to be sized for the largest package plus its extraction. See "Quirks worth knowing"
+	// in AGENTS.md.
+	flag.StringVar(&cachePath, "cache-path", "/var/lib/caapz/cache", "directory pulled Zarf packages are cached in; mount a volume sized for the largest package")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "run only one active replica")
+	// Mirrors cargoship's --secret-namespaces design: empty refuses every cross-namespace
+	// selection or reference, surfaced as a CrossNamespaceNotEnabled condition.
+	clusterNamespaces := namespaceListFlag("cluster-namespaces",
+		"comma-separated namespaces a proxy may select Clusters in besides its own, or * for any; empty allows none")
+	secretNamespaces := namespaceListFlag("secret-namespaces",
+		"comma-separated namespaces a proxy may reference a secret in besides its own, or * for any; empty allows none")
 	zapOpts := zap.Options{}
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -57,7 +84,7 @@ func main() {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "caapz.addons.cluster.x-k8s.io",
+		LeaderElectionID:       "caapz.addons.colonel-byte.dev",
 		HealthProbeBindAddress: probeAddr,
 	})
 	if err != nil {
@@ -65,7 +92,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconciler := &controller.ZarfPackageProxyReconciler{Client: mgr.GetClient()}
+	reconciler := &controller.ZarfPackageProxyReconciler{
+		Client:            mgr.GetClient(),
+		CachePath:         cachePath,
+		ClusterNamespaces: *clusterNamespaces,
+		SecretNamespaces:  *secretNamespaces,
+	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up the ZarfPackageProxy controller")
 		os.Exit(1)
