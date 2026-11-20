@@ -16,7 +16,18 @@ docs/index.md linguist-generated
 docs/security.md linguist-generated
 docs/SUMMARY.md linguist-generated
 
-# TEMPLATE: a generator added under magefiles/pkg/gen/ gets its output path listed here in the
+# go tool controller-gen object
+# Deepcopy methods for the API types, regenerated whenever a type in api/ changes:
+#   go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/...
+api/**/zz_generated.deepcopy.go linguist-generated
+
+# go tool controller-gen crd rbac
+# CRD and RBAC manifests rendered from the kubebuilder markers in api/ and internal/controller/:
+#   go tool controller-gen crd rbac:roleName=manager-role paths=./... output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+config/crd/bases/*.yaml linguist-generated
+config/rbac/role.yaml linguist-generated
+
+# A generator added under magefiles/pkg/gen/ gets its output path listed here in the
 # same change. Check a specific file rather than reasoning about the patterns:
 #
 #   git check-attr linguist-generated -- docs/index.md
