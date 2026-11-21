@@ -19,8 +19,11 @@ import (
 	"context"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
 )
@@ -79,6 +82,28 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 func (r *ZarfPackageProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&addonsv1alpha1.ZarfPackageProxy{}).
-		Owns(&addonsv1alpha1.ZarfPackageRelease{}).
+		// Not Owns: releases carry a Cluster controller-ownerRef, never a proxy one
+		// (architecture.md §8B), so an Owns watch would never fire. Release events route
+		// to the proxy named by spec.packageProxyRef instead - the wiring that lets a
+		// release phase change re-evaluate the proxy and its dependents (§5B).
+		Watches(&addonsv1alpha1.ZarfPackageRelease{}, handler.EnqueueRequestsFromMapFunc(releaseToProxy)).
 		Complete(r)
+}
+
+// releaseToProxy maps a release event to the proxy its packageProxyRef names, in the release's
+// namespace when the ref's namespace is empty. Routing only - the CrossNamespaceNotEnabled
+// gating happens in the reconciler, not here.
+func releaseToProxy(_ context.Context, obj client.Object) []reconcile.Request {
+	release, ok := obj.(*addonsv1alpha1.ZarfPackageRelease)
+	if !ok {
+		return nil
+	}
+	namespace := release.Spec.PackageProxyRef.Namespace
+	if namespace == "" {
+		namespace = release.Namespace
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: namespace,
+		Name:      release.Spec.PackageProxyRef.Name,
+	}}}
 }
