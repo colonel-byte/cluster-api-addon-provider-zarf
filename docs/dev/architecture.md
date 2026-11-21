@@ -293,7 +293,15 @@ Directed Acyclic Graph (DAG) validation runs **at reconcile time, not admission*
 7. **Status Update**:
    Update `ZarfPackageRelease.status` and surface condition `Ready: True` on the release and proxy objects.
 
----
+### Signature Trust Model
+
+`signatureKeySecretRef` adopts the sister cargoship repository's semantics verbatim (its `signatureKeySecretRef` field and the reasoning in its doc comment):
+
+- The reference names a Secret whose `cosign.pub` key holds the Cosign public key. It resolves in the proxy's namespace unless `--secret-namespaces` permits another (§2C), which is what bounds "anyone who can edit the proxy picks the key": a proxy author can only name keys their own namespace holds.
+- **Empty verifies nothing.** A signature with no key to check it against is not verification, so the controller logs that it could not verify and deploys anyway - for a signed package exactly as for an unsigned one. The `PackageSignatureVerified` condition is absent, not `True`.
+- **Naming a key makes verification a precondition.** An unsigned package, a signature the key does not verify, and a signature in a form that cannot be checked are all refused, and the refusal comes out of the package pull - before anything is extracted, cached further, or handed to a deploy Job. Verification binds to the pinned digest (§3), so a re-pushed tag never inherits a prior verification.
+- **Rotation is a Secret edit.** Verification runs on the passes that deploy, against the key as it currently reads, so a rotated key takes effect on the next reconcile and a Secret deleted under a converged fleet is reported as a failed precondition rather than noticed the next time something changes.
+- **Fleet-wide enforcement is deliberately deferred.** Per-proxy keys match the sister repository's model; a controller-level `--require-signature` flag (refuse any proxy with no key named) is the natural later addition if an environment needs "no unverified package, ever" as policy rather than convention.
 
 ## 7. Non-Blocking Cluster Deletion & Lifecycle Safety
 
