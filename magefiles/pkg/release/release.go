@@ -24,6 +24,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/magefiles/pkg/gen/ociartifact"
 )
 
 // Dir is where release artifacts land. Gitignored build output, recreated on every render.
@@ -134,4 +136,22 @@ func ZarfPackage() error {
 	create := exec.Command("zarf", args...)
 	create.Stdout, create.Stderr = os.Stdout, os.Stderr
 	return create.Run()
+}
+
+// OCIArtifact renders the manifests at tag and packs them into an OCI image layout under
+// out/oci, then tars it for travel. A layout rather than a push: the registry this is destined
+// for is usually on the other side of an air gap, so filling it is `oras cp --from-oci-layout`
+// on the inside. Tarred from inside the layout, because `--from-oci-layout` on a tar looks for
+// oci-layout and index.json at the archive root.
+func OCIArtifact(tag string) error {
+	if err := Manifests(tag); err != nil {
+		return err
+	}
+	if err := ociartifact.Generate(Dir, tag); err != nil {
+		return err
+	}
+	tarPath := fmt.Sprintf("addon-zarf-capi-provider-%s.oci.tar", tag)
+	pack := exec.Command("tar", "-C", filepath.Join(Dir, "oci"), "-cf", filepath.Join(Dir, tarPath), ".")
+	pack.Stdout, pack.Stderr = os.Stdout, os.Stderr
+	return pack.Run()
 }
