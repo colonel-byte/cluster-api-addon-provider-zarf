@@ -38,6 +38,26 @@ const (
 	PhaseFailed ReleasePhase = "Failed"
 )
 
+// ConditionDependenciesSatisfied is the release condition carrying the per-cluster dependsOn
+// verdict (docs/dev/architecture.md §5B). The rule that prevents deadlock: a dependency that
+// cannot be satisfied on this cluster is a named error reason, never a silent wait.
+const ConditionDependenciesSatisfied = "DependenciesSatisfied"
+
+const (
+	// ReasonDependenciesSatisfied is DependenciesSatisfied: True - every dependsOn entry has a
+	// release in phase Deployed or Completed on this cluster.
+	ReasonDependenciesSatisfied = "Satisfied"
+	// ReasonWaitingForDependency means the dependency's proxy exists and matches this cluster,
+	// and its release is pending or absent - the one case where progress is actually coming.
+	ReasonWaitingForDependency = "WaitingForDependency"
+	// ReasonDependencyNotApplicable means the dependency's proxy exists but its selector never
+	// matches this cluster - a configuration contradiction, deliberately an error rather than
+	// auto-satisfied so the label mistake is visible.
+	ReasonDependencyNotApplicable = "DependencyNotApplicable"
+	// ReasonDependencyNotFound means the dependency names no proxy in this namespace.
+	ReasonDependencyNotFound = "DependencyNotFound"
+)
+
 // ZarfPackageReleaseSpec binds one cluster to one proxy.
 type ZarfPackageReleaseSpec struct {
 	// clusterRef names the CAPI Cluster, in this namespace, the package deploys to.
