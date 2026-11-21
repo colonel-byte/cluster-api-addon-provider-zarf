@@ -66,6 +66,20 @@ archives:
         formats:
           - zip
 
+dockers_v2:
+  - id: manager
+    ids:
+      - cluster-api-addon-provider-zarf
+    images:
+      - ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: containers/manager/Dockerfile
+
 checksum:
   name_template: "checksums.txt"
 
@@ -106,10 +120,20 @@ signs:
     artifacts: archive
     stdin: "{{ .Env.COSIGN_PASSWORD }}"
 
+docker_signs:
+  - id: images
+    cmd: cosign
+    args:
+      - "sign"
+      - "--key=env://COSIGN_PRIVATE_KEY"
+      - "${artifact}@${digest}"
+      - "--yes"
+    stdin: "{{ .Env.COSIGN_PASSWORD }}"
+
 release:
   github:
-    owner: OWNER
-    name: REPO
+    owner: colonel-byte
+    name: cluster-api-addon-provider-zarf
   name_template: "v{{ .Version }}"
   mode: append
   footer: |-
@@ -125,4 +149,10 @@ release:
 
     ```console
     cosign verify-blob --key cosign.pub --bundle cluster-api-addon-provider-zarf_Linux_x86_64.tar.gz.sigstore.json cluster-api-addon-provider-zarf_Linux_x86_64.tar.gz
+    ```
+
+    Verify the controller image:
+
+    ```console
+    cosign verify --key cosign.pub ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:{{ .Version }}
     ```

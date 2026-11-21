@@ -6,6 +6,7 @@ What it produces, from [`.goreleaser.yaml`](https://github.com/colonel-byte/clus
 
 - one binary per `goos`/`goarch` pair, version and commit baked in via `-ldflags -X`
 - a `tar.gz` per platform, `zip` on Windows, named to match `uname` output
+- the controller image `ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller`, built for `linux/amd64` and `linux/arm64` from `containers/manager/Dockerfile` and cosign-signed (`docker_signs:`) - which is why the workflow sets up QEMU, Buildx, and a ghcr.io login before goreleaser runs, and why the job holds `packages: write`
 - `checksums.txt`, an SBOM per archive, a cosign bundle per archive and for the checksums file
 - a build provenance attestation over `checksums.txt`, uploaded to the release
 
