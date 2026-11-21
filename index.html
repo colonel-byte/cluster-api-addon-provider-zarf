@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bb0c9091.js";
+            window.path_to_searchindex_js = "searchindex-ddb10595.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-f0a4f2c1.js"></script>
+        <script src="toc-2c30f17f.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -192,7 +192,7 @@
 <p><strong>Status: early development.</strong> The CRDs and controller are being built; nothing is released yet.</p>
 </blockquote>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
-<p>CAAPZ runs as a controller in the management cluster. A platform team declares a <code>ZarfPackageProxy</code> naming a package in an internal OCI registry and a <code>clusterSelector</code>; for every matching CAPI <code>Cluster</code>, the controller pulls the package, verifies its Cosign signature, resolves the cluster’s kubeconfig secret, deploys the package over the wire via Zarf’s Go SDK, and records the result in a per-cluster <code>ZarfPackageRelease</code> owned by that <code>Cluster</code>. The full design - dependency ordering, <code>ApplyOnce</code> seed packages, auto-init, non-blocking cluster deletion - is in <a href="dev/architecture.html"><code>docs/dev/architecture.md</code></a>.</p>
+<p>CAAPZ runs as a controller in the management cluster. A platform team declares a <code>ZarfPackageProxy</code> naming a package in an internal OCI registry and a <code>clusterSelector</code>; for every matching CAPI <code>Cluster</code>, the controller resolves the package to a digest, verifies its Cosign signature, and stamps a deploy Job that mounts the cluster’s kubeconfig secret, pulls the verified digest, and deploys it over the wire via Zarf’s Go SDK - the result is recorded in a per-cluster <code>ZarfPackageRelease</code> owned by that <code>Cluster</code>. The controller itself never pulls or deploys a package. The full design - dependency ordering, <code>ApplyOnce</code> seed packages, auto-init, non-blocking cluster deletion - is in <a href="dev/architecture.html"><code>docs/dev/architecture.md</code></a>.</p>
 <h2 id="custom-resources"><a class="header" href="#custom-resources">Custom resources</a></h2>
 <div class="table-wrapper">
 <table>

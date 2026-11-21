@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bb0c9091.js";
+            window.path_to_searchindex_js = "../searchindex-ddb10595.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-f0a4f2c1.js"></script>
+        <script src="../toc-2c30f17f.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -187,7 +187,7 @@
 <p>The goal of CAAPZ is to automate the deployment, day-2 lifecycle, and one-time initialization (“seed”) of self-contained Zarf packages onto CAPI workload clusters across air-gapped enterprise environments.</p>
 <hr>
 <h2 id="1-high-level-architecture"><a class="header" href="#1-high-level-architecture">1. High-Level Architecture</a></h2>
-<p>CAAPZ operates in the management cluster as an add-on controller. It watches CAPI <code>Cluster</code> resources, retrieves target cluster credentials via CAPI’s remote cluster cache, pulls packages from an internal or OCI registry, and drives Zarf deployment directly via Zarf’s Go SDK against the workload cluster API.</p>
+<p>CAAPZ operates in the management cluster as an add-on controller. It watches CAPI <code>Cluster</code> resources, resolves and verifies packages in an internal OCI registry by digest, and stamps one Kubernetes deploy Job per cluster - the Job mounts that cluster’s kubeconfig and drives Zarf deployment via Zarf’s Go SDK against the workload cluster API (§6 step 6). The controller itself never deploys.</p>
 <pre><code>┌────────────────────────────────────────────────────────────────────────┐
 │                        Management Cluster                              │
 │                                                                        │
@@ -200,10 +200,10 @@
 │     │ CAAPZ Controller                                           │     │
 │     │                                                            │     │
 │     │ 1. Watches Clusters &amp; ZarfPackageProxy                     │     │
-│     │ 2. Pulls package from internal Zarf OCI mirror             │     │
-│     │ 3. Verifies Cosign signature before extraction             │     │
-│     │ 4. Obtains target cluster REST config                      │     │
-│     │ 5. Executes Zarf Deploy via Go API / SDK                   │     │
+│     │ 2. Reads the internal Zarf OCI mirror                      │     │
+│     │ 3. Resolves digest, verifies signature                     │     │
+│     │ 4. Stamps a deploy Job per cluster                         │     │
+│     │ 5. Job runs Zarf deploy via kubeconfig                     │     │
 │     │ 6. Creates &amp; tracks per-cluster ZarfPackageRelease CR      │     │
 │     └──────────────────────────────┬─────────────────────────────┘     │
 └────────────────────────────────────┼───────────────────────────────────┘
@@ -332,7 +332,7 @@ status:
 <li>
 <p><strong><code>strategy: ApplyOnce</code> (Seed / Initialization Package)</strong>:</p>
 <ul>
-<li>When a new cluster matching the selector is discovered or imported, the controller pulls and applies the Zarf package.</li>
+<li>When a new cluster matching the selector is discovered or imported, a deploy Job (§6 step 6) pulls and applies the Zarf package.</li>
 <li>Once the deployment succeeds, the <code>ZarfPackageRelease</code> is marked <code>phase: Completed</code> and <code>applied: true</code>.</li>
 <li>The controller will <strong>never re-execute</strong> this package against that cluster, even if the proxy’s spec or variables change.</li>
 <li>Ideal for Day-0/Day-1 cluster bootstrap hooks and registration payloads.</li>
@@ -448,12 +448,22 @@ The controller watches for CAPI <code>Cluster</code> resources reaching <code>st
 CAAPZ retrieves the cluster’s administrative kubeconfig secret (<code>&lt;cluster-name&gt;-kubeconfig</code>) using CAPI’s cluster client cache.</li>
 <li><strong>Seed Check</strong>:
 If <code>spec.strategy == ApplyOnce</code>, skip execution when the release is already <code>applied: true</code>. Otherwise probe the workload cluster for the package’s <code>zarf-package-&lt;name&gt;</code> deployed-package secret in the <code>zarf</code> namespace; if present, mark the release <code>Completed</code> without deploying (see §3, “Where the ‘never re-execute’ record actually lives”).</li>
-<li><strong>OCI Pull &amp; Signature Verification</strong>:
-The package is fetched from the OCI registry <strong>by its pinned digest</strong> (<code>status.resolvedDigest</code>, §3) to local cache storage. If <code>signatureKeySecretRef</code> is set, verify the Cosign signature against the public key before extracting layers; verification binds to the digest, so a re-pushed tag never inherits a prior verification.</li>
+<li><strong>Digest Resolution &amp; Signature Verification</strong>:
+The controller resolves the tag to its pinned digest (<code>status.resolvedDigest</code>, §3) and, if <code>signatureKeySecretRef</code> is set, verifies the Cosign signature against that digest <strong>in the controller, at resolution time</strong> - a manifest-and-signature read against the registry, not a package pull, so the controller needs no package-sized disk. The deploy Job later pulls that verified digest: content addressing makes the verified artifact and the deployed artifact the same bytes. Verification binds to the digest, so a re-pushed tag never inherits a prior verification. See <code>docs/agent/choice-deploy-job.md</code> for why verification sits here rather than in the Job.</li>
 <li><strong>Auto-Init Check</strong>:
 If <code>spec.init.autoInit == true</code>, probe the target cluster for Zarf state (<code>zarf-state</code> secret in <code>zarf</code> namespace). If absent, deploy the Zarf init package first.</li>
-<li><strong>Deploy Execution</strong>:
-Render variables (<code>{{ .Cluster.metadata.name }}</code>), assemble <code>types.ZarfDeployOptions</code>, and invoke the Zarf packager engine using the remote target cluster’s REST configuration.</li>
+<li><strong>Deploy Execution (the deploy Job)</strong>:
+Render values and variables (<code>{{ .Cluster.metadata.name }}</code>) and stamp one Kubernetes Job per release - <strong>a deploy never runs in the controller process</strong>. The Job’s contract, which §4C, the Signature Trust Model, and §8A reference:
+<ul>
+<li>It runs the controller’s own image (or <code>spec.deployJob.image</code>) with a <code>deploy</code> subcommand. <strong>The pod acts as a pure operator: its entire input is files on disk</strong> - a rendered deploy spec the controller writes to a per-release Secret and mounts (package repository pinned by digest, rendered values and variables, component selection), the kubeconfig, and the cache. It holds no management-cluster credentials and makes no management-cluster API calls; the subcommand assembles <code>packager.DeployOptions</code> from the spec file alone.</li>
+<li>Results return in the pod’s termination message; the controller reads the finished Job and patches <code>ZarfPackageRelease.status</code>. The deploy pod’s service account grants nothing.</li>
+<li>The target cluster’s <code>&lt;cluster-name&gt;-kubeconfig</code> secret is mounted and <code>KUBECONFIG</code> points at it - the Zarf SDK resolves its target from the process environment, so the pod’s environment is what selects the cluster. No mutex, no serialization: deploys to different clusters are different pods.</li>
+<li>The package is pulled inside the Job <strong>by the verified digest from step 4</strong> (<code>repository@digest</code>, never a tag) into the Job’s <code>zarf-cache</code> volume (default <code>emptyDir</code>, PVC-replaceable via <code>spec.deployJob.volumes</code>).</li>
+<li>The pod runs a restricted security profile by default; <code>spec.deployJob</code> exposes the knobs (service account, security contexts, volumes and mounts, node selector, tolerations). A package <code>action</code> - arbitrary command execution - is thereby contained to a pod holding one cluster’s kubeconfig, not the fleet-wide controller.</li>
+<li><code>backoffLimit: 0</code>: the controller owns retries, so the release stays the single record of attempts. The Job is controller-owned by its release and garbage-collects with it; a removal Job (§8) reuses this same contract with a <code>remove</code> subcommand.
+Why a Job rather than the in-process SDK - and why verification precedes it - is recorded in <code>docs/agent/choice-deploy-job.md</code>.</li>
+</ul>
+</li>
 <li><strong>Status Update</strong>:
 Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready: True</code> on the release and proxy objects.</li>
 </ol>
@@ -462,7 +472,7 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 <ul>
 <li>The reference names a Secret whose <code>cosign.pub</code> key holds the Cosign public key. It resolves in the proxy’s namespace unless <code>--secret-namespaces</code> permits another (§2C), which is what bounds “anyone who can edit the proxy picks the key”: a proxy author can only name keys their own namespace holds.</li>
 <li><strong>Empty verifies nothing.</strong> A signature with no key to check it against is not verification, so the controller logs that it could not verify and deploys anyway - for a signed package exactly as for an unsigned one. The <code>PackageSignatureVerified</code> condition is absent, not <code>True</code>.</li>
-<li><strong>Naming a key makes verification a precondition.</strong> An unsigned package, a signature the key does not verify, and a signature in a form that cannot be checked are all refused, and the refusal comes out of the package pull - before anything is extracted, cached further, or handed to a deploy Job. Verification binds to the pinned digest (§3), so a re-pushed tag never inherits a prior verification.</li>
+<li><strong>Naming a key makes verification a precondition.</strong> An unsigned package, a signature the key does not verify, and a signature in a form that cannot be checked are all refused, and the refusal comes out of digest resolution in the controller (§6 step 4) - <strong>before a deploy Job is ever stamped</strong>, so unverified content never reaches a pod holding a cluster’s kubeconfig. The Job then pulls the verified digest; content addressing makes what was verified and what is deployed the same bytes. Verification binds to the pinned digest (§3), so a re-pushed tag never inherits a prior verification.</li>
 <li><strong>Rotation is a Secret edit.</strong> Verification runs on the passes that deploy, against the key as it currently reads, so a rotated key takes effect on the next reconcile and a Secret deleted under a converged fleet is reported as a failed precondition rather than noticed the next time something changes.</li>
 <li><strong>Fleet-wide enforcement is deliberately deferred.</strong> Per-proxy keys match the sister repository’s model; a controller-level <code>--require-signature</code> flag (refuse any proxy with no key named) is the natural later addition if an environment needs “no unverified package, ever” as policy rather than convention.</li>
 </ul>
