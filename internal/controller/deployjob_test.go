@@ -15,6 +15,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -89,6 +90,14 @@ func TestBuildDeployJobDefaults(t *testing.T) {
 	}
 	if byName[cacheVolumeName].EmptyDir == nil {
 		t.Errorf("default cache volume is not an emptyDir: %+v", byName[cacheVolumeName])
+	}
+	if byName["spec"].Secret == nil || byName["spec"].Secret.SecretName != "example-security-baseline-deploy-spec" {
+		t.Errorf("rendered-spec volume wrong: %+v", byName["spec"])
+	}
+	for _, arg := range container.Args {
+		if strings.Contains(arg, ":") && strings.Contains(arg, "/") {
+			t.Errorf("args carry a registry reference (%q); the pod's only inputs are mounted files", arg)
+		}
 	}
 }
 

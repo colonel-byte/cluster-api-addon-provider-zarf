@@ -229,9 +229,9 @@ Test files and YAML fixtures hand-encode `../` depth to reach the repository roo
 
 OpenSSF Scorecard's `isTestdataFile` logic excludes anything under a `src/test/` or `testdata/` prefix from every check, by path convention. A plain `test/` prefix gets no such exclusion - so don't rely on a `test/`-adjacent path to keep something out of a check. Read `isTestdataFile` in `checks/fileparser/listing.go` upstream if it matters.
 
-### Package pulls need a large writable cache directory
+### Deploy pods need a large writable cache volume; the controller needs none
 
-A quirk inherited from cluster-api-provider-cargoship: Zarf packages are whole-platform OCI artifacts, routinely tens of gigabytes, and the controller pulls them to local disk before deploying. The `--cache-path` flag (default `/var/lib/caapz/cache`) must point at a mount sized for the largest package plus its extraction - a default `emptyDir` on a small node disk fills silently and the failure surfaces as an OCI pull error, not a disk error. The manager deployment manifest carries that volume; size it with the operator, not by guess.
+A quirk inherited from cluster-api-provider-cargoship, relocated by the deploy-Job model: Zarf packages are whole-platform OCI artifacts, routinely tens of gigabytes, and each deploy Job pulls its package to pod-local disk before deploying. The controller holds no package cache - its registry traffic is manifest-and-signature reads. The `--cache-path` flag (default `/var/lib/caapz/cache`) names the mount path of the `zarf-cache` volume *inside deploy pods*; the volume behind it defaults to an `emptyDir`, which fills a small node disk silently and surfaces as an OCI pull error, not a disk error. Replace it with a PVC via `spec.deployJob.volumes` sized for the largest package plus its extraction - with the operator, not by guess - and steer deploy pods to big-disk nodes with `spec.deployJob.nodeSelector`.
 
 ### `docs/agent/choice-*.md` are constraints, not history
 

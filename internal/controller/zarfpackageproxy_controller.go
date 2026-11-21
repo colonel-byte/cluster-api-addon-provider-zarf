@@ -33,8 +33,9 @@ import (
 type ZarfPackageProxyReconciler struct {
 	client.Client
 
-	// CachePath is the directory pulled Zarf packages are cached in. It must sit on a mount
-	// sized for the largest package plus its extraction - see AGENTS.md's quirks section.
+	// CachePath is the mount path of the zarf-cache volume inside deploy pods - where each
+	// deploy Job caches its pulled package. The controller holds no cache of its own; sizing
+	// is a deploy-pod volume concern - see AGENTS.md's quirks section.
 	CachePath string
 
 	// DeployImage is the image deploy Jobs run when a proxy does not override it - normally
@@ -84,8 +85,9 @@ func (r *ZarfPackageProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&addonsv1alpha1.ZarfPackageProxy{}).
 		// Not Owns: releases carry a Cluster controller-ownerRef, never a proxy one
 		// (architecture.md §8B), so an Owns watch would never fire. Release events route
-		// to the proxy named by spec.packageProxyRef instead - the wiring that lets a
-		// release phase change re-evaluate the proxy and its dependents (§5B).
+		// to the release's own proxy via spec.packageProxyRef. §5B's dependent fan-out -
+		// requeueing proxies whose dependsOn names this release's proxy - is a second
+		// mapping that does not exist yet; until it does, dependents re-evaluate on resync.
 		Watches(&addonsv1alpha1.ZarfPackageRelease{}, handler.EnqueueRequestsFromMapFunc(releaseToProxy)).
 		Complete(r)
 }

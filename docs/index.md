@@ -11,7 +11,7 @@ A Cluster API add-on provider for [Zarf](https://github.com/zarf-dev/zarf) packa
 
 ## How it works
 
-CAAPZ runs as a controller in the management cluster. A platform team declares a `ZarfPackageProxy` naming a package in an internal OCI registry and a `clusterSelector`; for every matching CAPI `Cluster`, the controller pulls the package, verifies its Cosign signature, resolves the cluster's kubeconfig secret, deploys the package over the wire via Zarf's Go SDK, and records the result in a per-cluster `ZarfPackageRelease` owned by that `Cluster`. The full design - dependency ordering, `ApplyOnce` seed packages, auto-init, non-blocking cluster deletion - is in [`docs/dev/architecture.md`](dev/architecture.md).
+CAAPZ runs as a controller in the management cluster. A platform team declares a `ZarfPackageProxy` naming a package in an internal OCI registry and a `clusterSelector`; for every matching CAPI `Cluster`, the controller resolves the package to a digest, verifies its Cosign signature, and stamps a deploy Job that mounts the cluster's kubeconfig secret, pulls the verified digest, and deploys it over the wire via Zarf's Go SDK - the result is recorded in a per-cluster `ZarfPackageRelease` owned by that `Cluster`. The controller itself never pulls or deploys a package. The full design - dependency ordering, `ApplyOnce` seed packages, auto-init, non-blocking cluster deletion - is in [`docs/dev/architecture.md`](dev/architecture.md).
 
 ## Custom resources
 

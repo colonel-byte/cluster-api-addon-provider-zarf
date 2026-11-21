@@ -54,10 +54,10 @@ func main() {
 	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to, or 0 to disable")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "address the probe endpoint binds to")
-	// Zarf packages are whole-platform OCI artifacts, routinely tens of gigabytes; this mount
-	// has to be sized for the largest package plus its extraction. See "Quirks worth knowing"
-	// in AGENTS.md.
-	flag.StringVar(&cachePath, "cache-path", "/var/lib/caapz/cache", "directory pulled Zarf packages are cached in; mount a volume sized for the largest package")
+	// Zarf packages are whole-platform OCI artifacts, routinely tens of gigabytes; the volume
+	// behind this path in each deploy pod has to be sized for the largest package plus its
+	// extraction. The controller itself holds no cache. See "Quirks worth knowing" in AGENTS.md.
+	flag.StringVar(&cachePath, "cache-path", "/var/lib/caapz/cache", "mount path of the zarf-cache volume inside deploy pods; back it with a volume sized for the largest package")
 	flag.StringVar(&deployImage, "deploy-image", "", "image deploy Jobs run; normally this controller's own image")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "run only one active replica")
 	// Mirrors cargoship's --secret-namespaces design: empty refuses every cross-namespace
