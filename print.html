@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-2637c8ed.js";
+            window.path_to_searchindex_js = "searchindex-d9d0d95f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-f0a4f2c1.js"></script>
@@ -488,6 +488,21 @@ status:
 </ul>
 </li>
 </ol>
+<h4 id="where-the-never-re-execute-record-actually-lives"><a class="header" href="#where-the-never-re-execute-record-actually-lives">Where the “never re-execute” record actually lives</a></h4>
+<p>The <code>ZarfPackageRelease</code> is a cache of the guarantee, not the guarantee itself: it is deliberately garbage-collected with its owning <code>Cluster</code> (§7), and a <code>Cluster</code> object is deleted <em>without the infrastructure being wiped</em> during <code>clusterctl move</code> and de-import/re-import - exactly the imported-cluster flows seed packages target. The durable record is the one Zarf itself writes on the workload cluster: every deploy stores a <code>zarf-package-&lt;name&gt;</code> secret (labeled <code>package-deploy-info</code>) in the <code>zarf</code> namespace, which survives management-cluster churn because it lives on the physical cluster being guarded.</p>
+<p>So the seed check is two-tier:</p>
+<ul>
+<li><code>status.applied: true</code> on an existing release short-circuits the reconcile with no workload-cluster round trip.</li>
+<li>When the release is missing or not yet applied - the only states in which a deploy would fire - the controller first probes the workload cluster for the package’s deployed-package secret. If present, the release is marked <code>Completed</code>/<code>applied: true</code> <strong>without re-executing</strong> (adoption); only a cluster with no record is seeded.</li>
+</ul>
+<p>Consequences, all deliberate:</p>
+<ul>
+<li>Re-importing a live cluster re-creates its releases but does not re-run its seed packages.</li>
+<li>Hand-deleting a <code>ZarfPackageRelease</code> does not re-run the seed; the recreated release adopts the existing record.</li>
+<li>The escape hatch for intentionally re-seeding is removing the package’s record on the workload cluster (<code>zarf package remove</code>, or deleting the <code>zarf-package-&lt;name&gt;</code> secret) - an explicit operator action against the cluster being re-seeded.</li>
+<li>Wiping and rebuilding infrastructure behind the same <code>Cluster</code> object re-seeds, because the rebuilt cluster carries no record. That is the desired reading of “once per physical cluster”.</li>
+</ul>
+<p>One restriction follows: Zarf only stores the deployed-package record when the package has at least one cluster-touching component, so <strong>an ApplyOnce package must include one</strong>. A pure-actions package would leave no durable record, silently degrading the guarantee to the garbage-collectable release; the controller surfaces a condition on the release when a completed seed deploy left no record behind.</p>
 <hr>
 <h2 id="4-native-zarfdevv1beta1-package-support"><a class="header" href="#4-native-zarfdevv1beta1-package-support">4. Native <code>zarf.dev/v1beta1</code> Package Support</a></h2>
 <p>CAAPZ natively implements the modern <code>zarf.dev/v1beta1</code> Zarf package schema while maintaining backward compatibility with <code>zarf.dev/v1alpha1</code>:</p>
@@ -532,29 +547,28 @@ spec:
     - csi-ceph
 </code></pre>
 <h3 id="b-dependency-resolution--reconcile-gating"><a class="header" href="#b-dependency-resolution--reconcile-gating">B. Dependency Resolution &amp; Reconcile Gating</a></h3>
-<p>For each workload cluster:</p>
-<ol>
-<li>When reconciling <code>logging-stack</code> for cluster <code>example-cluster</code>, the controller inspects the status of the prerequisite <code>ZarfPackageRelease</code> objects for <code>example-cluster</code>:
+<p>For each workload cluster, every entry in <code>dependsOn</code> is resolved to a verdict. The rule that prevents deadlock: <strong>a dependency that cannot be satisfied on this cluster is a named error condition, never a silent wait.</strong> Waiting is reserved for the one case where progress is actually coming.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Dependency state on this cluster</th><th>Verdict</th><th><code>DependenciesSatisfied</code> reason</th></tr>
+</thead>
+<tbody>
+<tr><td>Release exists in phase <code>Deployed</code> (or <code>Completed</code>)</td><td>satisfied</td><td>-</td></tr>
+<tr><td>Proxy exists, selector matches, release pending or absent</td><td>wait</td><td><code>WaitingForDependency</code></td></tr>
+<tr><td>Proxy exists but its selector does not match this cluster</td><td>error</td><td><code>DependencyNotApplicable</code></td></tr>
+<tr><td>Proxy does not exist in this namespace</td><td>error</td><td><code>DependencyNotFound</code></td></tr>
+</tbody>
+</table>
+</div>
 <ul>
-<li><code>example-zarf-init</code></li>
-<li><code>example-csi-ceph</code></li>
+<li>The dependent release holds in <code>phase: Pending</code> with <code>DependenciesSatisfied: False</code> and the reason above; the message names the offending dependency.</li>
+<li><code>DependencyNotApplicable</code> is deliberately an error rather than auto-satisfied: declaring “X needs Y here” when Y’s selector will never match this cluster is a configuration contradiction, and silently skipping the ordering would hide exactly the label mistake the admin needs to see.</li>
+<li>All verdicts are level-triggered: fixing labels, creating the missing proxy, or the dependency deploying re-evaluates the dependent with no operator intervention. Re-evaluation is watch-driven - the proxy reconciler watches <code>ZarfPackageRelease</code> phase changes and maps them back to dependents - with the periodic resync as backstop; there is no requeue polling loop.</li>
+<li>A dependency proxy deleted <em>after</em> its ApplyOnce package seeded a cluster reports <code>DependencyNotFound</code>, even though the package is on the cluster. This is strict on purpose - keep proxies that the dependency graph references. (Softening it by probing the workload cluster’s deployed-package record (§3) is a possible later relaxation, not a commitment.)</li>
 </ul>
-</li>
-<li><strong>Readiness Gate</strong>:
-<ul>
-<li>The dependent package is held in <code>phase: Pending</code> with condition:
-<pre><code class="language-yaml">type: DependenciesSatisfied
-status: "False"
-reason: WaitingForDependency
-message: "dependency 'csi-ceph' is not yet in phase 'Deployed'"
-</code></pre>
-</li>
-<li>The controller requeues until all dependencies report <code>status.phase: Deployed</code> (or <code>Completed</code> for seed packages).</li>
-</ul>
-</li>
-<li><strong>Circular Dependency Detection</strong>:
-Directed Acyclic Graph (DAG) validation runs during admission and reconcile to reject dependency loops before any deploy begins.</li>
-</ol>
+<h3 id="c-circular-dependency-detection"><a class="header" href="#c-circular-dependency-detection">C. Circular Dependency Detection</a></h3>
+<p>Directed Acyclic Graph (DAG) validation runs <strong>at reconcile time, not admission</strong> - cross-object graph checks cannot be expressed in CEL, and a validating webhook is not worth its cert plumbing in air-gapped installs when admission-time validation can be invalidated by the very next edit to a <em>different</em> proxy anyway. Each reconcile builds the dependency graph from the namespace’s proxies (informer cache, no API round trips) and runs a cycle check; every proxy in a detected cycle gets <code>DependenciesValid: False, reason: DependencyCycle</code> and deploys nothing until the cycle is broken.</p>
 <hr>
 <h2 id="6-reconcile-workflow"><a class="header" href="#6-reconcile-workflow">6. Reconcile Workflow</a></h2>
 <ol>
@@ -563,7 +577,7 @@ The controller watches for CAPI <code>Cluster</code> resources reaching <code>st
 <li><strong>Kubeconfig Resolution</strong>:
 CAAPZ retrieves the cluster’s administrative kubeconfig secret (<code>&lt;cluster-name&gt;-kubeconfig</code>) using CAPI’s cluster client cache.</li>
 <li><strong>Seed Check</strong>:
-If <code>spec.strategy == ApplyOnce</code>, verify if a completed <code>ZarfPackageRelease</code> already exists. If yes, skip execution.</li>
+If <code>spec.strategy == ApplyOnce</code>, skip execution when the release is already <code>applied: true</code>. Otherwise probe the workload cluster for the package’s <code>zarf-package-&lt;name&gt;</code> deployed-package secret in the <code>zarf</code> namespace; if present, mark the release <code>Completed</code> without deploying (see §3, “Where the ‘never re-execute’ record actually lives”).</li>
 <li><strong>OCI Pull &amp; Signature Verification</strong>:
 The package is fetched from the OCI registry to local cache storage on the controller pod. If <code>signatureKeySecretRef</code> is set, verify the Cosign signature against the public key before extracting layers.</li>
 <li><strong>Auto-Init Check</strong>:
@@ -585,10 +599,32 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 <h3 id="b-graceful-degradation-on-unreachable-clusters"><a class="header" href="#b-graceful-degradation-on-unreachable-clusters">B. Graceful Degradation on Unreachable Clusters</a></h3>
 <ul>
 <li>When an infrastructure provider tears down VMs (or when connectivity to the workload API drops), attempts to uninstall or communicate will fail (<code>connection refused</code> or <code>context deadline exceeded</code>).</li>
-<li>CAAPZ treats cluster deletion as an infrastructure-level wipe: since destroying the cluster destroys all underlying compute and storage (disks, nodes, namespaces), attempting an orderly Zarf uninstall over the wire is neither necessary nor desirable. The controller discards state without blocking CAPI or Machine deletion.</li>
+<li>CAAPZ treats cluster deletion as an infrastructure-level wipe for <em>teardown</em> purposes: attempting an orderly Zarf uninstall over the wire is neither necessary nor desirable, and the controller discards its state without blocking CAPI or Machine deletion. But Cluster-object deletion is <strong>not always</strong> an infrastructure wipe - <code>clusterctl move</code> and de-import/re-import delete the object while the cluster lives on - which is why the ApplyOnce guarantee is anchored on the workload cluster itself rather than on anything garbage-collected in this cascade (§3).</li>
 </ul>
 <hr>
-<h2 id="8-enterprise--air-gap-advantages"><a class="header" href="#8-enterprise--air-gap-advantages">8. Enterprise &amp; Air-Gap Advantages</a></h2>
+<h2 id="8-uninstall-semantics--deletion-policy"><a class="header" href="#8-uninstall-semantics--deletion-policy">8. Uninstall Semantics &amp; Deletion Policy</a></h2>
+<p>§7 covers the cluster going away; this section covers the <em>declaration</em> going away while the cluster lives on: a <code>ZarfPackageProxy</code> is deleted, or a cluster’s labels change so the selector no longer matches it.</p>
+<h3 id="a-specdeletionpolicy-delete--retain"><a class="header" href="#a-specdeletionpolicy-delete--retain">A. <code>spec.deletionPolicy: Delete | Retain</code></a></h3>
+<p>The proxy declares what happens to its deployed packages when their release is deleted:</p>
+<ul>
+<li><strong><code>Delete</code> (the default, matching CAAPH)</strong>: the package is uninstalled from the workload cluster - via <code>packager.Remove</code>, run in a removal Job on the same plumbing as deploys (§6’s deploy Job: same image, kubeconfig mount, cache volume, and <code>deployJob</code> knobs) - before the release object is allowed to go away.</li>
+<li><strong><code>Retain</code></strong>: the release object is deleted immediately and the deployed package is orphaned on the workload cluster, left running and operator-owned from then on. The honest choice for large or foundational packages, where an in-place uninstall is unreliable and an orphaned-but-working package beats a half-removed one.</li>
+<li><strong><code>ApplyOnce</code> proxies ignore the policy and always behave as <code>Retain</code></strong>: a seed cannot be un-run, and its durable record lives on the workload cluster (§3) regardless of what happens to management-cluster objects.</li>
+</ul>
+<h3 id="b-mechanics-a-finalizer-only-where-a-removal-is-owed"><a class="header" href="#b-mechanics-a-finalizer-only-where-a-removal-is-owed">B. Mechanics: a finalizer only where a removal is owed</a></h3>
+<ul>
+<li>Releases under <code>Delete</code> carry a CAAPZ finalizer; the controller runs the removal Job and drops the finalizer on success. Releases under <code>Retain</code> (and all ApplyOnce releases) carry <strong>no finalizer at all</strong>, so their deletion can never block on anything.</li>
+<li>The finalizer’s presence tracks the proxy’s <em>current</em> policy: flipping a proxy between <code>Delete</code> and <code>Retain</code> adds or strips the finalizer on its releases on the next reconcile, so the policy is live-editable and acts as the declarative break-glass for a stuck removal.</li>
+<li><strong>Proxy deletion</strong>: a finalizer on the proxy deletes its releases (found via <code>spec.packageProxyRef</code>) and waits for them to finish their own finalization before the proxy goes away. Releases are deliberately <em>not</em> owner-referenced to the proxy: Kubernetes garbage collection only deletes a dependent once <strong>all</strong> of its owners are gone, so a second ownerRef would stop Cluster deletion from collecting releases and quietly break §7’s cascade. The Cluster stays the sole owner.</li>
+<li><strong>Selector un-match</strong>: the controller deletes the no-longer-matching release, and the same finalizer path decides whether that is an uninstall (<code>Delete</code>) or an orphan (<code>Retain</code>).</li>
+</ul>
+<h3 id="c-the-7-override-cluster-teardown-always-wins"><a class="header" href="#c-the-7-override-cluster-teardown-always-wins">C. The §7 override: cluster teardown always wins</a></h3>
+<p>If the release’s owning <code>Cluster</code> has a deletion timestamp, no longer exists, or is unreachable, the finalizer is dropped <strong>without</strong> attempting removal. Uninstall semantics never block or delay cluster deletion; §7 outranks this section wherever they conflict.</p>
+<p>When removal fails while the Cluster is alive and reachable, the controller requeues with backoff and surfaces a <code>RemovalFailed</code> condition on the release. The operator’s escape hatches, in preference order: flip the proxy to <code>Retain</code> (declarative, affects all its releases), or remove the finalizer by hand (surgical, one release).</p>
+<h3 id="d-known-limitation-shrinking-speccomponents"><a class="header" href="#d-known-limitation-shrinking-speccomponents">D. Known limitation: shrinking <code>spec.components</code></a></h3>
+<p>Removing an entry from <code>spec.components</code> does not remove that component from the workload cluster - a redeploy with fewer components leaves the extras running. Removed components are orphaned until the package is removed and redeployed. Per-component removal choreography is deliberately out of scope until a real need arrives.</p>
+<hr>
+<h2 id="9-enterprise--air-gap-advantages"><a class="header" href="#9-enterprise--air-gap-advantages">9. Enterprise &amp; Air-Gap Advantages</a></h2>
 <ul>
 <li><strong>Air-gap Compliant</strong>: Zarf packages bundle container images, Helm charts, and manifests together in an OCI artifact, eliminating out-of-band image syncing.</li>
 <li><strong>Supply Chain Security</strong>: Cosign signature verification occurs on the management plane before any package payload touches the remote workload cluster.</li>
