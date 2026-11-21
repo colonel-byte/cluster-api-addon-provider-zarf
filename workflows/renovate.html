@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-6507440c.js";
+            window.path_to_searchindex_js = "../searchindex-bb0c9091.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-f0a4f2c1.js"></script>
@@ -190,7 +190,7 @@
 <li><strong>Pull requests opened with an app installation token trigger other workflows.</strong> A pull request opened with the default <code>GITHUB_TOKEN</code> does not, by design, so a dependency branch would sit with no checks on it - and an update nothing has tested is not something a reviewer can act on.</li>
 <li><strong>One app, one audit trail.</strong> The same app that release-please uses opens these, so there is one installation to grant, one private key to rotate, and one bot in the repository’s audit log.</li>
 </ul>
-<p>The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned to the action’s SHA rather than tracking the hosted service.</p>
+<p>The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned - the <code>renovate-version</code> input in the workflow, which Renovate bumps itself via its datasource comment - rather than tracking the hosted service.</p>
 <h2 id="what-it-needs"><a class="header" href="#what-it-needs">What it needs</a></h2>
 <div class="table-wrapper">
 <table>
