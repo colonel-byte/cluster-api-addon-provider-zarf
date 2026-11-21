@@ -1,6 +1,6 @@
 # Check for go mod changes
 
-[`.github/workflows/check-go-mod.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/check-go-mod.yaml) is what makes the vendored, offline build a requirement rather than a convention. It runs on every pull request and on the merge queue, and it fails for one reason: `go.mod`, `go.sum` and `vendor/` do not agree with each other.
+[`.github/workflows/check-go-mod.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/check-go-mod.yaml) is what makes the vendored, offline build a requirement rather than a convention. It runs on every pull request and on the merge queue, and it fails for one reason: `go.mod`, `go.sum` and `vendor/` do not agree with each other.
 
 ## The two steps
 
@@ -11,7 +11,7 @@ The `go run ./magefiles/core` form rather than `mage`: same targets, builds from
 
 ## Why both
 
-They fail on different mistakes, and the second is the one that costs an afternoon. A `vendor/` missing a file still builds locally, because the file is on disk - it is only a fresh clone that notices. The commonest cause is not a forgotten `go mod vendor` at all, but a `.gitignore` pattern that quietly excluded part of the vendor tree; see "A new `.gitignore` pattern can silently empty part of `vendor/`" in [`magefiles/AGENTS.md`](https://github.com/OWNER/REPO/blob/main/magefiles/AGENTS.md).
+They fail on different mistakes, and the second is the one that costs an afternoon. A `vendor/` missing a file still builds locally, because the file is on disk - it is only a fresh clone that notices. The commonest cause is not a forgotten `go mod vendor` at all, but a `.gitignore` pattern that quietly excluded part of the vendor tree; see "A new `.gitignore` pattern can silently empty part of `vendor/`" in [`magefiles/AGENTS.md`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/magefiles/AGENTS.md).
 
 That check is one command, and it is worth running by hand when a pattern changes:
 

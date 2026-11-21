@@ -1,8 +1,8 @@
 # goreleaser
 
-[`.github/workflows/release.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/release.yaml) builds and publishes the release artifacts. It fires on any pushed tag, and in practice that tag comes from [`release-please.yaml`](release-please.md) merging its release pull request.
+[`.github/workflows/release.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release.yaml) builds and publishes the release artifacts. It fires on any pushed tag, and in practice that tag comes from [`release-please.yaml`](release-please.md) merging its release pull request.
 
-What it produces, from [`.goreleaser.yaml`](https://github.com/OWNER/REPO/blob/main/.goreleaser.yaml):
+What it produces, from [`.goreleaser.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.goreleaser.yaml):
 
 - one binary per `goos`/`goarch` pair, version and commit baked in via `-ldflags -X`
 - a `tar.gz` per platform, `zip` on Windows, named to match `uname` output

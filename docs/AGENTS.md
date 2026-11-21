@@ -33,7 +33,7 @@ Adding a row that is wider than the column repads the whole table, which is expe
 
 ## A moved page keeps a redirect
 
-Every page under `docs/` is published at `https://OWNER.github.io/REPO/<path>.html`, so renaming or moving one breaks whatever already links to it from outside this repository -- a bookmark, an older release's manifest, a third-party listing. mdBook does not notice: the old URL simply 404s.
+Every page under `docs/` is published at `https://colonel-byte.github.io/cluster-api-addon-provider-zarf/<path>.html`, so renaming or moving one breaks whatever already links to it from outside this repository -- a bookmark, an older release's manifest, a third-party listing. mdBook does not notice: the old URL simply 404s.
 
 So a move comes with an entry in `[output.html.redirect]` in [`book.toml`](../book.toml), keyed on the old path and valued with the new one. The value is resolved relative to the key's own directory, not the site root, so a page that moved one level down reads `"/guides/install.html" = "setup/install.html"`. mdBook writes a small redirecting HTML file at each key when the book is built.
 
@@ -50,7 +50,7 @@ Annotate with the block form, as HTML comments on their own lines around the fen
 ````markdown
 <!-- x-release-please-start-version -->
 ```sh
-podman pull ghcr.io/OWNER/REPO:0.1.0
+podman pull ghcr.io/colonel-byte/cluster-api-addon-provider-zarf:0.1.0
 ```
 <!-- x-release-please-end-version -->
 ````
@@ -63,7 +63,7 @@ Then add the page to `extra-files` in [`release-please-config.json`](../release-
 
 A version in a generated page is annotated where it is written, not where it lands: a pinned version in `README.md` gets the markers in `README.md`, since `docs/index.md` is rewritten from it on the next generate run.
 
-Illustrative output is the one place to prefer a placeholder over an annotation. Where a command's own output carries a version with a suffix that reads as a semver prerelease - `rpm -q` printing `<project>-0.1.0-1.x86_64` - a rewrite of that region can swallow the suffix. Write `<project>-<version>-1.x86_64` instead, which matches the `:<tag>` placeholders elsewhere and cannot go stale.
+Illustrative output is the one place to prefer a placeholder over an annotation. Where a command's own output carries a version with a suffix that reads as a semver prerelease - `rpm -q` printing `cluster-api-addon-provider-zarf-0.1.0-1.x86_64` - a rewrite of that region can swallow the suffix. Write `cluster-api-addon-provider-zarf-<version>-1.x86_64` instead, which matches the `:<tag>` placeholders elsewhere and cannot go stale.
 
 Set the version to the current release when adding the annotation, rather than leaving whatever was there. The markers fix the page from the next release onward and do nothing for the one in front of a reader today.
 

@@ -7,8 +7,8 @@ The two that are deliberately left to write are below. Both are small; what matt
 When you add either, three things change in the same pull request:
 
 1. The workflow, under `.github/workflows/`.
-2. A page under `docs/workflows/` named after it - required by [`.github/AGENTS.md`](https://github.com/OWNER/REPO/blob/main/.github/AGENTS.md), then `go run ./magefiles/core generate:document` to put it in the summary.
-3. The `Which CI job` dropdown in [`.github/ISSUE_TEMPLATE/01-failing-build.yml`](https://github.com/OWNER/REPO/blob/main/.github/ISSUE_TEMPLATE/01-failing-build.yml), which lists the `name:` a workflow shows in the checks list. That one goes stale silently.
+2. A page under `docs/workflows/` named after it - required by [`.github/AGENTS.md`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/AGENTS.md), then `go run ./magefiles/core generate:document` to put it in the summary.
+3. The `Which CI job` dropdown in [`.github/ISSUE_TEMPLATE/01-failing-build.yml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/ISSUE_TEMPLATE/01-failing-build.yml), which lists the `name:` a workflow shows in the checks list. That one goes stale silently.
 
 ## Unit tests
 

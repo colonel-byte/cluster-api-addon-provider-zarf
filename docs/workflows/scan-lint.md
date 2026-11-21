@@ -1,6 +1,6 @@
 # Validate Lint
 
-[`.github/workflows/scan-lint.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/scan-lint.yaml) runs golangci-lint over the module on every pull request and on the merge queue, against [`.golangci.yaml`](https://github.com/OWNER/REPO/blob/main/.golangci.yaml).
+[`.github/workflows/scan-lint.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/scan-lint.yaml) runs golangci-lint over the module on every pull request and on the merge queue, against [`.golangci.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.golangci.yaml).
 
 ## The version is read, not written
 

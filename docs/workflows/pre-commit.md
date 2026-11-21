@@ -1,6 +1,6 @@
 # Validate pre-commit hooks
 
-[`.github/workflows/pre-commit.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/pre-commit.yaml) runs the hooks from [`.pre-commit-config.yaml`](https://github.com/OWNER/REPO/blob/main/.pre-commit-config.yaml) over the whole tree with [prek](https://github.com/j178/prek), on every pull request and on the merge queue.
+[`.github/workflows/pre-commit.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/pre-commit.yaml) runs the hooks from [`.pre-commit-config.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.pre-commit-config.yaml) over the whole tree with [prek](https://github.com/j178/prek), on every pull request and on the merge queue.
 
 It exists because the root [`AGENTS.md`](../AGENTS.md) tells everyone to run the hooks before committing and nothing otherwise checks that they did. It also closes a gap the hooks have by design: a hook that reads the staged diff only sees uncommitted changes, so a clean local run says nothing about code that is already committed. `--all-files` here does.
 

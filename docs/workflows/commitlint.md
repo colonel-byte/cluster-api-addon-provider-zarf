@@ -1,6 +1,6 @@
 # PR Title Check
 
-[`.github/workflows/commitlint.yaml`](https://github.com/OWNER/REPO/blob/main/.github/workflows/commitlint.yaml) lints the **pull request title** against [conventional commits](https://www.conventionalcommits.org/). It is a standard across the organization, and it is load-bearing rather than cosmetic: pull requests are squash-merged, so the title becomes the commit message on `main`, and release-please reads those messages to decide the next version and to write `CHANGELOG.md`. A title with the wrong type produces a release with the wrong version number.
+[`.github/workflows/commitlint.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/commitlint.yaml) lints the **pull request title** against [conventional commits](https://www.conventionalcommits.org/). It is a standard across the organization, and it is load-bearing rather than cosmetic: pull requests are squash-merged, so the title becomes the commit message on `main`, and release-please reads those messages to decide the next version and to write `CHANGELOG.md`. A title with the wrong type produces a release with the wrong version number.
 
 This is why the job lints the title and not the commits. `wagoid/commitlint-github-action` lints commit messages, which are the ones squashing throws away, so it is not a drop-in replacement for this step.
 

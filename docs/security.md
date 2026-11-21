@@ -13,7 +13,7 @@ This project is pre-1.0 and releases from `main` on every conventional commit th
 
 ## Reporting a vulnerability
 
-Report privately through GitHub: **[open a draft advisory](https://github.com/OWNER/REPO/security/advisories/new)**. Do not open a public issue, and do not include a working exploit against a third party's system.
+Report privately through GitHub: **[open a draft advisory](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/security/advisories/new)**. Do not open a public issue, and do not include a working exploit against a third party's system.
 
 You should expect an acknowledgement within 3 business days and an assessment -- whether we consider it a vulnerability, and the severity we assign -- within 10 business days. Confirmed issues are fixed in the next release, and we aim to publish the advisory within 90 days of the report, sooner when a fix is already out. You will be credited in the advisory unless you ask not to be.
 
@@ -29,7 +29,7 @@ Out of scope: vulnerabilities in upstream components this project packages or de
 
 ## Verifying a release
 
-Release archives and `checksums.txt` are signed with cosign using the key whose public half is [`cosign.pub`](https://github.com/OWNER/REPO/blob/main/cosign.pub) in this repository, and archives ship with an SBOM.
+Release archives and `checksums.txt` are signed with cosign using the key whose public half is [`cosign.pub`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/cosign.pub) in this repository, and archives ship with an SBOM.
 
 ```console
 cosign verify-blob --key cosign.pub --bundle checksums.txt.sigstore.json checksums.txt

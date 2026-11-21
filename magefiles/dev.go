@@ -20,7 +20,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/OWNER/REPO/magefiles/pkg/util"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/magefiles/pkg/util"
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
 )

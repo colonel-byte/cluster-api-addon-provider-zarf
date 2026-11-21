@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "go",
-      "package-name": "<project>",
+      "package-name": "cluster-api-addon-provider-zarf",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "include-v-in-tag": true,

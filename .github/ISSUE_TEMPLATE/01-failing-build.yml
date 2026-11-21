@@ -32,7 +32,7 @@ body:
     attributes:
       label: Link to the failing run
       description: The URL of the workflow run or the individual check. Leave blank when the failure is local only.
-      placeholder: https://github.com/OWNER/REPO/actions/runs/0000000000
+      placeholder: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/actions/runs/0000000000
   - type: input
     id: command
     attributes:
