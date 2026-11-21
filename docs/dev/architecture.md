@@ -341,7 +341,17 @@ Removing an entry from `spec.components` does not remove that component from the
 
 ---
 
-## 9. Enterprise & Air-Gap Advantages
+## 9. Clusterctl Provider Contract
+
+CAAPZ ships as a clusterctl-manageable provider, the same way the sister cargoship repository does:
+
+- **`metadata.yaml`** at the repository root maps each release series to its Cluster API contract (`v1beta2`). Release-please owns the current series entry via `x-release-please-major`/`-minor` markers; past series are appended as releases are cut so `clusterctl upgrade` can map an installed version. Without this file, `clusterctl init` refuses to install the provider.
+- **Provider labels** - `clusterctl.cluster.x-k8s.io: ""` and `cluster.x-k8s.io/provider: addon-zarf` - go on every manifest in the release bundle, so clusterctl can find and manage what it installed. They land with the manager deployment manifests.
+- **`clusterctl move`**: `ZarfPackageProxy` and `ZarfPackageRelease` carry the `clusterctl.cluster.x-k8s.io/move` label so a pivot carries the declarations to the new management cluster. Releases are re-derivable (the controller re-stamps them from proxies and Clusters), but moving them preserves status history and avoids a re-deploy window; proxies are *not* re-derivable and must move. The ApplyOnce guarantee survives either way - it lives on the workload cluster (§3), not in anything being moved. The §2C caveat stands: a cross-namespace secret is outside what move carries.
+
+---
+
+## 10. Enterprise & Air-Gap Advantages
 
 - **Air-gap Compliant**: Zarf packages bundle container images, Helm charts, and manifests together in an OCI artifact, eliminating out-of-band image syncing.
 - **Supply Chain Security**: Cosign signature verification occurs on the management plane before any package payload touches the remote workload cluster.
