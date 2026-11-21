@@ -11,6 +11,8 @@ What it produces, from [`.goreleaser.yaml`](https://github.com/colonel-byte/clus
 - `checksums.txt`, an SBOM per archive, a cosign bundle per archive and for the checksums file
 - a build provenance attestation over `checksums.txt`, uploaded to the release
 
+After goreleaser succeeds on a `v*` tag, two more jobs call the air-gapped publish workflows as reusable workflows with `secrets: inherit`: [`publish-oci-artifact.yaml`](publish-oci-artifact.md) (the Cluster API Operator artifact) and then [`publish-zarf-package.yaml`](publish-zarf-package.md) (the Zarf package, which embeds that artifact and so waits for it). `needs:` is what sequences them - the release *event* fires before the images they pull exist.
+
 ## What it needs
 
 | Secret        | What it is                                                            |

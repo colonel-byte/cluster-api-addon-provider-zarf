@@ -1,0 +1,98 @@
+---
+name: Publish the Zarf package
+
+# The air-gapped install path, published where the rest of this organisation's packages live:
+# ghcr.io/colonel-byte/zarf/<package>, which `zarf package publish` assembles from the namespace
+# below and the package's own name and version.
+#
+# `zarf package create` pulls the controller image the package carries, so it cannot run until
+# goreleaser has pushed it. release.yaml calls this as a reusable workflow in a job that needs
+# goreleaser, and needs is what holds the two apart; keying off the release event instead would
+# race, because release-please publishes the release well before goreleaser has pushed an image.
+# A called workflow runs at its caller's ref, so GITHUB_REF_NAME below is the tag being released.
+#
+# Also on demand from the Actions tab, which is how a release is republished: run it against the
+# tag, rather than re-running a whole release.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+# Read only at the top so that a job has to ask for what it writes.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # - packages: write pushes the package
+    # - id-token: write is the OIDC token cosign signs against
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # One at a time, because both architectures publish to the same reference - a Zarf
+      # reference is the package's name and version with no architecture in it - and two
+      # concurrent pushes to one tag is a race over which index wins.
+      max-parallel: 1
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    steps:
+      # No ref: the run is already at the tag - the caller's, or the one picked from the Actions
+      # tab - which is the only commit whose zarf.yaml names this release's images.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup golang
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Zarf
+        uses: zarf-dev/setup-zarf@10e539efed02f75ec39eb8823e22a5c795f492ae # v1.0.1
+        with:
+          # renovate: datasource=github-releases depName=zarf-dev/zarf
+          version: v1.0.1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The package's version comes from zarf.yaml, not from the tag, because it is also the tag
+      # of the image it carries - see docs/agent/choice-zarf-package.md. release-please rewrites
+      # every pin on a release, so a disagreement here means one of its extra-files entries lost
+      # the comment it looks for, and the package would name an image from another release.
+      - name: Check zarf.yaml is at this release's version
+        run: |
+          pinned=$(sed -n 's/^  version: \([^ ]*\).*/\1/p' zarf.yaml)
+          if [ "${pinned}" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::zarf.yaml pins ${pinned}, but this release is ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+      # Through `release:zarfPackage` rather than a hand-written `zarf package create`, so the
+      # component manifest is rendered at the version zarf.yaml pins rather than at a version
+      # this workflow decides. COSIGN_KEY in the environment is what makes the target sign.
+      - name: Build the package
+        env:
+          ZARF_ARCH: ${{ matrix.arch }}
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASS: ${{ secrets.COSIGN_PASS }}
+        run: go run ./magefiles/core release:zarfPackage
+
+      # --key verifies the signature made above before anything is pushed, so a package that was
+      # signed with the wrong key fails here rather than in an air gap.
+      - name: Publish the package
+        run: |
+          zarf package publish out/zarf-package-*.tar.zst \
+            oci://ghcr.io/${{ github.repository_owner }}/zarf \
+            --key "https://raw.githubusercontent.com/colonel-byte/cluster-api-addon-provider-zarf/refs/tags/${GITHUB_REF_NAME}/cosign.pub" \
+            --with-build-machine-info=false

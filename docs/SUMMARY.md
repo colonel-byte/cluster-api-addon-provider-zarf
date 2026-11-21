@@ -32,6 +32,8 @@
 - [commitlint](workflows/commitlint.md)
 - [deploy-book](workflows/deploy-book.md)
 - [pre-commit](workflows/pre-commit.md)
+- [publish-oci-artifact](workflows/publish-oci-artifact.md)
+- [publish-zarf-package](workflows/publish-zarf-package.md)
 - [release-please](workflows/release-please.md)
 - [release](workflows/release.md)
 - [renovate](workflows/renovate.md)

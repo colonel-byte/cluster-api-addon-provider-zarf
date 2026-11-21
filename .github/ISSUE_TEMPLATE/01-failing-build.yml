@@ -23,6 +23,8 @@ body:
         - CodeQL
         - PR Title Check
         - Check for go mod changes
+        - Publish the Zarf package
+        - Publish the Cluster API Operator artifact
         - Other
         - Not a CI job - fails locally
     validations:
