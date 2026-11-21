@@ -162,9 +162,8 @@ Certain foundational packages perform initialization tasks that must not be cont
 Borrowing from core CAPI's `ClusterResourceSet.spec.strategy`, CAAPZ supports two strategies:
 
 1. **`strategy: Reconcile` (Continuous Lifecycle)**:
-   - Continuously watches the package in the OCI registry or changes in `spec.package.version`.
-   - On version bumps or variable edits, redeploys the package to converge the workload cluster to the new state.
-   - Detects and repairs cluster drift.
+   - Reacts to changes in `spec.package.version`, values, and variables by redeploying the package to converge the workload cluster to the new state. The package content itself is pinned by digest (see "Package identity" below); following a mutable tag is an explicit per-proxy opt-in, polled rather than watched - there is no OCI watch primitive.
+   - "Drift repair" is periodic idempotent redeploy of the pinned digest on the controller's resync interval; the Zarf SDK has no drift detection.
 
 2. **`strategy: ApplyOnce` (Seed / Initialization Package)**:
    - When a new cluster matching the selector is discovered or imported, the controller pulls and applies the Zarf package.
@@ -172,7 +171,22 @@ Borrowing from core CAPI's `ClusterResourceSet.spec.strategy`, CAAPZ supports tw
    - The controller will **never re-execute** this package against that cluster, even if the proxy's spec or variables change.
    - Ideal for Day-0/Day-1 cluster bootstrap hooks and registration payloads.
 
-#### Where the "never re-execute" record actually lives
+#### Package identity: a tag resolves once to a digest
+
+`spec.package.version` is an OCI tag, and tags are mutable; the deployed fleet must not be. So the tag is an *input to resolution*, not the package's identity:
+
+- On first resolution - proxy creation, or any edit to `spec.package.repository`/`version` - the controller resolves the tag to its digest and records it in `status.resolvedDigest`. Every subsequent pull, Cosign verification, and deploy uses **the digest, not the tag** (Zarf resolves digest references natively), and each release records the digest it actually deployed. A re-pushed tag therefore cannot change what the fleet runs, even in principle.
+- The controller still re-checks the tag on reconcile. When the registry's tag no longer matches the pinned digest, the proxy gets a warning condition with `reason: TagContentChanged`, naming both digests. Pinned deploys continue untouched; the new content is **not** adopted. The update path is the one that already exists: bump `spec.package.version`, which re-resolves and re-pins.
+- In an air-gapped registry that is periodically re-staged, a re-push of the same tag trips `TagContentChanged` on every re-stage. That is working as intended: the operator's move is a version bump (or the opt-in below), never silent adoption.
+
+**Following a mutable tag is an explicit, per-proxy opt-in via annotations** - an operational/dev toggle for connected test environments, deliberately kept out of the GitOps-owned spec:
+
+| Annotation                                    | Meaning                                                                                                                                       |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `addons.colonel-byte.dev/follow-tag: "true"`  | Re-resolve the tag on a timer; a digest change re-pins `status.resolvedDigest` and triggers redeploy                                          |
+| `addons.colonel-byte.dev/follow-tag-interval` | Poll interval as a Go duration. Default `15m`; meaningless without `follow-tag`; invalid values fall back to the default with a warning event |
+
+ApplyOnce proxies take no part in re-resolution or tag-following: their one deploy pinned what it pinned.
 
 The `ZarfPackageRelease` is a cache of the guarantee, not the guarantee itself: it is deliberately garbage-collected with its owning `Cluster` (§7), and a `Cluster` object is deleted *without the infrastructure being wiped* during `clusterctl move` and de-import/re-import - exactly the imported-cluster flows seed packages target. The durable record is the one Zarf itself writes on the workload cluster: every deploy stores a `zarf-package-<name>` secret (labeled `package-deploy-info`) in the `zarf` namespace, which survives management-cluster churn because it lives on the physical cluster being guarded.
 
@@ -271,7 +285,7 @@ Directed Acyclic Graph (DAG) validation runs **at reconcile time, not admission*
 3. **Seed Check**:
    If `spec.strategy == ApplyOnce`, skip execution when the release is already `applied: true`. Otherwise probe the workload cluster for the package's `zarf-package-<name>` deployed-package secret in the `zarf` namespace; if present, mark the release `Completed` without deploying (see §3, "Where the 'never re-execute' record actually lives").
 4. **OCI Pull & Signature Verification**:
-   The package is fetched from the OCI registry to local cache storage on the controller pod. If `signatureKeySecretRef` is set, verify the Cosign signature against the public key before extracting layers.
+   The package is fetched from the OCI registry **by its pinned digest** (`status.resolvedDigest`, §3) to local cache storage. If `signatureKeySecretRef` is set, verify the Cosign signature against the public key before extracting layers; verification binds to the digest, so a re-pushed tag never inherits a prior verification.
 5. **Auto-Init Check**:
    If `spec.init.autoInit == true`, probe the target cluster for Zarf state (`zarf-state` secret in `zarf` namespace). If absent, deploy the Zarf init package first.
 6. **Deploy Execution**:
