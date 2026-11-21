@@ -17,6 +17,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -142,10 +143,10 @@ func (r *ZarfPackageProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&addonsv1alpha1.ZarfPackageProxy{}).
 		// Not Owns: releases carry a Cluster controller-ownerRef, never a proxy one
 		// (architecture.md §8B), so an Owns watch would never fire. Release events route
-		// to the release's own proxy via spec.packageProxyRef. §5B's dependent fan-out -
-		// requeueing proxies whose dependsOn names this release's proxy - is a second
-		// mapping that does not exist yet; until it does, dependents re-evaluate on resync.
-		Watches(&addonsv1alpha1.ZarfPackageRelease{}, handler.EnqueueRequestsFromMapFunc(releaseToProxy)).
+		// to the release's own proxy via spec.packageProxyRef, plus §5B's dependent
+		// fan-out: every proxy whose dependsOn names that proxy, so verdicts re-evaluate
+		// on phase changes rather than on resync.
+		Watches(&addonsv1alpha1.ZarfPackageRelease{}, handler.EnqueueRequestsFromMapFunc(r.releaseToProxies)).
 		Watches(&clusterv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(r.clusterToProxies)).
 		Complete(r)
 }
@@ -166,4 +167,29 @@ func releaseToProxy(_ context.Context, obj client.Object) []reconcile.Request {
 		Namespace: namespace,
 		Name:      release.Spec.PackageProxyRef.Name,
 	}}}
+}
+
+// releaseToProxies is releaseToProxy plus §5B's dependent fan-out: proxies whose dependsOn names
+// the release's proxy re-evaluate their verdicts on its phase changes. dependsOn resolves in the
+// proxy's own namespace, so dependents live where the proxy does.
+func (r *ZarfPackageProxyReconciler) releaseToProxies(ctx context.Context, obj client.Object) []reconcile.Request {
+	requests := releaseToProxy(ctx, obj)
+	if len(requests) == 0 {
+		return nil
+	}
+	own := requests[0].NamespacedName
+
+	proxies := &addonsv1alpha1.ZarfPackageProxyList{}
+	if err := r.List(ctx, proxies, client.InNamespace(own.Namespace)); err != nil {
+		return requests
+	}
+	for _, proxy := range proxies.Items {
+		if proxy.Name != own.Name && slices.Contains(proxy.Spec.DependsOn, own.Name) {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: proxy.Namespace,
+				Name:      proxy.Name,
+			}})
+		}
+	}
+	return requests
 }
