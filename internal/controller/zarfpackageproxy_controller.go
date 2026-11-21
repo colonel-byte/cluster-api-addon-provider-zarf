@@ -63,8 +63,8 @@ type ZarfPackageProxyReconciler struct {
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
-// shortcut: matching only - release stamping, dependency verdicts, and deployment land with the
-// following layers of this milestone.
+// shortcut: matching and stamping only - dependency verdicts land in the next layer, deployment
+// with M3.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -82,6 +82,10 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version,
 		"matchingClusters", len(matched))
+
+	if err := r.stampReleases(ctx, proxy, matched); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// status.matchingClusters names match the selector's reach: bare in the proxy's own
 	// namespace, namespace-qualified where --cluster-namespaces let the selector cross.
