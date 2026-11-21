@@ -40,3 +40,10 @@ func (Release) Manifests(tag string) error {
 func (Release) ZarfPackage() error {
 	return release.ZarfPackage()
 }
+
+// OciArtifact packs the component manifests at the given tag into an OCI image layout under
+// out/oci (plus a travel tar), which is what the Cluster API Operator and Rancher Turtles
+// install from inside an air gap. See docs/guides/rancher-turtles.md.
+func (Release) OciArtifact(tag string) error {
+	return release.OCIArtifact(tag)
+}
