@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-45227b9e.js";
+            window.path_to_searchindex_js = "searchindex-1d961500.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-f34fe35d.js"></script>
+        <script src="toc-4fa52a72.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -222,7 +222,13 @@ spec:
 </code></pre>
 <p><code>strategy: Reconcile</code> keeps matching clusters converged on the declared version; <code>strategy: ApplyOnce</code> deploys exactly once per cluster and never re-executes, for bootstrap and seed payloads.</p>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
-<p>Not yet published. Once released, the provider installs into a management cluster from the manifests under <code>config/</code>.</p>
+<p>Each release publishes the provider three ways, all carrying the same component manifest:</p>
+<ul>
+<li><strong>clusterctl</strong>: <code>addon-components.yaml</code> and <code>metadata.yaml</code> on the release page, fetched by name.</li>
+<li><strong>Rancher Turtles / Cluster API Operator</strong>: a <code>CAPIProvider</code> of type <code>addon</code>, from the release page, from in-cluster ConfigMaps, or from the OCI artifact at <code>ghcr.io/colonel-byte/turtle/addon-zarf</code> - see <a href="guides/rancher-turtles.html">the Rancher Turtles guide</a>.</li>
+<li><strong>Air-gapped</strong>: a Zarf package at <code>ghcr.io/colonel-byte/zarf/cluster-api-addon-provider-zarf</code>, carrying the controller image and the manifest, cosign-signed. Its optional <code>rancher-turtle-artifacts</code> component pre-renders the Turtles install.</li>
+</ul>
+<p>The controller image is <code>ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller</code>, and everything is verifiable against <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/cosign.pub"><code>cosign.pub</code></a> at the repository root.</p>
 <h2 id="development"><a class="header" href="#development">Development</a></h2>
 <p>Build and generator targets run through mage; the build is vendored and works offline.</p>
 <pre><code class="language-sh">go build ./cmd/...                          # build the manager

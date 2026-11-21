@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-45227b9e.js";
+            window.path_to_searchindex_js = "searchindex-1d961500.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-f34fe35d.js"></script>
+        <script src="toc-4fa52a72.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -220,7 +220,13 @@ spec:
 </code></pre>
 <p><code>strategy: Reconcile</code> keeps matching clusters converged on the declared version; <code>strategy: ApplyOnce</code> deploys exactly once per cluster and never re-executes, for bootstrap and seed payloads.</p>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
-<p>Not yet published. Once released, the provider installs into a management cluster from the manifests under <code>config/</code>.</p>
+<p>Each release publishes the provider three ways, all carrying the same component manifest:</p>
+<ul>
+<li><strong>clusterctl</strong>: <code>addon-components.yaml</code> and <code>metadata.yaml</code> on the release page, fetched by name.</li>
+<li><strong>Rancher Turtles / Cluster API Operator</strong>: a <code>CAPIProvider</code> of type <code>addon</code>, from the release page, from in-cluster ConfigMaps, or from the OCI artifact at <code>ghcr.io/colonel-byte/turtle/addon-zarf</code> - see <a href="#installing-the-provider-with-rancher-turtles">the Rancher Turtles guide</a>.</li>
+<li><strong>Air-gapped</strong>: a Zarf package at <code>ghcr.io/colonel-byte/zarf/cluster-api-addon-provider-zarf</code>, carrying the controller image and the manifest, cosign-signed. Its optional <code>rancher-turtle-artifacts</code> component pre-renders the Turtles install.</li>
+</ul>
+<p>The controller image is <code>ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller</code>, and everything is verifiable against <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/cosign.pub"><code>cosign.pub</code></a> at the repository root.</p>
 <h2 id="development"><a class="header" href="#development">Development</a></h2>
 <p>Build and generator targets run through mage; the build is vendored and works offline.</p>
 <pre><code class="language-sh">go build ./cmd/...                          # build the manager
@@ -278,6 +284,94 @@ go run ./magefiles/core generate:document   # regenerate the mdBook pages
 <p>Where a page pins this project’s own version - an image tag, a release archive’s filename - it needs release-please annotations <em>and</em> an entry in the release-please config, or it goes stale on the next release. <a href="AGENTS.html"><code>docs/AGENTS.md</code></a> has the exact form, including why the per-line marker is the wrong one to use inside a fenced block.</p>
 <h2 id="what-does-not-belong-here"><a class="header" href="#what-does-not-belong-here">What does not belong here</a></h2>
 <p>Anything a contributor needs and an operator does not: build flags, test harness setup, release mechanics. That is <a href="dev/README.html"><code>docs/dev/</code></a>. Decisions and their tradeoffs are <a href="agent/README.html"><code>docs/agent/</code></a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="installing-the-provider-with-rancher-turtles"><a class="header" href="#installing-the-provider-with-rancher-turtles">Installing the provider with Rancher Turtles</a></h1>
+<p><a href="https://turtles.docs.rancher.com">Rancher Turtles</a> installs Cluster API providers through the Cluster API Operator rather than through <code>clusterctl</code>, so on a Turtles management cluster the install path is one <code>CAPIProvider</code> object. Everything else about the provider - the CRDs, the controller, the flags - is the same install; this guide mirrors cluster-api-provider-cargoship’s Turtles guide, adapted to a single addon provider.</p>
+<h2 id="declare-the-provider"><a class="header" href="#declare-the-provider">Declare the provider</a></h2>
+<p>The namespace is not created for you, and the operator installs the provider into the namespace of the object that asked for it. Using the one this repository’s manifests already name keeps log commands portable:</p>
+<pre><code class="language-sh">kubectl create namespace caapz-system
+</code></pre>
+<!-- x-release-please-start-version -->
+<pre><code class="language-yaml">apiVersion: turtles-capi.cattle.io/v1alpha1
+kind: CAPIProvider
+metadata:
+  name: addon-zarf
+  namespace: caapz-system
+spec:
+  name: zarf
+  type: addon
+  version: v0.0.1
+  fetchConfig:
+    url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>Three things in there are easy to get wrong:</p>
+<ul>
+<li><strong><code>spec.name</code> is the provider name, not <code>metadata.name</code>.</strong> Turtles resolves the provider from <code>spec.name</code> and falls back to <code>metadata.name</code> only when it is unset.</li>
+<li><strong><code>spec.type</code> is <code>addon</code></strong>, lower-case. The <code>ClusterctlConfig</code> spelling below is <code>AddonProvider</code> instead.</li>
+<li><strong><code>spec.version</code> must be semver with a leading <code>v</code></strong>, and it names the release tag. A CEL rule on the CRD rejects the bare form. With <code>fetchConfig.url</code> pointing at the releases page, it is also the only thing telling the operator which release to read, including the <code>metadata.yaml</code> beside the components that carries the contract version.</li>
+</ul>
+<h2 id="or-register-it-centrally"><a class="header" href="#or-register-it-centrally">Or register it centrally</a></h2>
+<p>Where the provider should be known to the whole cluster - or where the components come from a mirror rather than from GitHub - put the URL in Turtles’ <code>ClusterctlConfig</code> and drop <code>fetchConfig</code> from the object above:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-yaml">apiVersion: turtles-capi.cattle.io/v1alpha1
+kind: ClusterctlConfig
+metadata:
+  name: clusterctl-config
+  namespace: cattle-turtles-system
+spec:
+  providers:
+    - name: zarf
+      type: AddonProvider
+      url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.0.1/addon-components.yaml
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>The name and namespace are not free: Turtles merges this object into the <code>clusterctl-config</code> ConfigMap it ships and looks it up at that ConfigMap’s own name and namespace - <code>cattle-turtles-system</code> by default, <code>rancher-turtles-system</code> on older installs. One created anywhere else is read by nothing, and nothing says so. Ask the cluster rather than guessing: <code>kubectl get configmap clusterctl-config --all-namespaces</code>.</p>
+<h2 id="air-gapped-from-configmaps"><a class="header" href="#air-gapped-from-configmaps">Air-gapped, from ConfigMaps</a></h2>
+<p><code>fetchConfig</code> takes a <code>selector</code> instead of a <code>url</code>, and then the operator reads the components and the metadata out of a ConfigMap in the cluster - no route to GitHub, no mirror standing in for it. On the connected side, download <code>addon-components.yaml</code> and <code>metadata.yaml</code> from the release; inside:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-sh">kubectl create configmap v0.0.1 --namespace caapz-system \
+  --from-file=components=addon-components.yaml \
+  --from-file=metadata=metadata.yaml
+kubectl label configmap v0.0.1 --namespace caapz-system provider-components=addon-zarf
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>Then the <code>CAPIProvider</code> loses <code>fetchConfig.url</code> and gains the selector:</p>
+<pre><code class="language-yaml">  fetchConfig:
+    selector:
+      matchLabels:
+        provider-components: addon-zarf
+</code></pre>
+<ul>
+<li><strong>The ConfigMap’s name is the version the operator offers</strong>, unless a <code>provider.cluster.x-k8s.io/version</code> label says otherwise - and it has to match the <code>CAPIProvider</code>’s <code>spec.version</code>.</li>
+<li><strong>The label is yours.</strong> <code>provider-components</code> is only the convention the operator’s examples use; nothing reads the key, the selector just has to match.</li>
+<li><strong>The components still name a <code>ghcr.io</code> image.</strong> Mirror the controller image and override the registry through the <code>CAPIProvider</code>’s <code>configSecret</code>, whose <code>images</code> key the operator reads as a clusterctl image override.</li>
+</ul>
+<h3 id="or-let-the-zarf-package-carry-it"><a class="header" href="#or-let-the-zarf-package-carry-it">Or let the Zarf package carry it</a></h3>
+<p>The ConfigMap and the <code>CAPIProvider</code> are pre-rendered into the air-gapped Zarf package as its <code>rancher-turtle-artifacts</code> component - nothing to assemble on the inside:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-sh">zarf package deploy zarf-package-cluster-api-addon-provider-zarf-amd64-0.0.1.tar.zst \
+  --components rancher-turtle-artifacts
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>It is optional, so it has to be named - <code>zarf package deploy --confirm</code> skips every optional component without a word, and a cluster installing with <code>clusterctl</code> wants exactly that. And Rancher Turtles has to be on the cluster first: a <code>CAPIProvider</code> applied where the Turtles CRDs are missing fails the component, and with it the deploy.</p>
+<h2 id="air-gapped-from-a-registry"><a class="header" href="#air-gapped-from-a-registry">Air-gapped, from a registry</a></h2>
+<p><code>fetchConfig.oci</code> is the third option, for the air gap that already has a registry: the operator pulls <code>metadata.yaml</code> and the components out of one OCI artifact. Every release publishes it at <strong><code>ghcr.io/colonel-byte/turtle/addon-zarf</code></strong>, tagged with the release’s own tag and cosign-signed by digest. Mirror it with <code>oras cp</code>, or - where the connected side cannot reach the mirror either - build it as a file to carry in:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-sh">go run ./magefiles/core release:ociArtifact v0.0.1
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>That writes an OCI image layout to <code>out/oci</code> and tars it beside it; nothing is pushed, deliberately. Fill the mirror on the inside with <code>oras cp --from-oci-layout</code>, then point the <code>CAPIProvider</code> at it:</p>
+<pre><code class="language-yaml">  fetchConfig:
+    oci: registry.internal/caapz/capi-provider
+</code></pre>
+<p>A reference with no tag takes <code>spec.version</code> as the tag. A registry served over plain HTTP needs an <code>http://</code> prefix, which is how the operator decides to skip TLS. Registry credentials come from the <code>configSecret</code>’s <code>OCI_USERNAME</code>/<code>OCI_PASSWORD</code> variables, not from a pull secret. The layer names inside the artifact are the operator’s <em>typed</em> lookups - <code>addon-components.yaml</code>, <code>metadata.yaml</code> - carried in each layer’s title annotation, which is the only thing the operator reads a layer by.</p>
+<h2 id="check-it-came-up"><a class="header" href="#check-it-came-up">Check it came up</a></h2>
+<pre><code class="language-sh">kubectl get capiproviders --all-namespaces
+</code></pre>
+<p>The row reaches <code>Ready</code> in <code>Phase</code>, with <code>zarf</code> as <code>ProviderName</code> and the release tag as <code>InstalledVersion</code>. A row stuck in <code>Provisioning</code> is the operator failing to fetch or apply the components, and its reason is in the Turtles controller’s log rather than on the object.</p>
+<h2 id="what-this-does-not-solve"><a class="header" href="#what-this-does-not-solve">What this does not solve</a></h2>
+<p><code>clusterctl</code> and Turtles are two ways to install the same component manifest, and installing with one leaves the other unaware. If the provider was installed with the Zarf package’s default component instead, Turtles does not manage it and <code>kubectl get capiproviders</code> shows nothing - deploy the next package to upgrade, or delete it and declare the <code>CAPIProvider</code> to hand it over. On a Turtles cluster, the selector or OCI routes above are the better air-gapped options, because what they install is still a provider Turtles manages.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="docsdev"><a class="header" href="#docsdev"><code>docs/dev/</code></a></h1>
 <p>Pages for the person <strong>changing</strong> this project: how it builds, how it is tested, how a release is cut, and what the task runner does. The audience is a contributor with the repository checked out, which is what separates this directory from <a href="guides/README.html"><code>docs/guides/</code></a>.</p>
@@ -885,6 +979,20 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 </code></pre>
 <p><code>prek</code> and <code>pre-commit</code> read the same config, so either works; <code>prek</code> is faster. Several of the hooks rewrite files, so re-stage after a run - and if the failure is only in CI, check the hook versions in the config are the ones installed locally.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="publish-the-cluster-api-operator-artifact"><a class="header" href="#publish-the-cluster-api-operator-artifact">Publish the Cluster API Operator artifact</a></h1>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/publish-oci-artifact.yaml"><code>.github/workflows/publish-oci-artifact.yaml</code></a> publishes the provider’s component manifests as one OCI artifact at <code>ghcr.io/colonel-byte/turtle/addon-zarf</code> - the form the Cluster API Operator, and so Rancher Turtles, installs a provider from inside an air gap. See the Rancher Turtles guide for the consuming side.</p>
+<p>It is a reusable workflow, called from <a href="#goreleaser"><code>release.yaml</code></a> in a job that <code>needs</code> goreleaser, because the artifact’s manifests name the controller image this release pushes. It also runs on demand from the Actions tab against a tag.</p>
+<p>The artifact is built by <code>go run ./magefiles/core release:ociArtifact &lt;tag&gt;</code> as an OCI image layout under <code>out/oci</code> - a directory, not a push, because the registry an air gap uses is on the far side of it; this workflow’s ghcr.io target is the one registry that is not, being what a mirror copies <em>from</em>. The push is <code>oras cp --from-oci-layout</code>, and the pushed manifest is Cosign-signed <strong>by digest</strong>, never by tag.</p>
+<h2 id="what-it-needs"><a class="header" href="#what-it-needs">What it needs</a></h2>
+<p>The <code>COSIGN_KEY</code> / <code>COSIGN_PASS</code> secrets via <code>secrets: inherit</code>, and <code>packages: write</code> on its job to push the artifact and its signature.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="publish-the-zarf-package"><a class="header" href="#publish-the-zarf-package">Publish the Zarf package</a></h1>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/publish-zarf-package.yaml"><code>.github/workflows/publish-zarf-package.yaml</code></a> builds and publishes the air-gapped install artifact: the Zarf package <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/zarf.yaml"><code>zarf.yaml</code></a> defines, pushed to <code>ghcr.io/colonel-byte/zarf/cluster-api-addon-provider-zarf</code>.</p>
+<p>It is a reusable workflow, called from <a href="#goreleaser"><code>release.yaml</code></a> in a job that <code>needs</code> goreleaser and the operator-artifact publish - never keyed off the release event, which fires before the images the package pulls exist. It also runs on demand from the Actions tab against a tag, which is how a release’s package is republished without re-running the release.</p>
+<p>One package per architecture (<code>amd64</code>, <code>arm64</code>), published serially because both land on one architecture-less Zarf reference. Each build goes through <code>go run ./magefiles/core release:zarfPackage</code>, so the component manifest inside the package is rendered at the version <code>zarf.yaml</code> pins - a guard step fails the run if that version and the tag disagree, which is what a lost <code>x-release-please-version</code> comment looks like. The package is signed with the repository’s Cosign key and verified against <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/cosign.pub"><code>cosign.pub</code></a> before the push.</p>
+<h2 id="what-it-needs-1"><a class="header" href="#what-it-needs-1">What it needs</a></h2>
+<p>The same <code>COSIGN_KEY</code> / <code>COSIGN_PASS</code> secrets as <a href="#goreleaser"><code>release.yaml</code></a>, passed through <code>secrets: inherit</code>, and <code>packages: write</code> on its job to push.</p>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="release-please"><a class="header" href="#release-please">Release Please</a></h1>
 <p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release-please.yaml"><code>.github/workflows/release-please.yaml</code></a> runs on every push to <code>main</code> and keeps one open pull request - the release PR - with the next version number, the regenerated <code>CHANGELOG.md</code>, and the bumped version in <code>.release-please-manifest.json</code>. Merging that pull request is what cuts a release: release-please then pushes the <code>vN.N.N</code> tag, which is what <a href="#goreleaser"><code>release.yaml</code></a> fires on.</p>
 <p>Nothing here decides the version. Conventional commit types in the pull request titles do, by way of the <code>changelog-sections</code> in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/release-please-config.json"><code>release-please-config.json</code></a>.</p>
@@ -930,7 +1038,8 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <li><code>checksums.txt</code>, an SBOM per archive, a cosign bundle per archive and for the checksums file</li>
 <li>a build provenance attestation over <code>checksums.txt</code>, uploaded to the release</li>
 </ul>
-<h2 id="what-it-needs"><a class="header" href="#what-it-needs">What it needs</a></h2>
+<p>After goreleaser succeeds on a <code>v*</code> tag, two more jobs call the air-gapped publish workflows as reusable workflows with <code>secrets: inherit</code>: <a href="#publish-the-cluster-api-operator-artifact"><code>publish-oci-artifact.yaml</code></a> (the Cluster API Operator artifact) and then <a href="#publish-the-zarf-package"><code>publish-zarf-package.yaml</code></a> (the Zarf package, which embeds that artifact and so waits for it). <code>needs:</code> is what sequences them - the release <em>event</em> fires before the images they pull exist.</p>
+<h2 id="what-it-needs-2"><a class="header" href="#what-it-needs-2">What it needs</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -962,7 +1071,7 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <li><strong>One app, one audit trail.</strong> The same app that release-please uses opens these, so there is one installation to grant, one private key to rotate, and one bot in the repository’s audit log.</li>
 </ul>
 <p>The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned - the <code>renovate-version</code> input in the workflow, which Renovate bumps itself via its datasource comment - rather than tracking the hosted service.</p>
-<h2 id="what-it-needs-1"><a class="header" href="#what-it-needs-1">What it needs</a></h2>
+<h2 id="what-it-needs-3"><a class="header" href="#what-it-needs-3">What it needs</a></h2>
 <div class="table-wrapper">
 <table>
 <thead>

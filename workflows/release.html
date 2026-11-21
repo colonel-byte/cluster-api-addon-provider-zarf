@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-45227b9e.js";
+            window.path_to_searchindex_js = "../searchindex-1d961500.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-f34fe35d.js"></script>
+        <script src="../toc-4fa52a72.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -193,6 +193,7 @@
 <li><code>checksums.txt</code>, an SBOM per archive, a cosign bundle per archive and for the checksums file</li>
 <li>a build provenance attestation over <code>checksums.txt</code>, uploaded to the release</li>
 </ul>
+<p>After goreleaser succeeds on a <code>v*</code> tag, two more jobs call the air-gapped publish workflows as reusable workflows with <code>secrets: inherit</code>: <a href="publish-oci-artifact.html"><code>publish-oci-artifact.yaml</code></a> (the Cluster API Operator artifact) and then <a href="publish-zarf-package.html"><code>publish-zarf-package.yaml</code></a> (the Zarf package, which embeds that artifact and so waits for it). <code>needs:</code> is what sequences them - the release <em>event</em> fires before the images they pull exist.</p>
 <h2 id="what-it-needs"><a class="header" href="#what-it-needs">What it needs</a></h2>
 <div class="table-wrapper">
 <table>
