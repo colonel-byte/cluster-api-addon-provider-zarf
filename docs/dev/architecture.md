@@ -295,7 +295,38 @@ A critical architectural pitfall in add-on controllers (including earlier versio
 
 ---
 
-## 8. Enterprise & Air-Gap Advantages
+## 8. Uninstall Semantics & Deletion Policy
+
+§7 covers the cluster going away; this section covers the *declaration* going away while the cluster lives on: a `ZarfPackageProxy` is deleted, or a cluster's labels change so the selector no longer matches it.
+
+### A. `spec.deletionPolicy: Delete | Retain`
+
+The proxy declares what happens to its deployed packages when their release is deleted:
+
+- **`Delete` (the default, matching CAAPH)**: the package is uninstalled from the workload cluster - via `packager.Remove`, run in a removal Job on the same plumbing as deploys (§6's deploy Job: same image, kubeconfig mount, cache volume, and `deployJob` knobs) - before the release object is allowed to go away.
+- **`Retain`**: the release object is deleted immediately and the deployed package is orphaned on the workload cluster, left running and operator-owned from then on. The honest choice for large or foundational packages, where an in-place uninstall is unreliable and an orphaned-but-working package beats a half-removed one.
+- **`ApplyOnce` proxies ignore the policy and always behave as `Retain`**: a seed cannot be un-run, and its durable record lives on the workload cluster (§3) regardless of what happens to management-cluster objects.
+
+### B. Mechanics: a finalizer only where a removal is owed
+
+- Releases under `Delete` carry a CAAPZ finalizer; the controller runs the removal Job and drops the finalizer on success. Releases under `Retain` (and all ApplyOnce releases) carry **no finalizer at all**, so their deletion can never block on anything.
+- The finalizer's presence tracks the proxy's *current* policy: flipping a proxy between `Delete` and `Retain` adds or strips the finalizer on its releases on the next reconcile, so the policy is live-editable and acts as the declarative break-glass for a stuck removal.
+- **Proxy deletion**: a finalizer on the proxy deletes its releases (found via `spec.packageProxyRef`) and waits for them to finish their own finalization before the proxy goes away. Releases are deliberately *not* owner-referenced to the proxy: Kubernetes garbage collection only deletes a dependent once **all** of its owners are gone, so a second ownerRef would stop Cluster deletion from collecting releases and quietly break §7's cascade. The Cluster stays the sole owner.
+- **Selector un-match**: the controller deletes the no-longer-matching release, and the same finalizer path decides whether that is an uninstall (`Delete`) or an orphan (`Retain`).
+
+### C. The §7 override: cluster teardown always wins
+
+If the release's owning `Cluster` has a deletion timestamp, no longer exists, or is unreachable, the finalizer is dropped **without** attempting removal. Uninstall semantics never block or delay cluster deletion; §7 outranks this section wherever they conflict.
+
+When removal fails while the Cluster is alive and reachable, the controller requeues with backoff and surfaces a `RemovalFailed` condition on the release. The operator's escape hatches, in preference order: flip the proxy to `Retain` (declarative, affects all its releases), or remove the finalizer by hand (surgical, one release).
+
+### D. Known limitation: shrinking `spec.components`
+
+Removing an entry from `spec.components` does not remove that component from the workload cluster - a redeploy with fewer components leaves the extras running. Removed components are orphaned until the package is removed and redeployed. Per-component removal choreography is deliberately out of scope until a real need arrives.
+
+---
+
+## 9. Enterprise & Air-Gap Advantages
 
 - **Air-gap Compliant**: Zarf packages bundle container images, Helm charts, and manifests together in an OCI artifact, eliminating out-of-band image syncing.
 - **Supply Chain Security**: Cosign signature verification occurs on the management plane before any package payload touches the remote workload cluster.
