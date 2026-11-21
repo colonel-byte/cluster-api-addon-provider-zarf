@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e44f72ea.js";
+            window.path_to_searchindex_js = "searchindex-e3beb62b.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-2c30f17f.js"></script>
+        <script src="toc-d9a373b5.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1067,6 +1067,18 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 </ul>
 <h2 id="what-does-not"><a class="header" href="#what-does-not">What does not</a></h2>
 <p>An internal note is not a guide. If an operator would ever run the commands in it, it belongs in <a href="guides/README.html"><code>docs/guides/</code></a>; if a contributor would, it belongs in <a href="dev/README.html"><code>docs/dev/</code></a>. The distinction matters because the checking standard is different - a wrong count in a note here costs a reader a minute, and a wrong command in a guide costs an operator an afternoon.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-controller-reads-clusters-through-capis-typed-api-module"><a class="header" href="#the-controller-reads-clusters-through-capis-typed-api-module">The controller reads Clusters through CAPI’s typed API module</a></h1>
+<p>The controller imports <code>sigs.k8s.io/cluster-api/api</code> - the types-only module CAPI split out at v1.11 - and reads <code>Cluster</code> objects as <code>clusterv1.Cluster</code> from <code>api/core/v1beta2</code>. It does not read Clusters as <code>unstructured.Unstructured</code> or <code>PartialObjectMetadata</code>, and it does not import the main <code>sigs.k8s.io/cluster-api</code> module. Decided 2026-11-21, before the first functional reconcile milestone, which this gates. The pin is v1.14.4, matching cluster-api-provider-cargoship.</p>
+<h2 id="why-typed-rather-than-unstructured"><a class="header" href="#why-typed-rather-than-unstructured">Why typed rather than unstructured</a></h2>
+<ul>
+<li><strong>The v1beta2 contract is a set of field paths, and hand-encoding them is the failure mode the contract pass just fixed.</strong> The architecture doc moved from <code>status.controlPlaneReady</code> (v1beta1) to <code>status.initialization.controlPlaneInitialized</code> (v1beta2) precisely because a string path written from memory had drifted across contract versions. Unstructured access re-encodes every such path as a string literal (<code>NestedBool(obj.Object, "status", "initialization", "controlPlaneInitialized")</code>) that compiles against any contract, wrong or right. The typed struct makes the next contract migration a compile error instead of a silent false.</li>
+<li><strong>The sister repo has already validated the exact pin combination.</strong> cluster-api-provider-cargoship pins <code>sigs.k8s.io/cluster-api/api v1.14.4</code> against the same <code>controller-runtime v0.25.3</code> and <code>apimachinery v0.37.2</code> this module pins, so the compatibility question the vendored build makes expensive to discover late is already answered in production next door. Mirroring its pin also keeps the two providers’ Renovate upgrades in lockstep.</li>
+<li><strong>The surface only grows from here.</strong> The reconcile core starts with labels, <code>controlPlaneInitialized</code>, and ownerReferences, but §6 already commits to reading conditions (<code>ControlPlaneInitialized</code>), <code>status.phase</code> for deletion handling, and the <code>concurrent-deploys</code> annotation - and envtest needs the real types to build fixture Clusters. An unstructured shim that is tolerable for three fields is not tolerable for the full §6/§7 read set, and converting mid-implementation would churn every reconciler layer above it.</li>
+</ul>
+<p>What it costs: a vendored dependency carried by every clone. The types-only module bounds that - its dependency graph is apimachinery-sized, not the main module’s (which links the full CAPI controller machinery, webhooks, and feature gates). <code>go list -deps</code> the import before widening it.</p>
+<h2 id="the-boundary-types-module-yes-main-module-not-yet"><a class="header" href="#the-boundary-types-module-yes-main-module-not-yet">The boundary: types module yes, main module not yet</a></h2>
+<p>Only <code>sigs.k8s.io/cluster-api/api</code> is imported. The main <code>sigs.k8s.io/cluster-api</code> module’s <code>util/*</code> helpers (<code>patch</code>, <code>conditions</code>, <code>predicates</code>) are genuinely useful and cargoship imports them - but each is a separate, later decision with its own vendor delta, taken when a reconciler actually wants the helper, not pre-emptively. Nothing here forecloses adding it; this file records that its absence today is deliberate, not an oversight.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="a-deploy-runs-in-its-own-kubernetes-job-and-verification-precedes-it"><a class="header" href="#a-deploy-runs-in-its-own-kubernetes-job-and-verification-precedes-it">A deploy runs in its own Kubernetes Job, and verification precedes it</a></h1>
 <p>Every package deploy (and removal) runs in a Kubernetes Job the controller stamps - one per <code>ZarfPackageRelease</code> - never in the controller process. The controller resolves the package’s tag to a digest and verifies its Cosign signature at resolution time, before any Job exists; the Job pulls that verified digest. Both halves were decided together, on 2026-11-20/21, and constrain the deploy subcommand, the resolver, and the manager deployment manifests. The user-facing contract is <code>docs/dev/architecture.md</code> §6 steps 4 and 6; this file is the why.</p>
