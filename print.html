@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d9d0d95f.js";
+            window.path_to_searchindex_js = "searchindex-6507440c.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-f0a4f2c1.js"></script>
@@ -473,9 +473,8 @@ status:
 <li>
 <p><strong><code>strategy: Reconcile</code> (Continuous Lifecycle)</strong>:</p>
 <ul>
-<li>Continuously watches the package in the OCI registry or changes in <code>spec.package.version</code>.</li>
-<li>On version bumps or variable edits, redeploys the package to converge the workload cluster to the new state.</li>
-<li>Detects and repairs cluster drift.</li>
+<li>Reacts to changes in <code>spec.package.version</code>, values, and variables by redeploying the package to converge the workload cluster to the new state. The package content itself is pinned by digest (see “Package identity” below); following a mutable tag is an explicit per-proxy opt-in, polled rather than watched - there is no OCI watch primitive.</li>
+<li>“Drift repair” is periodic idempotent redeploy of the pinned digest on the controller’s resync interval; the Zarf SDK has no drift detection.</li>
 </ul>
 </li>
 <li>
@@ -488,7 +487,26 @@ status:
 </ul>
 </li>
 </ol>
-<h4 id="where-the-never-re-execute-record-actually-lives"><a class="header" href="#where-the-never-re-execute-record-actually-lives">Where the “never re-execute” record actually lives</a></h4>
+<h4 id="package-identity-a-tag-resolves-once-to-a-digest"><a class="header" href="#package-identity-a-tag-resolves-once-to-a-digest">Package identity: a tag resolves once to a digest</a></h4>
+<p><code>spec.package.version</code> is an OCI tag, and tags are mutable; the deployed fleet must not be. So the tag is an <em>input to resolution</em>, not the package’s identity:</p>
+<ul>
+<li>On first resolution - proxy creation, or any edit to <code>spec.package.repository</code>/<code>version</code> - the controller resolves the tag to its digest and records it in <code>status.resolvedDigest</code>. Every subsequent pull, Cosign verification, and deploy uses <strong>the digest, not the tag</strong> (Zarf resolves digest references natively), and each release records the digest it actually deployed. A re-pushed tag therefore cannot change what the fleet runs, even in principle.</li>
+<li>The controller still re-checks the tag on reconcile. When the registry’s tag no longer matches the pinned digest, the proxy gets a warning condition with <code>reason: TagContentChanged</code>, naming both digests. Pinned deploys continue untouched; the new content is <strong>not</strong> adopted. The update path is the one that already exists: bump <code>spec.package.version</code>, which re-resolves and re-pins.</li>
+<li>In an air-gapped registry that is periodically re-staged, a re-push of the same tag trips <code>TagContentChanged</code> on every re-stage. That is working as intended: the operator’s move is a version bump (or the opt-in below), never silent adoption.</li>
+</ul>
+<p><strong>Following a mutable tag is an explicit, per-proxy opt-in via annotations</strong> - an operational/dev toggle for connected test environments, deliberately kept out of the GitOps-owned spec:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Annotation</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>addons.colonel-byte.dev/follow-tag: "true"</code></td><td>Re-resolve the tag on a timer; a digest change re-pins <code>status.resolvedDigest</code> and triggers redeploy</td></tr>
+<tr><td><code>addons.colonel-byte.dev/follow-tag-interval</code></td><td>Poll interval as a Go duration. Default <code>15m</code>; meaningless without <code>follow-tag</code>; invalid values fall back to the default with a warning event</td></tr>
+</tbody>
+</table>
+</div>
+<p>ApplyOnce proxies take no part in re-resolution or tag-following: their one deploy pinned what it pinned.</p>
 <p>The <code>ZarfPackageRelease</code> is a cache of the guarantee, not the guarantee itself: it is deliberately garbage-collected with its owning <code>Cluster</code> (§7), and a <code>Cluster</code> object is deleted <em>without the infrastructure being wiped</em> during <code>clusterctl move</code> and de-import/re-import - exactly the imported-cluster flows seed packages target. The durable record is the one Zarf itself writes on the workload cluster: every deploy stores a <code>zarf-package-&lt;name&gt;</code> secret (labeled <code>package-deploy-info</code>) in the <code>zarf</code> namespace, which survives management-cluster churn because it lives on the physical cluster being guarded.</p>
 <p>So the seed check is two-tier:</p>
 <ul>
@@ -579,7 +597,7 @@ CAAPZ retrieves the cluster’s administrative kubeconfig secret (<code>&lt;clus
 <li><strong>Seed Check</strong>:
 If <code>spec.strategy == ApplyOnce</code>, skip execution when the release is already <code>applied: true</code>. Otherwise probe the workload cluster for the package’s <code>zarf-package-&lt;name&gt;</code> deployed-package secret in the <code>zarf</code> namespace; if present, mark the release <code>Completed</code> without deploying (see §3, “Where the ‘never re-execute’ record actually lives”).</li>
 <li><strong>OCI Pull &amp; Signature Verification</strong>:
-The package is fetched from the OCI registry to local cache storage on the controller pod. If <code>signatureKeySecretRef</code> is set, verify the Cosign signature against the public key before extracting layers.</li>
+The package is fetched from the OCI registry <strong>by its pinned digest</strong> (<code>status.resolvedDigest</code>, §3) to local cache storage. If <code>signatureKeySecretRef</code> is set, verify the Cosign signature against the public key before extracting layers; verification binds to the digest, so a re-pushed tag never inherits a prior verification.</li>
 <li><strong>Auto-Init Check</strong>:
 If <code>spec.init.autoInit == true</code>, probe the target cluster for Zarf state (<code>zarf-state</code> secret in <code>zarf</code> namespace). If absent, deploy the Zarf init package first.</li>
 <li><strong>Deploy Execution</strong>:
@@ -587,7 +605,15 @@ Render variables (<code>{{ .Cluster.metadata.name }}</code>), assemble <code>typ
 <li><strong>Status Update</strong>:
 Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready: True</code> on the release and proxy objects.</li>
 </ol>
-<hr>
+<h3 id="signature-trust-model"><a class="header" href="#signature-trust-model">Signature Trust Model</a></h3>
+<p><code>signatureKeySecretRef</code> adopts the sister cargoship repository’s semantics verbatim (its <code>signatureKeySecretRef</code> field and the reasoning in its doc comment):</p>
+<ul>
+<li>The reference names a Secret whose <code>cosign.pub</code> key holds the Cosign public key. It resolves in the proxy’s namespace unless <code>--secret-namespaces</code> permits another (§2C), which is what bounds “anyone who can edit the proxy picks the key”: a proxy author can only name keys their own namespace holds.</li>
+<li><strong>Empty verifies nothing.</strong> A signature with no key to check it against is not verification, so the controller logs that it could not verify and deploys anyway - for a signed package exactly as for an unsigned one. The <code>PackageSignatureVerified</code> condition is absent, not <code>True</code>.</li>
+<li><strong>Naming a key makes verification a precondition.</strong> An unsigned package, a signature the key does not verify, and a signature in a form that cannot be checked are all refused, and the refusal comes out of the package pull - before anything is extracted, cached further, or handed to a deploy Job. Verification binds to the pinned digest (§3), so a re-pushed tag never inherits a prior verification.</li>
+<li><strong>Rotation is a Secret edit.</strong> Verification runs on the passes that deploy, against the key as it currently reads, so a rotated key takes effect on the next reconcile and a Secret deleted under a converged fleet is reported as a failed precondition rather than noticed the next time something changes.</li>
+<li><strong>Fleet-wide enforcement is deliberately deferred.</strong> Per-proxy keys match the sister repository’s model; a controller-level <code>--require-signature</code> flag (refuse any proxy with no key named) is the natural later addition if an environment needs “no unverified package, ever” as policy rather than convention.</li>
+</ul>
 <h2 id="7-non-blocking-cluster-deletion--lifecycle-safety"><a class="header" href="#7-non-blocking-cluster-deletion--lifecycle-safety">7. Non-Blocking Cluster Deletion &amp; Lifecycle Safety</a></h2>
 <p>A critical architectural pitfall in add-on controllers (including earlier versions of CAAPH) is hanging or blocking cluster deletion when a workload cluster is destroyed. CAAPZ explicitly avoids blocking cluster deletion:</p>
 <h3 id="a-non-blocking-finalizer-policy"><a class="header" href="#a-non-blocking-finalizer-policy">A. Non-Blocking Finalizer Policy</a></h3>
@@ -624,7 +650,15 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 <h3 id="d-known-limitation-shrinking-speccomponents"><a class="header" href="#d-known-limitation-shrinking-speccomponents">D. Known limitation: shrinking <code>spec.components</code></a></h3>
 <p>Removing an entry from <code>spec.components</code> does not remove that component from the workload cluster - a redeploy with fewer components leaves the extras running. Removed components are orphaned until the package is removed and redeployed. Per-component removal choreography is deliberately out of scope until a real need arrives.</p>
 <hr>
-<h2 id="9-enterprise--air-gap-advantages"><a class="header" href="#9-enterprise--air-gap-advantages">9. Enterprise &amp; Air-Gap Advantages</a></h2>
+<h2 id="9-clusterctl-provider-contract"><a class="header" href="#9-clusterctl-provider-contract">9. Clusterctl Provider Contract</a></h2>
+<p>CAAPZ ships as a clusterctl-manageable provider, the same way the sister cargoship repository does:</p>
+<ul>
+<li><strong><code>metadata.yaml</code></strong> at the repository root maps each release series to its Cluster API contract (<code>v1beta2</code>). Release-please owns the current series entry via <code>x-release-please-major</code>/<code>-minor</code> markers; past series are appended as releases are cut so <code>clusterctl upgrade</code> can map an installed version. Without this file, <code>clusterctl init</code> refuses to install the provider.</li>
+<li><strong>Provider labels</strong> - <code>clusterctl.cluster.x-k8s.io: ""</code> and <code>cluster.x-k8s.io/provider: addon-zarf</code> - go on every manifest in the release bundle, so clusterctl can find and manage what it installed. They land with the manager deployment manifests.</li>
+<li><strong><code>clusterctl move</code></strong>: <code>ZarfPackageProxy</code> and <code>ZarfPackageRelease</code> carry the <code>clusterctl.cluster.x-k8s.io/move</code> label so a pivot carries the declarations to the new management cluster. Releases are re-derivable (the controller re-stamps them from proxies and Clusters), but moving them preserves status history and avoids a re-deploy window; proxies are <em>not</em> re-derivable and must move. The ApplyOnce guarantee survives either way - it lives on the workload cluster (§3), not in anything being moved. The §2C caveat stands: a cross-namespace secret is outside what move carries.</li>
+</ul>
+<hr>
+<h2 id="10-enterprise--air-gap-advantages"><a class="header" href="#10-enterprise--air-gap-advantages">10. Enterprise &amp; Air-Gap Advantages</a></h2>
 <ul>
 <li><strong>Air-gap Compliant</strong>: Zarf packages bundle container images, Helm charts, and manifests together in an OCI artifact, eliminating out-of-band image syncing.</li>
 <li><strong>Supply Chain Security</strong>: Cosign signature verification occurs on the management plane before any package payload touches the remote workload cluster.</li>
