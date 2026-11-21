@@ -96,3 +96,39 @@ jobs:
         run: |
           cp "${{ steps.attest-packages.outputs.bundle-path }}" packages.intoto.jsonl
           gh release upload "${GITHUB_REF_NAME}" packages.intoto.jsonl --clobber
+
+  # The two air-gapped install artifacts. Both carry this release's controller image - the Zarf
+  # package by value, the operator artifact by reference in the component manifest - so both have
+  # to wait for goreleaser, and needs is what guarantees that. Watching for the release event
+  # instead does not work: release-please publishes the release well before goreleaser has pushed
+  # an image, so a package build would pull a tag that does not exist yet. The Zarf package also
+  # carries the operator artifact itself, so it additionally waits for that publish.
+  #
+  # Version tags only. goreleaser takes every tag, while release-please only ever pushes vN.N.N,
+  # and both of these name a release version in a published reference.
+  #
+  # secrets: inherit passes the Cosign key each one signs with. Each permissions block is written
+  # to match the called workflow's own job exactly: a caller's grant is the ceiling for what it
+  # calls, so these can be narrowed down the chain but never widened.
+  publish-oci-artifact:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    needs:
+      - goreleaser
+    if: startsWith(github.ref_name, 'v')
+    uses: ./.github/workflows/publish-oci-artifact.yaml
+    secrets: inherit
+
+  publish-zarf-package:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    needs:
+      - goreleaser
+      - publish-oci-artifact
+    if: startsWith(github.ref_name, 'v')
+    uses: ./.github/workflows/publish-zarf-package.yaml
+    secrets: inherit

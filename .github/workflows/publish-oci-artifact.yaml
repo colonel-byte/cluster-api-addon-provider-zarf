@@ -1,0 +1,88 @@
+---
+name: Publish the Cluster API Operator artifact
+
+# The third way the Cluster API Operator - and so Rancher Turtles - can install this provider:
+# not from the release page, and not from ConfigMaps, but from one OCI artifact holding
+# metadata.yaml and the addon components. See docs/guides/rancher-turtles.md.
+#
+# `release:ociArtifact` deliberately builds a layout rather than pushing one, because the
+# registry an air gap uses is on the other side of it from the machine that builds it. This is
+# the one registry that is not: ghcr.io/colonel-byte/turtle/addon-zarf is what somebody mirrors
+# *from*.
+#
+# The artifact names the controller image by tag, so it cannot be built until goreleaser has
+# pushed it. release.yaml calls this as a reusable workflow in a job that needs goreleaser, and
+# needs is what holds the two apart; keying off the release event instead would race, because
+# release-please publishes the release well before goreleaser has pushed an image. A called
+# workflow runs at its caller's ref, so GITHUB_REF_NAME below is the tag being released.
+#
+# Also on demand from the Actions tab, which is how a release is republished: run it against the
+# tag, rather than re-running a whole release.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+# Read only at the top so that a job has to ask for what it writes.
+permissions:
+  contents: read
+
+env:
+  ARTIFACT: ghcr.io/colonel-byte/turtle/addon-zarf
+
+jobs:
+  publish:
+    # - packages: write pushes the artifact and its signature
+    # - id-token: write is the OIDC token cosign signs against
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # No ref: the run is already at the tag - the caller's, or the one picked from the Actions
+      # tab - which is the only commit whose manifests name this release's image.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup golang
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup ORAS
+        uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+
+      - name: Setup cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      # oras and cosign both read the Docker credential store this writes, so one login covers
+      # the push and the signature.
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the artifact
+        run: go run ./magefiles/core release:ociArtifact "${GITHUB_REF_NAME}"
+
+      # From the layout directory rather than the tarball the target also writes:
+      # `--from-oci-layout` on a tar wants oci-layout and index.json at the archive root, which
+      # is a thing to get wrong and nothing to gain here.
+      - name: Push the artifact
+        run: |
+          oras cp --from-oci-layout "out/oci:${GITHUB_REF_NAME}" "${ARTIFACT}:${GITHUB_REF_NAME}"
+
+      # Signed by digest, never by tag: a signature against a tag says nothing about which bytes
+      # were signed once the tag can move.
+      - name: Sign the artifact
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASS }}
+        run: |
+          digest=$(oras manifest fetch --descriptor "${ARTIFACT}:${GITHUB_REF_NAME}" | jq -r .digest)
+          echo "signing ${ARTIFACT}@${digest}"
+          cosign sign --key env://COSIGN_KEY --yes "${ARTIFACT}@${digest}"
