@@ -69,6 +69,21 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASS }}
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_KEY }}
 
+      # The two files clusterctl fetches by name. Checked rather than assumed, because a release
+      # missing one of them fails at `clusterctl init` time with a 404 that names a URL rather
+      # than a build step, and the fix is a whole new tag.
+      - name: Check clusterctl's artifacts were published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for asset in addon-components.yaml metadata.yaml; do
+            if ! gh release view "${GITHUB_REF_NAME}" --json assets \
+                --jq '.assets[].name' | grep -qx "${asset}"; then
+              echo "::error::${asset} is missing from the release; clusterctl cannot install this version"
+              exit 1
+            fi
+          done
+
       - name: Attest packages
         id: attest-packages
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
