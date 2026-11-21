@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f9366ab3.js";
+            window.path_to_searchindex_js = "searchindex-45227b9e.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-8f46e77e.js"></script>
+        <script src="toc-f34fe35d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -925,6 +925,8 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <ul>
 <li>one binary per <code>goos</code>/<code>goarch</code> pair, version and commit baked in via <code>-ldflags -X</code></li>
 <li>a <code>tar.gz</code> per platform, <code>zip</code> on Windows, named to match <code>uname</code> output</li>
+<li>the controller image <code>ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller</code>, built for <code>linux/amd64</code> and <code>linux/arm64</code> from <code>containers/manager/Dockerfile</code> and cosign-signed (<code>docker_signs:</code>) - which is why the workflow sets up QEMU, Buildx, and a ghcr.io login before goreleaser runs, and why the job holds <code>packages: write</code></li>
+<li><code>out/addon-components.yaml</code> and <code>out/metadata.yaml</code> - the component manifest and provider metadata clusterctl fetches by name from the release assets, rendered by the <code>release:manifests</code> before hook at the release version and checked for presence after publish</li>
 <li><code>checksums.txt</code>, an SBOM per archive, a cosign bundle per archive and for the checksums file</li>
 <li>a build provenance attestation over <code>checksums.txt</code>, uploaded to the release</li>
 </ul>
@@ -1127,6 +1129,18 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <p>The deploy subcommand may re-verify on load (<code>LoadOptions.VerifyBlobOptions</code>) as cheap defense in depth; that is an implementation choice, not part of this contract. What <em>is</em> part of it: the rendered spec handed to the Job carries a digest reference, never a tag, and a Job must never be stamped from an unresolved or unverified proxy.</p>
 <h2 id="the-pod-is-a-pure-operator-files-in-termination-message-out"><a class="header" href="#the-pod-is-a-pure-operator-files-in-termination-message-out">The pod is a pure operator: files in, termination message out</a></h2>
 <p>Decided with the verification placement, for the same trust-boundary reason: the deploy pod knows nothing of the management cluster beyond the files on its disk. Its inputs are three mounts - the rendered deploy spec (a per-release Secret the controller writes: digest-pinned package reference, rendered values and variables, component selection), the target cluster’s kubeconfig, and the cache volume. It holds no management-cluster credentials, its service account grants nothing, and it makes no management-cluster API calls - which also settles where rendering runs (the controller, which can read Cluster metadata; the pod cannot and must not). Results return in the pod termination message; the controller reads the finished Job and patches release status. The alternative - the pod patching its own release status - would hand every deploy pod, and therefore every package <code>action</code>, a management-cluster write credential, re-opening the blast radius the Job model exists to close.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="the-zarf-package-is-built-from-out-and-pins-its-version-everywhere-it-appears"><a class="header" href="#the-zarf-package-is-built-from-out-and-pins-its-version-everywhere-it-appears">The Zarf package is built from <code>out/</code>, and pins its version everywhere it appears</a></h1>
+<p>This repository ships a Zarf <code>v1beta1</code> package definition, <a href="../zarf.yaml"><code>zarf.yaml</code></a>, for management clusters with no route to <code>ghcr.io</code> - the same environments this provider deploys <em>into</em> are the ones it has to be <em>delivered</em> through. The file mirrors cluster-api-provider-cargoship’s <code>zarf.yaml</code>, and its <code>docs/agent/choice-zarf-package.md</code> is the original of this argument. Two things about it look like oversights and are not.</p>
+<h2 id="it-deploys-outaddon-componentsyaml-not-the-kustomization"><a class="header" href="#it-deploys-outaddon-componentsyaml-not-the-kustomization">It deploys <code>out/addon-components.yaml</code>, not the kustomization</a></h2>
+<p>Zarf can run kustomize itself - a manifest takes <code>kustomize.files</code> as readily as <code>files</code> - so the package could point at <code>config/default</code> and skip <code>release:manifests</code> entirely. It does not, because then the provider would be assembled two ways: once by <code>release:manifests</code> for the operator who installs with <code>clusterctl</code>, and once by Zarf for the operator in an air gap. Both would be correct on the day they were written and free to drift afterwards. Pointing at the release artifact means the air-gapped install is the <em>same</em> artifact, and <code>release:zarfPackage</code> builds it first so there is nothing to forget.</p>
+<p>The one kustomization Zarf does run, <code>manifest/turtle/addon</code>, assembles nothing a second way: it wraps that same <code>out/addon-components.yaml</code> (staged beside it by <code>release:zarfPackage</code>, gitignored there) into the ConfigMap the Cluster API Operator reads a provider out of.</p>
+<h2 id="the-version-and-image-tags-are-literals-repeated"><a class="header" href="#the-version-and-image-tags-are-literals-repeated">The version and image tags are literals, repeated</a></h2>
+<p><code>###ZARF_PKG_TMPL_...###</code> does not reach an image reference in a <code>v1beta1</code> package: Zarf parses the reference during validation, which runs before <code>--set</code> is applied, and the create fails with an invalid-reference error - <code>zarf dev lint .</code> reports the same thing, so this is cheap to re-confirm.</p>
+<p>So the version is written out as a literal in every file that needs it - <code>zarf.yaml</code> (once as the package version, twice as image tags), <code>manifest/turtle/capi-provider-addon.yaml</code>, <code>manifest/turtle/addon/kustomization.yaml</code> - and release-please rewrites all of them on a release: each file is in <code>extra-files</code> in <a href="../release-please-config.json"><code>release-please-config.json</code></a>, and each pinned line carries the <code>x-release-please-version</code> comment it looks for. Removing one of those comments is silent - the package still builds, pinning a tag a release ago.</p>
+<p><code>release:zarfPackage</code> reads the version back out of <code>zarf.yaml</code> and renders the component manifest at it, rather than taking a tag like <code>release:manifests</code> does. A tag parameter there would produce a package whose manifest names one version and whose image carries another, which fails at deploy time against the in-cluster registry rather than at build time.</p>
+<h2 id="what-it-deliberately-leaves-out"><a class="header" href="#what-it-deliberately-leaves-out">What it deliberately leaves out</a></h2>
+<p>Core Cluster API, Rancher Turtles, and every Zarf package this provider itself deploys. Each is somebody else’s artifact with its own cadence, and bundling any of them would make this package a mirror of the whole air gap rather than of this provider. The <code>rancher-turtle-artifacts</code> component is <code>optional: true</code> for the related reason recorded inline: its <code>CAPIProvider</code> fails on a cluster without the Turtles CRDs, and the default deploy has to work for the clusterctl-shaped cluster too.</p>
 
                     </main>
 
