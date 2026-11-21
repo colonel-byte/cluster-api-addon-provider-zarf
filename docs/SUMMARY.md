@@ -44,3 +44,4 @@
 <!-- Excluded from the print page (print.html) by docs/css/print.css. -->
 
 - [README](agent/README.md)
+- [choice-deploy-job](agent/choice-deploy-job.md)
