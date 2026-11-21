@@ -7,6 +7,8 @@
 /core
 /bin/
 /dist/
+# release:manifests output - the component manifest and metadata a release uploads.
+/out/
 
 # `npm ci` in .github/commitlint, which the PR Title Check workflow and nothing else runs.
 # The lockfile is committed; what it installs is not.
