@@ -8,6 +8,7 @@
 # Guides
 
 - [README](guides/README.md)
+- [rancher-turtles](guides/rancher-turtles.md)
 
 -----------
 
