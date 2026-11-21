@@ -2868,6 +2868,23 @@ spec:
                 description: observedGeneration is the generation the status reflects.
                 format: int64
                 type: integer
+              packageKind:
+                description: |-
+                  packageKind is the resolved artifact's kind - ZarfPackageConfig, or ZarfInitConfig,
+                  which is what §6 step 5's init-first eligibility gate reads.
+                type: string
+              resolvedDigest:
+                description: |-
+                  resolvedDigest is the package manifest digest the declared tag resolved to, pinned on
+                  first resolution. Every pull, verification, and deploy uses this digest, never the tag,
+                  so a re-pushed tag cannot change what the fleet runs. See docs/dev/architecture.md §3.
+                type: string
+              resolvedRef:
+                description: |-
+                  resolvedRef is the "repository:version" whose resolution resolvedDigest pins. The
+                  controller re-resolves only when the spec's reference no longer matches it - an edit to
+                  values or components must not silently re-pin a moved tag.
+                type: string
             type: object
         type: object
     served: true
