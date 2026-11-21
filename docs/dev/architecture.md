@@ -199,10 +199,17 @@ Consequences, all deliberate:
 
 - Re-importing a live cluster re-creates its releases but does not re-run its seed packages.
 - Hand-deleting a `ZarfPackageRelease` does not re-run the seed; the recreated release adopts the existing record.
-- The escape hatch for intentionally re-seeding is removing the package's record on the workload cluster (`zarf package remove`, or deleting the `zarf-package-<name>` secret) - an explicit operator action against the cluster being re-seeded.
+- Intentionally re-seeding takes **two deletions, record first**: remove the package's record on the workload cluster (`zarf package remove`, or deleting the `zarf-package-<name>` secret), *then* delete the `ZarfPackageRelease`. The release alone is not enough - the recreated release adopts the surviving record - and the record alone is not enough either, because `status.applied: true` short-circuits without probing. Deleting the release before the record just re-adopts.
 - Wiping and rebuilding infrastructure behind the same `Cluster` object re-seeds, because the rebuilt cluster carries no record. That is the desired reading of "once per physical cluster".
 
 One restriction follows: Zarf only stores the deployed-package record when the package has at least one cluster-touching component, so **an ApplyOnce package must include one**. A pure-actions package would leave no durable record, silently degrading the guarantee to the garbage-collectable release; the controller surfaces a condition on the release when a completed seed deploy left no record behind.
+
+#### Seed-then-manage handoff, and the package name as identity
+
+A supported pattern (used by the sister `ansible-collection-zarf` tooling): an ApplyOnce proxy seeds a package - `zarf-init`, say - and a Reconcile proxy later takes over the *same package name* for day-2 lifecycle. This works by construction: the Reconcile path never consults the seed record, Zarf treats a same-name deploy as an in-place upgrade updating the same record, and on re-import the seed proxy adopts whatever version the successor last deployed. Two properties to hold on to:
+
+- **Adoption is keyed on the Zarf package name on the cluster - nothing else.** Not the proxy's name, not the declared version or digest. Any ApplyOnce proxy whose package carries that name adopts the record, even if its spec declares different content. Package names are therefore an identity namespace the fleet's conventions must own; two unrelated packages sharing a name will silently satisfy each other's seed checks.
+- **A successor proxy for a seeded package must be `deletionPolicy: Retain`** (§8). Under the default `Delete`, deleting the successor runs `zarf package remove` on the shared package name - destroying both the package and the deployed-package record the seed's guarantee rests on, while the seed's release still reports `Completed` and its `applied` cache suppresses any re-seed. The cluster loses the package; nothing notices. `Retain` on the successor keeps the handoff safe.
 
 ---
 
@@ -336,6 +343,7 @@ The proxy declares what happens to its deployed packages when their release is d
 - **`Delete` (the default, matching CAAPH)**: the package is uninstalled from the workload cluster - via `packager.Remove`, run in a removal Job on the same plumbing as deploys (§6's deploy Job: same image, kubeconfig mount, cache volume, and `deployJob` knobs) - before the release object is allowed to go away.
 - **`Retain`**: the release object is deleted immediately and the deployed package is orphaned on the workload cluster, left running and operator-owned from then on. The honest choice for large or foundational packages, where an in-place uninstall is unreliable and an orphaned-but-working package beats a half-removed one.
 - **`ApplyOnce` proxies ignore the policy and always behave as `Retain`**: a seed cannot be un-run, and its durable record lives on the workload cluster (§3) regardless of what happens to management-cluster objects.
+- **A Reconcile proxy managing a package an ApplyOnce proxy seeded must also be `Retain`**: `Delete` on the successor removes the shared package name's deployed-package record along with the package, silently voiding the seed guarantee while the seed's release still reports `Completed` - see §3's seed-then-manage handoff.
 
 ### B. Mechanics: a finalizer only where a removal is owed
 
