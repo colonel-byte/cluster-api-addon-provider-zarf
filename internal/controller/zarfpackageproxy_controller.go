@@ -34,6 +34,10 @@ type ZarfPackageProxyReconciler struct {
 	// sized for the largest package plus its extraction - see AGENTS.md's quirks section.
 	CachePath string
 
+	// DeployImage is the image deploy Jobs run when a proxy does not override it - normally
+	// this controller's own image, which carries the deploy subcommand.
+	DeployImage string
+
 	// ClusterNamespaces are the namespaces other than a proxy's own it may select Clusters in;
 	// "*" allows any. Empty refuses every cross-namespace selection, surfaced as a condition
 	// with reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
@@ -49,6 +53,7 @@ type ZarfPackageProxyReconciler struct {
 // +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackagereleases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackagereleases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // Reconcile matches the proxy against clusters and converges its releases.
