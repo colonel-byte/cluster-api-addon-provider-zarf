@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -78,6 +79,10 @@ func main() {
 	}
 	if err := addonsv1alpha1.AddToScheme(scheme); err != nil {
 		ctrl.Log.Error(err, "unable to register the addons scheme")
+		os.Exit(1)
+	}
+	if err := clusterv1.AddToScheme(scheme); err != nil {
+		ctrl.Log.Error(err, "unable to register the cluster-api scheme")
 		os.Exit(1)
 	}
 
