@@ -36,11 +36,12 @@ go run ./magefiles/core generate:document   # regenerate docs/index.md, docs/sec
 go run ./magefiles/core dev:checkTables     # check Markdown table padding
 go run ./magefiles/core dev:vendor          # go mod tidy, then go mod vendor
 go run ./magefiles/core dev:verifyVendor    # go mod verify, then a GOPROXY=off build
+go run ./magefiles/core test:envtest        # the tests that need a real API server
 ```
 
 Plain Go commands work for anything mage doesn't wrap - `go build ./...`, `go vet ./...` - but exclude `./magefiles/...` from those, since it fails a bare build for the reason above.
 
-No test invocation is forbidden yet: there are no suites that need real infrastructure. If one arrives (envtest, a kind cluster), name the forbidden invocation here in the same change.
+One test invocation is forbidden: a bare `go test -tags=envtest ./...`. The envtest suites need `CAPI_CRD_DIR` and `KUBEBUILDER_ASSETS` set to generated and downloaded artifacts, and `test:envtest` is what produces them - run the mage target, never the tag by hand. Plain `go test ./api/... ./cmd/... ./internal/...` (no tag) stays runnable with nothing installed.
 
 ### The build is vendored and offline, and that is a requirement
 
