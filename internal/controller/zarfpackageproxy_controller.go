@@ -20,6 +20,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -62,8 +63,8 @@ type ZarfPackageProxyReconciler struct {
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
-// shortcut: scaffold only - it fetches the proxy and stops; cluster matching, release stamping,
-// and deployment land with the first functional milestone.
+// shortcut: matching only - release stamping, dependency verdicts, and deployment land with the
+// following layers of this milestone.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -75,7 +76,29 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version)
+	matched, err := r.matchClusters(ctx, proxy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version,
+		"matchingClusters", len(matched))
+
+	// status.matchingClusters names match the selector's reach: bare in the proxy's own
+	// namespace, namespace-qualified where --cluster-namespaces let the selector cross.
+	names := make([]string, 0, len(matched))
+	for _, cluster := range matched {
+		name := cluster.Name
+		if cluster.Namespace != proxy.Namespace {
+			name = cluster.Namespace + "/" + cluster.Name
+		}
+		names = append(names, name)
+	}
+	before := proxy.DeepCopy()
+	proxy.Status.MatchingClusters = names
+	proxy.Status.ObservedGeneration = proxy.Generation
+	if err := r.Status().Patch(ctx, proxy, client.MergeFrom(before)); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -89,6 +112,7 @@ func (r *ZarfPackageProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// requeueing proxies whose dependsOn names this release's proxy - is a second
 		// mapping that does not exist yet; until it does, dependents re-evaluate on resync.
 		Watches(&addonsv1alpha1.ZarfPackageRelease{}, handler.EnqueueRequestsFromMapFunc(releaseToProxy)).
+		Watches(&clusterv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(r.clusterToProxies)).
 		Complete(r)
 }
 
