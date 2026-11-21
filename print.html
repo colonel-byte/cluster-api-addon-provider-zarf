@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e3beb62b.js";
+            window.path_to_searchindex_js = "searchindex-f9366ab3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d9a373b5.js"></script>
+        <script src="toc-8f46e77e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -689,6 +689,32 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 <li><strong>Supply Chain Security</strong>: Cosign signature verification occurs on the management plane before any package payload touches the remote workload cluster.</li>
 <li><strong>Native CAPI Integration</strong>: Works across all CAPI infrastructure providers (vSphere, AWS, Azure, bare-metal) and bootstrap providers (Cargoship, RKE2, Kubeadm).</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="e2e-testing-the-kind--capd-topology"><a class="header" href="#e2e-testing-the-kind--capd-topology">E2E testing: the kind + CAPD topology</a></h1>
+<p>The end-to-end suite runs the things <a href="../magefiles/test.go"><code>test:envtest</code></a> structurally cannot: real CAPI lifecycle machinery (a control-plane provider flipping <code>ControlPlaneInitialized</code>, the <code>&lt;cluster-name&gt;-kubeconfig</code> secrets CAPI writes, garbage-collection cascades), pods actually scheduling, and an OCI registry reachable from every side of the topology. It stands up a kind management cluster with CAPI core + CAPD initialized into it, one CAPD workload cluster, and a <code>ghcr.io/distribution/distribution:3</code> registry on the kind docker network, then runs the suite in the separate <code>test/e2e</code> module against all of it.</p>
+<pre><code class="language-sh">go run ./magefiles/core e2e:up     # kind + clusterctl init + CAPD workload cluster + registry
+go run ./magefiles/core e2e:run    # the suite, against the running topology
+go run ./magefiles/core e2e:down   # removes everything, including the CAPD machine containers
+</code></pre>
+<p><code>e2e:up</code> is idempotent and resumable - a failed run is re-runnable and picks up where it stopped. The suite does not tear the topology down; iterate on tests against a long-lived topology and run <code>e2e:down</code> when finished.</p>
+<p><strong>The forbidden invocation</strong>: a bare <code>go test</code> inside <code>test/e2e/</code>. The suite talks to a live topology through <code>E2E_KUBECONFIG</code>, which only <code>e2e:run</code> sets - without it every test skips, and a fully-skipped suite reads as green while asserting nothing. <code>test/e2e</code> is its own Go module precisely so the root <code>go test ./...</code> can never reach it; it is also deliberately unvendored, see the exception note in <a href="../magefiles/AGENTS.html"><code>magefiles/AGENTS.md</code></a>.</p>
+<h2 id="host-prerequisites"><a class="header" href="#host-prerequisites">Host prerequisites</a></h2>
+<p><code>docker</code>, <code>kind</code>, and <code>kubectl</code> on <code>PATH</code>, network access (kind node images, the clusterctl binary, provider manifests), and one pair of kernel settings that is easy to miss:</p>
+<h3 id="raise-the-inotify-limits-before-the-first-e2eup"><a class="header" href="#raise-the-inotify-limits-before-the-first-e2eup">Raise the inotify limits before the first <code>e2e:up</code></a></h3>
+<p>kind’s own <a href="https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files">known-issues page</a> documents this, and this repository has hit it: on a stock Linux host, <code>fs.inotify.max_user_instances</code> (often 128) is exhausted by a kind cluster running beside anything else that watches files - another local cluster, an editor, a file sync. The failure does not name inotify: pods on the fresh management cluster crashloop, and <code>kubectl logs</code> on kube-proxy (or cert-manager, or local-path-provisioner) shows</p>
+<pre><code>"command failed" err="failed complete: too many open files"
+</code></pre>
+<p>The fix, once per boot:</p>
+<pre><code class="language-sh">sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512
+</code></pre>
+<p>To make it survive reboots, persist it as a sysctl drop-in:</p>
+<pre><code class="language-sh">printf 'fs.inotify.max_user_watches = 524288\nfs.inotify.max_user_instances = 512\n' | sudo tee /etc/sysctl.d/99-kind-inotify.conf
+sudo sysctl --system
+</code></pre>
+<p>The crashlooped pods recover on their own next restart once the limits are raised - no need to recreate the cluster.</p>
+<h2 id="what-the-suite-covers-today-and-does-not"><a class="header" href="#what-the-suite-covers-today-and-does-not">What the suite covers today, and does not</a></h2>
+<p>Phase 0 of the plan: the two spike assertions that the deploy-Job model rests on in this topology - the server address written in the CAPD-generated kubeconfig secret is reachable from a management-cluster pod, and one registry name (<code>caapz-e2e-registry:5000</code>) resolves and pulls from management pods and workload nodes alike. It does <strong>not</strong> yet run the CAAPZ controller in the cluster (that needs the manager deployment manifests), deploy any Zarf package, or exercise uninstall - those arrive phase by phase with their milestones.</p>
+<p>Every version the topology pins - clusterctl/CAPD, the workload Kubernetes version, the node/registry/test image digests - lives as annotated constants in <code>magefiles/pkg/e2e/e2e.go</code>, each with its Renovate annotation or written bump procedure per the pin-ownership rule in <a href="../magefiles/AGENTS.html#every-pin-needs-an-owner"><code>magefiles/AGENTS.md</code></a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="new-repository-checklist"><a class="header" href="#new-repository-checklist">New repository checklist</a></h1>
 <p>Generating a repository from a template copies <strong>files, not settings</strong>. Everything in this template is a file, so it all arrives; everything in the Settings tab does not, and several of the files that arrive are inert until a matching setting exists. A <code>CODEOWNERS</code> that requires nothing and a workflow that goes green while the site 404s both look fine from the file list.</p>
