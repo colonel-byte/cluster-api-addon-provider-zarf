@@ -9,7 +9,7 @@ The hosted app is simpler and needs no workflow. What it cannot do is use this o
 - **Pull requests opened with an app installation token trigger other workflows.** A pull request opened with the default `GITHUB_TOKEN` does not, by design, so a dependency branch would sit with no checks on it - and an update nothing has tested is not something a reviewer can act on.
 - **One app, one audit trail.** The same app that release-please uses opens these, so there is one installation to grant, one private key to rotate, and one bot in the repository's audit log.
 
-The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned to the action's SHA rather than tracking the hosted service.
+The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned - the `renovate-version` input in the workflow, which Renovate bumps itself via its datasource comment - rather than tracking the hosted service.
 
 ## What it needs
 
