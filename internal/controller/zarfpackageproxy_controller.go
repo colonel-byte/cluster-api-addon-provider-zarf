@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/resolver"
 )
 
 // ZarfPackageProxyReconciler reconciles a ZarfPackageProxy: it matches the proxy's selector
@@ -54,6 +55,14 @@ type ZarfPackageProxyReconciler struct {
 	// SecretNamespaces are the namespaces other than a proxy's own it may name a secret in;
 	// same semantics as ClusterNamespaces, mirroring cargoship's --secret-namespaces.
 	SecretNamespaces []string
+
+	// Resolver pins package tags to digests and verifies signatures (§6 step 4). An interface
+	// so envtest can substitute a stub - a real resolution needs a registry.
+	Resolver resolver.Interface
+
+	// RegistryPlainHTTP speaks HTTP to the package registry, from --registry-plain-http.
+	// Test-topology escape hatch, never the default.
+	RegistryPlainHTTP bool
 }
 
 // +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackageproxies,verbs=get;list;watch;update;patch
@@ -66,8 +75,8 @@ type ZarfPackageProxyReconciler struct {
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
-// shortcut: matching, stamping, and dependency verdicts - resolution and deployment land with
-// M2/M3.
+// shortcut: matching, stamping, verdicts, and resolution - the deploy-spec Secret and
+// deployment land with the next layers and M3.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -85,6 +94,12 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version,
 		"matchingClusters", len(matched))
+
+	before := proxy.DeepCopy()
+	requeueAfter, err := r.resolvePackage(ctx, proxy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	inCycle, err := r.inDependencyCycle(ctx, proxy)
 	if err != nil {
@@ -123,7 +138,6 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		names = append(names, name)
 	}
-	before := proxy.DeepCopy()
 	proxy.Status.MatchingClusters = names
 	proxy.Status.ObservedGeneration = proxy.Generation
 	if len(proxy.Spec.DependsOn) > 0 {
@@ -134,7 +148,8 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err := r.Status().Patch(ctx, proxy, client.MergeFrom(before)); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	// Non-zero only under the follow-tag annotation: the timer that re-resolves the tag.
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // SetupWithManager registers the reconciler with mgr.
