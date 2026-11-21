@@ -41,7 +41,13 @@ spec:
 
 ## Installation
 
-Not yet published. Once released, the provider installs into a management cluster from the manifests under `config/`.
+Each release publishes the provider three ways, all carrying the same component manifest:
+
+- **clusterctl**: `addon-components.yaml` and `metadata.yaml` on the release page, fetched by name.
+- **Rancher Turtles / Cluster API Operator**: a `CAPIProvider` of type `addon`, from the release page, from in-cluster ConfigMaps, or from the OCI artifact at `ghcr.io/colonel-byte/turtle/addon-zarf` - see [the Rancher Turtles guide](guides/rancher-turtles.md).
+- **Air-gapped**: a Zarf package at `ghcr.io/colonel-byte/zarf/cluster-api-addon-provider-zarf`, carrying the controller image and the manifest, cosign-signed. Its optional `rancher-turtle-artifacts` component pre-renders the Turtles install.
+
+The controller image is `ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller`, and everything is verifiable against [`cosign.pub`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/cosign.pub) at the repository root.
 
 ## Development
 

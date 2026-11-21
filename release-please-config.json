@@ -9,17 +9,47 @@
       "include-v-in-tag": true,
       "tag-separator": "",
       "changelog-sections": [
-        { "type": "feat", "section": "Features" },
-        { "type": "fix", "section": "Bug Fixes" },
-        { "type": "perf", "section": "Performance Improvements", "hidden": true },
-        { "type": "refactor", "section": "Refactoring" },
-        { "type": "docs", "section": "Documentation" },
-        { "type": "test", "section": "Tests", "hidden": true },
-        { "type": "chore", "section": "Miscellaneous" },
-        { "type": "ci", "section": "CI/CD" },
-        { "type": "build", "section": "Build" }
+        {
+          "type": "feat",
+          "section": "Features"
+        },
+        {
+          "type": "fix",
+          "section": "Bug Fixes"
+        },
+        {
+          "type": "perf",
+          "section": "Performance Improvements",
+          "hidden": true
+        },
+        {
+          "type": "refactor",
+          "section": "Refactoring"
+        },
+        {
+          "type": "docs",
+          "section": "Documentation"
+        },
+        {
+          "type": "test",
+          "section": "Tests",
+          "hidden": true
+        },
+        {
+          "type": "chore",
+          "section": "Miscellaneous"
+        },
+        {
+          "type": "ci",
+          "section": "CI/CD"
+        },
+        {
+          "type": "build",
+          "section": "Build"
+        }
       ],
       "extra-files": [
+        "docs/guides/rancher-turtles.md",
         "manifest/turtle/addon/kustomization.yaml",
         "manifest/turtle/capi-provider-addon.yaml",
         "metadata.yaml",
