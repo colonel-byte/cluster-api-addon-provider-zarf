@@ -1,3 +1,34 @@
+# Markdown line formatting
+
+## Do not hard-wrap lines in Markdown documents
+
+Markdown files should NOT have hard-wrapped or truncated lines. Instead, write full paragraphs and list items on single, continuous lines without manual line breaks, letting editors and renderers handle line wrapping dynamically.
+
+- Write entire paragraphs or list items on a single line without manual line breaks / hard wraps.
+- Let editors and rendering tools handle line wrapping dynamically.
+
+## Pad table cells so the columns line up
+
+Tables are written in their aligned form, so that the source reads as a table and a reviewer can see the columns without rendering the file. Pad every cell with spaces to the width of the widest cell in its column, keep one space of padding inside each pipe, and run the dashes of the delimiter row out to that same width. Every line of the table then has the same length.
+
+Write this:
+
+```markdown
+| Path                                   | What it holds     |
+| -------------------------------------- | ----------------- |
+| `.spec.config.registries[N].auth.user` | Registry username |
+```
+
+Not this:
+
+```markdown
+| Path | What it holds |
+| --- | --- |
+| `.spec.config.registries[N].auth.user` | Registry username |
+```
+
+Adding a row that is wider than the column repads the whole table, which is expected - the alignment is part of the content, not a one-time cleanup.
+
 # Working in this repository
 
 This repository is `cluster-api-addon-provider-zarf` (CAAPZ), a Cluster API add-on provider that deploys [Zarf](https://github.com/zarf-dev/zarf) packages onto CAPI workload clusters. A platform team declares a `ZarfPackageProxy` on the management cluster; the controller matches it to clusters, pulls the package from an OCI registry, verifies its Cosign signature, and deploys it over the wire via Zarf's Go SDK, tracking per-cluster state in `ZarfPackageRelease`. [`README.md`](README.md) is the full pitch and [`docs/dev/architecture.md`](docs/dev/architecture.md) is the design an agent needs to hold to make a correct change. It is a controller, not a CLI: the binary takes manager flags and runs forever, and there is no interactive surface.
@@ -6,23 +37,24 @@ It runs in the management cluster of air-gapped enterprise environments. At runt
 
 ## Layout
 
-| Path                     | What lives there                                                                           |
-| ------------------------ | ------------------------------------------------------------------------------------------ |
-| `api/v1alpha1/`          | The CRD Go types - `ZarfPackageProxy`, `ZarfPackageRelease` - and their generated deepcopy |
-| `cmd/`                   | `cmd/cluster-api-addon-provider-zarf`, the controller manager's `main`                     |
-| `internal/controller/`   | The reconcilers, private to this module                                                    |
-| `config/`                | Kustomize manifests - generated CRDs under `config/crd/bases`, RBAC, manager deployment    |
-| `magefiles/`             | The mage task runner's source - build, test, and generate targets                          |
-| `docs/`                  | The mdBook source. Generated subpaths must not be hand-edited                              |
-| `docs/agent/choice-*.md` | Records of non-obvious decisions and the tradeoffs behind them - read before reversing one |
+| Path                     | What lives there                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `api/v1alpha1/`          | The CRD Go types - `ZarfPackageProxy`, `ZarfPackageRelease` - and their generated deepcopy   |
+| `cmd/`                   | `cmd/cluster-api-addon-provider-zarf`, the controller manager's `main`                       |
+| `internal/controller/`   | The reconcilers, private to this module                                                      |
+| `config/`                | Kustomize manifests - generated CRDs under `config/crd/bases`, RBAC, manager deployment      |
+| `magefiles/`             | The mage task runner's source - build, test, and generate targets                            |
+| `docs/`                  | The mdBook source. Generated subpaths must not be hand-edited                                |
+| `test/e2e/`              | The e2e suite - a separate, deliberately unvendored Go module; driven by the `e2e:*` targets |
+| `docs/agent/choice-*.md` | Records of non-obvious decisions and the tradeoffs behind them - read before reversing one   |
 
 Several directories carry their own `AGENTS.md` with rules specific to that directory. Check the closest one before editing. Keep this table in sync when adding or removing one -- add a row for a new `AGENTS.md`, and remove its row when the file goes away.
 
-| `AGENTS.md`                                  | Covers                                                        |
-| -------------------------------------------- | ------------------------------------------------------------- |
-| [`docs/AGENTS.md`](docs/AGENTS.md)           | Markdown formatting, generated pages                          |
-| [`.github/AGENTS.md`](.github/AGENTS.md)     | Scorecard-safe workflow changes, PR description format        |
-| [`magefiles/AGENTS.md`](magefiles/AGENTS.md) | Target layout, the vendored offline build, pin ownership      |
+| `AGENTS.md`                                  | Covers                                                   |
+| -------------------------------------------- | -------------------------------------------------------- |
+| [`docs/AGENTS.md`](docs/AGENTS.md)           | Markdown formatting, generated pages                     |
+| [`.github/AGENTS.md`](.github/AGENTS.md)     | Scorecard-safe workflow changes, PR description format   |
+| [`magefiles/AGENTS.md`](magefiles/AGENTS.md) | Target layout, the vendored offline build, pin ownership |
 
 `CLAUDE.md` in the repository root is a symlink to this file, so a Claude Code session started there loads these rules without being asked. That covers the root and nothing else: the directory-specific files in the table above are not symlinked, so a session whose working directory is one of them starts with none of their rules in context. The root is where a session normally starts, so this is usually moot - but do not treat "nothing was loaded for me" as "there are no rules here", and do not grep a rules file for the one thing you thought to ask about. Open the closest `AGENTS.md` and read it before writing anything in that directory.
 
@@ -37,11 +69,14 @@ go run ./magefiles/core dev:checkTables     # check Markdown table padding
 go run ./magefiles/core dev:vendor          # go mod tidy, then go mod vendor
 go run ./magefiles/core dev:verifyVendor    # go mod verify, then a GOPROXY=off build
 go run ./magefiles/core test:envtest        # the tests that need a real API server
+go run ./magefiles/core e2e:up              # kind + CAPI/CAPD + local registry topology
+go run ./magefiles/core e2e:run             # the e2e suite, against the running topology
+go run ./magefiles/core e2e:down            # tear the topology down
 ```
 
 Plain Go commands work for anything mage doesn't wrap - `go build ./...`, `go vet ./...` - but exclude `./magefiles/...` from those, since it fails a bare build for the reason above.
 
-One test invocation is forbidden: a bare `go test -tags=envtest ./...`. The envtest suites need `CAPI_CRD_DIR` and `KUBEBUILDER_ASSETS` set to generated and downloaded artifacts, and `test:envtest` is what produces them - run the mage target, never the tag by hand. Plain `go test ./api/... ./cmd/... ./internal/...` (no tag) stays runnable with nothing installed.
+Two test invocations are forbidden. A bare `go test -tags=envtest ./...`: the envtest suites need `CAPI_CRD_DIR` and `KUBEBUILDER_ASSETS` set to generated and downloaded artifacts, and `test:envtest` is what produces them. And a bare `go test` inside `test/e2e/`: that suite talks to a live topology only `e2e:up` builds (docker, kind, and kubectl on `PATH`), and `e2e:run` is what points it there - without `E2E_KUBECONFIG` every test skips, which reads as green while asserting nothing. Plain `go test ./api/... ./cmd/... ./internal/...` (no tag) stays runnable with nothing installed; `test/e2e` is a separate module, so `./...` from the root never reaches it.
 
 ### The build is vendored and offline, and that is a requirement
 
@@ -110,7 +145,7 @@ So when a change touches something a document describes, check what that documen
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | A path, file, or directory that moved or went  | `ls`/`find` the path as written                                                                                                    |
 | A Go symbol that was renamed or unexported     | `grep -rn --include='*.go' '<name>' .`, or `go doc`. An unexported-to-exported rename is the easy one to miss                      |
-| A module asserted to be present or absent      | `grep -n '<module>' go.mod vendor/modules.txt`, and `go list -deps ./cmd/cluster-api-addon-provider-zarf` for whether it is linked                       |
+| A module asserted to be present or absent      | `grep -n '<module>' go.mod vendor/modules.txt`, and `go list -deps ./cmd/cluster-api-addon-provider-zarf` for whether it is linked |
 | A mage target that does not exist              | `go run ./magefiles/core -l`                                                                                                       |
 | A manager flag that does not exist             | `grep -rn '<flag>' cmd/ internal/`. Check the `flag.String` registration, not your memory                                          |
 | A quoted error or log string                   | `grep -rn '<fragment>'` for the literal. Quoting these from memory is how a guide ends up printing an error the code does not emit |
@@ -237,34 +272,3 @@ A quirk inherited from cluster-api-provider-cargoship, relocated by the deploy-J
 ### `docs/agent/choice-*.md` are constraints, not history
 
 When a decision looks reversible from the code alone, check `docs/agent/` first. These are usually the record of a tradeoff already made on purpose, not an oversight waiting to be cleaned up.
-
-# Markdown line formatting
-
-## Do not hard-wrap lines in Markdown documents
-
-Markdown files should NOT have hard-wrapped or truncated lines. Instead, write full paragraphs and list items on single, continuous lines without manual line breaks, letting editors and renderers handle line wrapping dynamically.
-
-- Write entire paragraphs or list items on a single line without manual line breaks / hard wraps.
-- Let editors and rendering tools handle line wrapping dynamically.
-
-## Pad table cells so the columns line up
-
-Tables are written in their aligned form, so that the source reads as a table and a reviewer can see the columns without rendering the file. Pad every cell with spaces to the width of the widest cell in its column, keep one space of padding inside each pipe, and run the dashes of the delimiter row out to that same width. Every line of the table then has the same length.
-
-Write this:
-
-```markdown
-| Path                                   | What it holds     |
-| -------------------------------------- | ----------------- |
-| `.spec.config.registries[N].auth.user` | Registry username |
-```
-
-Not this:
-
-```markdown
-| Path | What it holds |
-| --- | --- |
-| `.spec.config.registries[N].auth.user` | Registry username |
-```
-
-Adding a row that is wider than the column repads the whole table, which is expected - the alignment is part of the content, not a one-time cleanup.
