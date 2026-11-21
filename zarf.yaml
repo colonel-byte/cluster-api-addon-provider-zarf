@@ -1,0 +1,66 @@
+# The air-gapped install path: one Zarf package carrying the controller image and the same
+# component manifest clusterctl would download, so a management cluster with no route to
+# ghcr.io can still be given this provider. Mirrors cluster-api-provider-cargoship's zarf.yaml.
+#
+# The component comes from out/, which `release:manifests` writes, rather than from the
+# kustomization directly. Zarf can run kustomize itself, but then the package would deploy
+# something assembled a second way, and the thing an operator installs by hand and the thing
+# this package installs would be free to drift. `release:zarfPackage` builds out/ first, at the
+# version pinned below, so the manifest cannot name a tag the package's image does not carry.
+#
+# The one kustomization Zarf does run is manifest/turtle/addon, which only wraps those same
+# files in the ConfigMap the Cluster API Operator reads a provider out of - so it assembles
+# nothing a second way, it repackages what out/ already holds. `release:zarfPackage` stages the
+# files it reads, for the same version-pinning reason; a bare `zarf package create` renders
+# whatever a previous build left there, or fails on the missing files.
+#
+# The pins are not templated, because `###ZARF_PKG_TMPL_...###` does not reach an image
+# reference in a v1beta1 package: validation parses the reference before `--set` is applied and
+# rejects it. release-please rewrites every pin on a release instead - this file is listed in
+# release-please-config.json's extra-files for that, and the trailing comments are what it
+# looks for. See docs/agent/choice-zarf-package.md.
+---
+apiVersion: zarf.dev/v1beta1
+kind: ZarfPackageConfig
+metadata:
+  name: cluster-api-addon-provider-zarf
+  description: The Zarf add-on provider for Cluster API
+  version: 0.0.1 # x-release-please-version
+  annotations:
+    org.opencontainers.image.source: https://github.com/colonel-byte/cluster-api-addon-provider-zarf
+components:
+  # Not optional: this component is the provider, and a package whose only required content is
+  # nothing would deploy nothing under `zarf package deploy --confirm`, which skips every
+  # optional component without a word.
+  - name: addon-provider
+    description: ZarfPackageProxy and ZarfPackageRelease CRDs and the controller, in caapz-system
+    manifests:
+      - name: addon-components
+        namespace: caapz-system
+        files:
+          - out/addon-components.yaml
+    images:
+      - name: ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.0.1 # x-release-please-version
+
+  - name: rancher-turtle-artifacts
+    description: The provider's components as one OCI artifact, which the Cluster API Operator and Rancher Turtles install from
+    # Opt-in from the moment it carries manifests: a CAPIProvider applied to a cluster whose
+    # Rancher Turtles CRDs are missing fails the component, and so the whole deploy, for
+    # everyone installing this with clusterctl instead. Turtles has to be on the cluster first.
+    optional: true
+    images:
+      - name: ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.0.1 # x-release-please-version
+      - name: ghcr.io/colonel-byte/turtle/addon-zarf:v0.0.1 # x-release-please-version
+    # The ConfigMap a CAPIProvider with a `fetchConfig` selector reads its components out of,
+    # and the CAPIProvider itself - so the operator's ConfigMap install path needs no
+    # `kubectl create configmap` by hand on the inside. See docs/guides/rancher-turtles.md. No
+    # `namespace:` key: each object names its own, and Zarf creates it when it installs the
+    # generated Helm release.
+    manifests:
+      - name: addon
+        serverSideApply: auto
+        kustomize:
+          files:
+            - manifest/turtle/addon
+        files:
+          - manifest/turtle/capi-provider-addon.yaml

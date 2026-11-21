@@ -20,7 +20,10 @@
         { "type": "build", "section": "Build" }
       ],
       "extra-files": [
-        "metadata.yaml"
+        "manifest/turtle/addon/kustomization.yaml",
+        "manifest/turtle/capi-provider-addon.yaml",
+        "metadata.yaml",
+        "zarf.yaml"
       ]
     }
   },

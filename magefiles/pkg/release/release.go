@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 )
 
 // Dir is where release artifacts land. Gitignored build output, recreated on every render.
@@ -74,4 +75,63 @@ func Manifests(tag string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(Dir, "metadata.yaml"), metadata, 0o644) //nolint:gosec // manifest
+}
+
+// zarfVersionPattern extracts the version zarf.yaml pins. The package's version is also the tag
+// of the image it carries, so ZarfPackage reads it back out rather than taking a tag - a tag
+// passed in would produce a package whose manifest names one version and whose image carries
+// another, failing at deploy time against the in-cluster registry rather than at build time.
+var zarfVersionPattern = regexp.MustCompile(`(?m)^  version: (\S+)`)
+
+// ZarfVersion returns the version pinned in zarf.yaml.
+func ZarfVersion() (string, error) {
+	data, err := os.ReadFile("zarf.yaml")
+	if err != nil {
+		return "", err
+	}
+	match := zarfVersionPattern.FindSubmatch(data)
+	if match == nil {
+		return "", fmt.Errorf("zarf.yaml pins no version")
+	}
+	return string(match[1]), nil
+}
+
+// ZarfPackage builds the air-gapped Zarf package into out/, at the version zarf.yaml pins. It
+// needs the release's images to be published and the zarf CLI on PATH. Two environment
+// variables mirror cargoship's make target: ZARF_ARCH builds for another architecture, and a
+// COSIGN_KEY (with COSIGN_PASS) signs the package.
+func ZarfPackage() error {
+	version, err := ZarfVersion()
+	if err != nil {
+		return err
+	}
+	if err := Manifests(version); err != nil {
+		return err
+	}
+
+	// The files the rancher-turtle-artifacts component's ConfigMap embeds, staged beside the
+	// kustomization that names them. Copied here rather than written by Manifests, which runs
+	// at whatever tag its caller passes and would leave a ConfigMap named for one version
+	// holding components built for another. Only this target pins the version, so only this
+	// target stages them.
+	for _, name := range []string{"addon-components.yaml", "metadata.yaml"} {
+		data, err := os.ReadFile(filepath.Join(Dir, name))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join("manifest", "turtle", "addon", name), data, 0o644); err != nil { //nolint:gosec // manifest
+			return err
+		}
+	}
+
+	args := []string{"package", "create", ".", "--confirm", "--output", Dir}
+	if arch := os.Getenv("ZARF_ARCH"); arch != "" {
+		args = append(args, "--architecture", arch)
+	}
+	if os.Getenv("COSIGN_KEY") != "" {
+		args = append(args, "--signing-key", "env://COSIGN_KEY", "--signing-key-pass", os.Getenv("COSIGN_PASS"))
+	}
+	create := exec.Command("zarf", args...)
+	create.Stdout, create.Stderr = os.Stdout, os.Stderr
+	return create.Run()
 }

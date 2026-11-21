@@ -32,3 +32,11 @@ type (
 func (Release) Manifests(tag string) error {
 	return release.Manifests(tag)
 }
+
+// ZarfPackage builds the air-gapped Zarf package into out/, at the version zarf.yaml pins -
+// never at a tag the caller picks, so the manifest and the image cannot disagree. Needs the
+// release's images to be published and the zarf CLI on PATH; ZARF_ARCH cross-builds and a
+// COSIGN_KEY in the environment signs. See docs/agent/choice-zarf-package.md.
+func (Release) ZarfPackage() error {
+	return release.ZarfPackage()
+}
