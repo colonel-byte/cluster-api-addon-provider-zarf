@@ -14,6 +14,7 @@ It runs in the management cluster of air-gapped enterprise environments. At runt
 | `config/`                | Kustomize manifests - generated CRDs under `config/crd/bases`, RBAC, manager deployment    |
 | `magefiles/`             | The mage task runner's source - build, test, and generate targets                          |
 | `docs/`                  | The mdBook source. Generated subpaths must not be hand-edited                              |
+| `test/e2e/`              | The e2e suite - a separate, deliberately unvendored Go module; driven by the `e2e:*` targets |
 | `docs/agent/choice-*.md` | Records of non-obvious decisions and the tradeoffs behind them - read before reversing one |
 
 Several directories carry their own `AGENTS.md` with rules specific to that directory. Check the closest one before editing. Keep this table in sync when adding or removing one -- add a row for a new `AGENTS.md`, and remove its row when the file goes away.
@@ -37,11 +38,14 @@ go run ./magefiles/core dev:checkTables     # check Markdown table padding
 go run ./magefiles/core dev:vendor          # go mod tidy, then go mod vendor
 go run ./magefiles/core dev:verifyVendor    # go mod verify, then a GOPROXY=off build
 go run ./magefiles/core test:envtest        # the tests that need a real API server
+go run ./magefiles/core e2e:up              # kind + CAPI/CAPD + local registry topology
+go run ./magefiles/core e2e:run             # the e2e suite, against the running topology
+go run ./magefiles/core e2e:down            # tear the topology down
 ```
 
 Plain Go commands work for anything mage doesn't wrap - `go build ./...`, `go vet ./...` - but exclude `./magefiles/...` from those, since it fails a bare build for the reason above.
 
-One test invocation is forbidden: a bare `go test -tags=envtest ./...`. The envtest suites need `CAPI_CRD_DIR` and `KUBEBUILDER_ASSETS` set to generated and downloaded artifacts, and `test:envtest` is what produces them - run the mage target, never the tag by hand. Plain `go test ./api/... ./cmd/... ./internal/...` (no tag) stays runnable with nothing installed.
+Two test invocations are forbidden. A bare `go test -tags=envtest ./...`: the envtest suites need `CAPI_CRD_DIR` and `KUBEBUILDER_ASSETS` set to generated and downloaded artifacts, and `test:envtest` is what produces them. And a bare `go test` inside `test/e2e/`: that suite talks to a live topology only `e2e:up` builds (docker, kind, and kubectl on `PATH`), and `e2e:run` is what points it there - without `E2E_KUBECONFIG` every test skips, which reads as green while asserting nothing. Plain `go test ./api/... ./cmd/... ./internal/...` (no tag) stays runnable with nothing installed; `test/e2e` is a separate module, so `./...` from the root never reaches it.
 
 ### The build is vendored and offline, and that is a requirement
 

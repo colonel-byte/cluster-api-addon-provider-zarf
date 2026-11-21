@@ -40,6 +40,8 @@ go run ./magefiles/core dev:verifyVendor  # go mod verify, then a GOPROXY=off bu
 
 `dev:verifyVendor` is the one that proves it: it builds with `GOFLAGS=-mod=vendor GOPROXY=off`, which is the invocation a release has to survive. [`.github/workflows/check-go-mod.yaml`](../.github/workflows/check-go-mod.yaml) runs the same target, and a `verify-vendor` pre-commit hook runs it whenever `go.mod`, `go.sum`, or `vendor/` changes.
 
+One deliberate exception: `test/e2e/` is a separate Go module and is **not** vendored. It is a dev/CI-only surface that needs the network anyway (kind images, clusterctl, CAPD), and vendoring it would bloat every clone to protect an invariant - offline buildability - that does not apply to it. Being a nested module, it is invisible to the root `./...` and to `dev:verifyVendor` by construction. Do not vendor it for consistency's sake; this line is the record that its absence is on purpose.
+
 Two consequences worth stating:
 
 - **A new dependency is a bigger decision than it looks**, because it lands in `vendor/` and is carried by every clone of the repository from then on. The cost of a dependency is what it links, not what you call - check with `go list -deps ./...` before adding an import.
