@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-ddb10595.js";
+            window.path_to_searchindex_js = "searchindex-9dd93da3.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-2c30f17f.js"></script>
@@ -517,10 +517,16 @@ status:
 <ul>
 <li>Re-importing a live cluster re-creates its releases but does not re-run its seed packages.</li>
 <li>Hand-deleting a <code>ZarfPackageRelease</code> does not re-run the seed; the recreated release adopts the existing record.</li>
-<li>The escape hatch for intentionally re-seeding is removing the package’s record on the workload cluster (<code>zarf package remove</code>, or deleting the <code>zarf-package-&lt;name&gt;</code> secret) - an explicit operator action against the cluster being re-seeded.</li>
+<li>Intentionally re-seeding takes <strong>two deletions, record first</strong>: remove the package’s record on the workload cluster (<code>zarf package remove</code>, or deleting the <code>zarf-package-&lt;name&gt;</code> secret), <em>then</em> delete the <code>ZarfPackageRelease</code>. The release alone is not enough - the recreated release adopts the surviving record - and the record alone is not enough either, because <code>status.applied: true</code> short-circuits without probing. Deleting the release before the record just re-adopts.</li>
 <li>Wiping and rebuilding infrastructure behind the same <code>Cluster</code> object re-seeds, because the rebuilt cluster carries no record. That is the desired reading of “once per physical cluster”.</li>
 </ul>
 <p>One restriction follows: Zarf only stores the deployed-package record when the package has at least one cluster-touching component, so <strong>an ApplyOnce package must include one</strong>. A pure-actions package would leave no durable record, silently degrading the guarantee to the garbage-collectable release; the controller surfaces a condition on the release when a completed seed deploy left no record behind.</p>
+<h4 id="seed-then-manage-handoff-and-the-package-name-as-identity"><a class="header" href="#seed-then-manage-handoff-and-the-package-name-as-identity">Seed-then-manage handoff, and the package name as identity</a></h4>
+<p>A supported pattern (used by the sister <code>ansible-collection-zarf</code> tooling): an ApplyOnce proxy seeds a package - <code>zarf-init</code>, say - and a Reconcile proxy later takes over the <em>same package name</em> for day-2 lifecycle. This works by construction: the Reconcile path never consults the seed record, Zarf treats a same-name deploy as an in-place upgrade updating the same record, and on re-import the seed proxy adopts whatever version the successor last deployed. Two properties to hold on to:</p>
+<ul>
+<li><strong>Adoption is keyed on the Zarf package name on the cluster - nothing else.</strong> Not the proxy’s name, not the declared version or digest. Any ApplyOnce proxy whose package carries that name adopts the record, even if its spec declares different content. Package names are therefore an identity namespace the fleet’s conventions must own; two unrelated packages sharing a name will silently satisfy each other’s seed checks.</li>
+<li><strong>A successor proxy for a seeded package must be <code>deletionPolicy: Retain</code></strong> (§8). Under the default <code>Delete</code>, deleting the successor runs <code>zarf package remove</code> on the shared package name - destroying both the package and the deployed-package record the seed’s guarantee rests on, while the seed’s release still reports <code>Completed</code> and its <code>applied</code> cache suppresses any re-seed. The cluster loses the package; nothing notices. <code>Retain</code> on the successor keeps the handoff safe.</li>
+</ul>
 <hr>
 <h2 id="4-native-zarfdevv1beta1-package-support"><a class="header" href="#4-native-zarfdevv1beta1-package-support">4. Native <code>zarf.dev/v1beta1</code> Package Support</a></h2>
 <p>CAAPZ natively implements the modern <code>zarf.dev/v1beta1</code> Zarf package schema while maintaining backward compatibility with <code>zarf.dev/v1alpha1</code>:</p>
@@ -646,6 +652,7 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 <li><strong><code>Delete</code> (the default, matching CAAPH)</strong>: the package is uninstalled from the workload cluster - via <code>packager.Remove</code>, run in a removal Job on the same plumbing as deploys (§6’s deploy Job: same image, kubeconfig mount, cache volume, and <code>deployJob</code> knobs) - before the release object is allowed to go away.</li>
 <li><strong><code>Retain</code></strong>: the release object is deleted immediately and the deployed package is orphaned on the workload cluster, left running and operator-owned from then on. The honest choice for large or foundational packages, where an in-place uninstall is unreliable and an orphaned-but-working package beats a half-removed one.</li>
 <li><strong><code>ApplyOnce</code> proxies ignore the policy and always behave as <code>Retain</code></strong>: a seed cannot be un-run, and its durable record lives on the workload cluster (§3) regardless of what happens to management-cluster objects.</li>
+<li><strong>A Reconcile proxy managing a package an ApplyOnce proxy seeded must also be <code>Retain</code></strong>: <code>Delete</code> on the successor removes the shared package name’s deployed-package record along with the package, silently voiding the seed guarantee while the seed’s release still reports <code>Completed</code> - see §3’s seed-then-manage handoff.</li>
 </ul>
 <h3 id="b-mechanics-a-finalizer-only-where-a-removal-is-owed"><a class="header" href="#b-mechanics-a-finalizer-only-where-a-removal-is-owed">B. Mechanics: a finalizer only where a removal is owed</a></h3>
 <ul>
