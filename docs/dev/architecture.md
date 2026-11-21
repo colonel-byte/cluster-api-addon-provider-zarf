@@ -243,21 +243,22 @@ spec:
 ```
 
 ### B. Dependency Resolution & Reconcile Gating
-For each workload cluster:
-1. When reconciling `logging-stack` for cluster `example-cluster`, the controller inspects the status of the prerequisite `ZarfPackageRelease` objects for `example-cluster`:
-   - `example-zarf-init`
-   - `example-csi-ceph`
-2. **Readiness Gate**:
-   - The dependent package is held in `phase: Pending` with condition:
-     ```yaml
-     type: DependenciesSatisfied
-     status: "False"
-     reason: WaitingForDependency
-     message: "dependency 'csi-ceph' is not yet in phase 'Deployed'"
-     ```
-   - The controller requeues until all dependencies report `status.phase: Deployed` (or `Completed` for seed packages).
-3. **Circular Dependency Detection**:
-   Directed Acyclic Graph (DAG) validation runs during admission and reconcile to reject dependency loops before any deploy begins.
+For each workload cluster, every entry in `dependsOn` is resolved to a verdict. The rule that prevents deadlock: **a dependency that cannot be satisfied on this cluster is a named error condition, never a silent wait.** Waiting is reserved for the one case where progress is actually coming.
+
+| Dependency state on this cluster                          | Verdict   | `DependenciesSatisfied` reason |
+| --------------------------------------------------------- | --------- | ------------------------------ |
+| Release exists in phase `Deployed` (or `Completed`)       | satisfied | -                              |
+| Proxy exists, selector matches, release pending or absent | wait      | `WaitingForDependency`         |
+| Proxy exists but its selector does not match this cluster | error     | `DependencyNotApplicable`      |
+| Proxy does not exist in this namespace                    | error     | `DependencyNotFound`           |
+
+- The dependent release holds in `phase: Pending` with `DependenciesSatisfied: False` and the reason above; the message names the offending dependency.
+- `DependencyNotApplicable` is deliberately an error rather than auto-satisfied: declaring "X needs Y here" when Y's selector will never match this cluster is a configuration contradiction, and silently skipping the ordering would hide exactly the label mistake the admin needs to see.
+- All verdicts are level-triggered: fixing labels, creating the missing proxy, or the dependency deploying re-evaluates the dependent with no operator intervention. Re-evaluation is watch-driven - the proxy reconciler watches `ZarfPackageRelease` phase changes and maps them back to dependents - with the periodic resync as backstop; there is no requeue polling loop.
+- A dependency proxy deleted *after* its ApplyOnce package seeded a cluster reports `DependencyNotFound`, even though the package is on the cluster. This is strict on purpose - keep proxies that the dependency graph references. (Softening it by probing the workload cluster's deployed-package record (§3) is a possible later relaxation, not a commitment.)
+
+### C. Circular Dependency Detection
+Directed Acyclic Graph (DAG) validation runs **at reconcile time, not admission** - cross-object graph checks cannot be expressed in CEL, and a validating webhook is not worth its cert plumbing in air-gapped installs when admission-time validation can be invalidated by the very next edit to a *different* proxy anyway. Each reconcile builds the dependency graph from the namespace's proxies (informer cache, no API round trips) and runs a cycle check; every proxy in a detected cycle gets `DependenciesValid: False, reason: DependencyCycle` and deploys nothing until the cycle is broken.
 
 ---
 
