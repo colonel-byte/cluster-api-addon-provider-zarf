@@ -106,7 +106,10 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 	}, opts.VolumeMounts...)
 
 	// shortcut: the "deploy" subcommand these args target does not exist yet; it lands with the
-	// zarf SDK integration, reading the release for values/variables and patching its status.
+	// zarf SDK integration, reading the proxy via the release's packageProxyRef for values and
+	// variables. How results reach the release (status patch from the pod vs the controller
+	// reading the Job's termination message) is deliberately undecided - see r2's deploy-pod
+	// RBAC note before picking one.
 	args := []string{
 		"deploy",
 		"--package", proxy.Spec.Package.Repository + ":" + proxy.Spec.Package.Version,
