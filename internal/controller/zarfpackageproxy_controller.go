@@ -19,6 +19,8 @@ import (
 	"context"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,8 +65,8 @@ type ZarfPackageProxyReconciler struct {
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
-// shortcut: matching and stamping only - dependency verdicts land in the next layer, deployment
-// with M3.
+// shortcut: matching, stamping, and dependency verdicts - resolution and deployment land with
+// M2/M3.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -83,8 +85,31 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version,
 		"matchingClusters", len(matched))
 
-	if err := r.stampReleases(ctx, proxy, matched); err != nil {
+	inCycle, err := r.inDependencyCycle(ctx, proxy)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	validCondition := metav1.Condition{
+		Type:               addonsv1alpha1.ConditionDependenciesValid,
+		Status:             metav1.ConditionTrue,
+		Reason:             addonsv1alpha1.ReasonDependenciesValid,
+		Message:            "dependsOn forms no cycle",
+		ObservedGeneration: proxy.Generation,
+	}
+	if inCycle {
+		validCondition.Status = metav1.ConditionFalse
+		validCondition.Reason = addonsv1alpha1.ReasonDependencyCycle
+		validCondition.Message = "this proxy is part of a dependsOn cycle; it deploys nothing until the cycle is broken"
+	}
+
+	// §5C: a cycle member deploys nothing - no stamping, no verdicts - until the cycle breaks.
+	if !inCycle {
+		if err := r.stampReleases(ctx, proxy, matched); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.applyDependencyVerdicts(ctx, proxy, matched); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// status.matchingClusters names match the selector's reach: bare in the proxy's own
@@ -100,6 +125,11 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	before := proxy.DeepCopy()
 	proxy.Status.MatchingClusters = names
 	proxy.Status.ObservedGeneration = proxy.Generation
+	if len(proxy.Spec.DependsOn) > 0 {
+		meta.SetStatusCondition(&proxy.Status.Conditions, validCondition)
+	} else {
+		meta.RemoveStatusCondition(&proxy.Status.Conditions, addonsv1alpha1.ConditionDependenciesValid)
+	}
 	if err := r.Status().Patch(ctx, proxy, client.MergeFrom(before)); err != nil {
 		return ctrl.Result{}, err
 	}

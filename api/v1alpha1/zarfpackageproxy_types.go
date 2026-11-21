@@ -42,6 +42,19 @@ const (
 // --secret-namespaces flags do not permit.
 const ReasonCrossNamespaceNotEnabled = "CrossNamespaceNotEnabled"
 
+// ConditionDependenciesValid is the proxy condition for the reconcile-time cycle check over the
+// namespace's dependsOn graph (docs/dev/architecture.md §5C). False means the proxy is part of a
+// cycle and deploys nothing until the cycle is broken.
+const ConditionDependenciesValid = "DependenciesValid"
+
+const (
+	// ReasonDependenciesValid is DependenciesValid: True - the proxy is in no dependsOn cycle.
+	ReasonDependenciesValid = "Valid"
+	// ReasonDependencyCycle is DependenciesValid: False - the proxy is a member of a dependsOn
+	// cycle; the message names it.
+	ReasonDependencyCycle = "DependencyCycle"
+)
+
 // NamespacedReference names an object, in the referring object's namespace by default.
 type NamespacedReference struct {
 	// name of the referenced object.
