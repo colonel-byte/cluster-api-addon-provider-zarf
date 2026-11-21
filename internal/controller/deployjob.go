@@ -41,6 +41,12 @@ const (
 	// points at its "value" key, the key CAPI writes.
 	kubeconfigMountPath = "/etc/caapz/kubeconfig"
 
+	// specMountPath is where the rendered deploy spec mounts. The deploy pod acts as a pure
+	// operator: its entire input is files on disk - this spec, the kubeconfig, the cache -
+	// and it holds no management-cluster credentials or API access. Results return in the
+	// pod's termination message; the controller patches release status.
+	specMountPath = "/etc/caapz/spec"
+
 	// releaseLabel on a deploy Job names the ZarfPackageRelease it realizes.
 	releaseLabel = "addons.colonel-byte.dev/release"
 )
@@ -85,6 +91,18 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 				},
 			},
 		},
+		{
+			Name: "spec",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					// shortcut: the controller does not write this Secret yet; it lands
+					// with the resolver - the rendered deploy spec (package repository
+					// pinned by digest, rendered values and variables, component
+					// selection), stamped before the Job and owned by the release.
+					SecretName: release.Name + "-deploy-spec",
+				},
+			},
+		},
 	}
 	cacheProvided := false
 	for _, v := range opts.Volumes {
@@ -102,20 +120,17 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 
 	mounts := append([]corev1.VolumeMount{
 		{Name: "kubeconfig", MountPath: kubeconfigMountPath, ReadOnly: true},
+		{Name: "spec", MountPath: specMountPath, ReadOnly: true},
 		{Name: cacheVolumeName, MountPath: cachePath},
 	}, opts.VolumeMounts...)
 
-	// shortcut: the "deploy" subcommand these args target does not exist yet; it lands with the
-	// zarf SDK integration, reading the proxy via the release's packageProxyRef for values and
-	// variables. How results reach the release (status patch from the pod vs the controller
-	// reading the Job's termination message) is deliberately undecided - see r2's deploy-pod
-	// RBAC note before picking one.
+	// shortcut: the "deploy" subcommand these args target does not exist yet; it lands with
+	// the zarf SDK integration. It reads everything from the mounted spec file - never the
+	// management cluster - and reports through the pod termination message.
 	args := []string{
 		"deploy",
-		"--package", proxy.Spec.Package.Repository + ":" + proxy.Spec.Package.Version,
+		"--spec", specMountPath + "/spec.yaml",
 		"--cache-path", cachePath,
-		"--release-name", release.Name,
-		"--release-namespace", release.Namespace,
 	}
 
 	// shortcut: the Job name is release.Name + "-deploy" with no truncation; releases named

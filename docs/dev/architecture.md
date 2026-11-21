@@ -166,7 +166,7 @@ Borrowing from core CAPI's `ClusterResourceSet.spec.strategy`, CAAPZ supports tw
    - "Drift repair" is periodic idempotent redeploy of the pinned digest on the controller's resync interval; the Zarf SDK has no drift detection.
 
 2. **`strategy: ApplyOnce` (Seed / Initialization Package)**:
-   - When a new cluster matching the selector is discovered or imported, the controller pulls and applies the Zarf package.
+   - When a new cluster matching the selector is discovered or imported, a deploy Job (§6 step 6) pulls and applies the Zarf package.
    - Once the deployment succeeds, the `ZarfPackageRelease` is marked `phase: Completed` and `applied: true`.
    - The controller will **never re-execute** this package against that cluster, even if the proxy's spec or variables change.
    - Ideal for Day-0/Day-1 cluster bootstrap hooks and registration payloads.
@@ -290,7 +290,8 @@ Directed Acyclic Graph (DAG) validation runs **at reconcile time, not admission*
    If `spec.init.autoInit == true`, probe the target cluster for Zarf state (`zarf-state` secret in `zarf` namespace). If absent, deploy the Zarf init package first.
 6. **Deploy Execution (the deploy Job)**:
    Render values and variables (`{{ .Cluster.metadata.name }}`) and stamp one Kubernetes Job per release - **a deploy never runs in the controller process**. The Job's contract, which §4C, the Signature Trust Model, and §8A reference:
-   - It runs the controller's own image (or `spec.deployJob.image`) with a `deploy` subcommand that reads the proxy via the release's `packageProxyRef` and assembles `packager.DeployOptions`.
+   - It runs the controller's own image (or `spec.deployJob.image`) with a `deploy` subcommand. **The pod acts as a pure operator: its entire input is files on disk** - a rendered deploy spec the controller writes to a per-release Secret and mounts (package repository pinned by digest, rendered values and variables, component selection), the kubeconfig, and the cache. It holds no management-cluster credentials and makes no management-cluster API calls; the subcommand assembles `packager.DeployOptions` from the spec file alone.
+   - Results return in the pod's termination message; the controller reads the finished Job and patches `ZarfPackageRelease.status`. The deploy pod's service account grants nothing.
    - The target cluster's `<cluster-name>-kubeconfig` secret is mounted and `KUBECONFIG` points at it - the Zarf SDK resolves its target from the process environment, so the pod's environment is what selects the cluster. No mutex, no serialization: deploys to different clusters are different pods.
    - The package is pulled inside the Job **by the verified digest from step 4** (`repository@digest`, never a tag) into the Job's `zarf-cache` volume (default `emptyDir`, PVC-replaceable via `spec.deployJob.volumes`).
    - The pod runs a restricted security profile by default; `spec.deployJob` exposes the knobs (service account, security contexts, volumes and mounts, node selector, tolerations). A package `action` - arbitrary command execution - is thereby contained to a pod holding one cluster's kubeconfig, not the fleet-wide controller.
