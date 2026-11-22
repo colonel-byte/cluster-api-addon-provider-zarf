@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7993c743.js";
+            window.path_to_searchindex_js = "searchindex-ee3cd41b.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4fa52a72.js"></script>
@@ -219,6 +219,7 @@ spec:
   strategy: Reconcile
 </code></pre>
 <p><code>strategy: Reconcile</code> keeps matching clusters converged on the declared version; <code>strategy: ApplyOnce</code> deploys exactly once per cluster and never re-executes, for bootstrap and seed payloads.</p>
+<p><code>deletionPolicy: Delete</code> (the default) uninstalls the package from each cluster when its release is deleted - a proxy deletion or a selector un-match; <code>deletionPolicy: Retain</code> orphans it there, left running and operator-owned. ApplyOnce proxies always behave as <code>Retain</code> - a seed cannot be un-run. Note the default’s reach: deleting a <code>Delete</code> proxy uninstalls its package fleet-wide.</p>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
 <p>Each release publishes the provider three ways, all carrying the same component manifest:</p>
 <ul>
