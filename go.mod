@@ -15,6 +15,7 @@ require (
 	oras.land/oras-go/v2 v2.6.2
 	sigs.k8s.io/cluster-api/api v1.14.4
 	sigs.k8s.io/controller-runtime v0.25.3
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -379,7 +380,6 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/release-utils v0.12.4 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 tool (
