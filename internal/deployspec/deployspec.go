@@ -53,6 +53,10 @@ type Spec struct {
 	Components []Component       `json:"components,omitempty"`
 	Values     string            `json:"values,omitempty"`
 	Set        map[string]string `json:"set,omitempty"`
+
+	// PlainHTTP carries the manager's --registry-plain-http flag to the pod, so the Job pulls
+	// over the same scheme the controller resolved and verified over. Test topologies only.
+	PlainHTTP bool `json:"plainHTTP,omitempty"`
 }
 
 // Marshal renders the document as the YAML the Secret carries.
