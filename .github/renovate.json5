@@ -72,13 +72,16 @@
     },
     // TEMPLATE: the three rules below are for a Go repository. Delete them in a repository
     // that has no go.mod.
+    // Catch-all for gomod; the named groups and the indirect rule below carve the rest out,
+    // so what actually lands here is the direct dependencies with no family of their own
+    // (mage, testify, oras-go, image-spec).
     {
       matchManagers: ["gomod"],
       addLabels: [
         "renovate/gomod",
       ],
-      groupName: "go modules",
-      groupSlug: "all-gomod",
+      groupName: "go direct",
+      groupSlug: "gomod-direct",
       matchPackageNames: [
         "*",
       ],
@@ -104,11 +107,23 @@
       groupName: "golang",
       groupSlug: "golang",
     },
+    // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
+    // so it gets a PR of its own rather than riding in a group.
     {
       matchManagers: ["gomod"],
-      matchPackageNames: ["github.com/go-openapi/**"],
-      groupName: "openapi",
-      groupSlug: "openapi",
+      matchPackageNames: ["github.com/zarf-dev/zarf"],
+      groupName: "zarf",
+      groupSlug: "zarf",
+    },
+    // Everything indirect moves as one mechanical PR, reviewed by the vendored offline
+    // build and the test suite rather than by reading 170 version lines. Last gomod rule
+    // on purpose: it wins over the family groups above, so an indirect k8s.io bump rides
+    // here, not in the k8s PR.
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      groupName: "go indirect",
+      groupSlug: "gomod-indirect",
     },
     {
       matchManagers: ["pre-commit"],
