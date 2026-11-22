@@ -188,6 +188,7 @@ spec:
                 - Deployed
                 - Completed
                 - Failed
+                - Removing
                 type: string
             type: object
         type: object
