@@ -54,13 +54,13 @@ const (
 	// controller speak the same contract.
 	//
 	// renovate: datasource=github-releases depName=kubernetes-sigs/cluster-api
-	clusterAPIVersion = "1.14.4"
+	clusterAPIVersion = "1.15.0-beta.1"
 
 	// workloadK8sVersion is the Kubernetes version CAPD boots in workload clusters; CAPD
 	// resolves it to its own kindest/node machine image.
 	//
 	// renovate: datasource=github-releases depName=kubernetes/kubernetes
-	workloadK8sVersion = "1.34.0"
+	workloadK8sVersion = "1.38.0-beta.0"
 
 	// Image digests below are owned by a written procedure rather than Renovate - the Go
 	// custom manager tracks versions, not digests. To bump one:
