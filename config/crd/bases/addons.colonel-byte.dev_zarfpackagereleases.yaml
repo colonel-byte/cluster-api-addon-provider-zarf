@@ -171,6 +171,11 @@ spec:
                   - type
                   type: object
                 type: array
+              deployedDigest:
+                description: |-
+                  deployedDigest is the package manifest digest the last successful deploy ran from -
+                  recorded per release so a fleet mid-rollout is legible digest by digest (§3).
+                type: string
               deployedVersion:
                 description: deployedVersion is the package version last deployed
                   successfully.
