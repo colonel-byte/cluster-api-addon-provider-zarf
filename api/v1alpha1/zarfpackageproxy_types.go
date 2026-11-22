@@ -37,6 +37,35 @@ const (
 	StrategyApplyOnce DeploymentStrategy = "ApplyOnce"
 )
 
+// DeletionPolicy says what happens to a deployed package when its release is deleted - the
+// declaration going away while the cluster lives on (docs/dev/architecture.md §8A).
+// +kubebuilder:validation:Enum=Delete;Retain
+type DeletionPolicy string
+
+const (
+	// PolicyDelete uninstalls the package from the workload cluster - a removal Job running
+	// packager.Remove on the deploy Job's plumbing - before the release object may go away.
+	PolicyDelete DeletionPolicy = "Delete"
+
+	// PolicyRetain deletes the release immediately and orphans the deployed package on the
+	// workload cluster, left running and operator-owned from then on. The honest choice for
+	// large or foundational packages, where an orphaned-but-working package beats a
+	// half-removed one.
+	PolicyRetain DeletionPolicy = "Retain"
+)
+
+// FinalizerRemoval is the release finalizer carried only where a removal is owed: releases
+// under policy Delete. Retain and ApplyOnce releases never carry it, so their deletion can
+// never block on anything (§8B). It tracks the proxy's current policy - flipping to Retain
+// strips it, the declarative break-glass for a stuck removal.
+const FinalizerRemoval = "addons.colonel-byte.dev/removal"
+
+// FinalizerReleaseCleanup is the proxy finalizer: proxy deletion deletes the proxy's releases
+// and waits for their own finalization before the proxy goes away (§8B). Releases are
+// deliberately not owner-referenced to the proxy - the Cluster stays the sole owner - so this
+// finalizer is what makes proxy deletion reach them at all.
+const FinalizerReleaseCleanup = "addons.colonel-byte.dev/release-cleanup"
+
 // ReasonCrossNamespaceNotEnabled is the condition reason set when a clusterSelector match or an
 // object reference crosses into a namespace the controller's --cluster-namespaces or
 // --secret-namespaces flags do not permit.
@@ -289,6 +318,15 @@ type ZarfPackageProxySpec struct {
 	// deployJob customizes the Kubernetes Job each deploy runs in.
 	// +optional
 	DeployJob *DeployJobOptions `json:"deployJob,omitempty"`
+
+	// deletionPolicy says whether deleting a release uninstalls its package from the workload
+	// cluster (Delete, the default) or orphans it there (Retain). ApplyOnce proxies always
+	// behave as Retain - a seed cannot be un-run. A Reconcile proxy managing a package an
+	// ApplyOnce proxy seeded must be Retain, or deleting it removes the deployed-package
+	// record the seed guarantee rests on (docs/dev/architecture.md §8A).
+	// +optional
+	// +kubebuilder:default=Delete
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
 // ZarfPackageProxyStatus is the observed state across matching clusters.
