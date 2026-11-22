@@ -33,8 +33,9 @@ const FileName = "deploy-spec.yaml"
 
 // Version is this document's schema version, bumped on incompatible change - the controller
 // and the deploy subcommand ship in one image, but a Job stamped before an upgrade can run
-// after it.
-const Version = "caapz.dev/v1"
+// after it. Under the project's one identity domain, same as the API group - this is a file
+// format, not a Kubernetes API, but it gets no second namespace for being one.
+const Version = "addons.colonel-byte.dev/deployspec/v1"
 
 // Component selects one package component, optionally at a flavor.
 type Component struct {
