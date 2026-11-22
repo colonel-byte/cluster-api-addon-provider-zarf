@@ -59,23 +59,14 @@ func finalizersFor(proxy *addonsv1alpha1.ZarfPackageProxy) []string {
 // it, so a deleting, missing, or unreachable cluster drops the finalizer without removal. The
 // returned duration, when non-zero, asks for a requeue - the failed-removal retry timer.
 func (r *ZarfPackageProxyReconciler) finalizeReleases(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) (time.Duration, error) {
-	releases := &addonsv1alpha1.ZarfPackageReleaseList{}
-	if err := r.List(ctx, releases); err != nil {
+	releases, err := r.listProxyReleases(ctx, proxy)
+	if err != nil {
 		return 0, err
 	}
 	owed := removalOwed(proxy)
 
 	var requeue time.Duration
-	for i := range releases.Items {
-		release := &releases.Items[i]
-		refNS := release.Spec.PackageProxyRef.Namespace
-		if refNS == "" {
-			refNS = release.Namespace
-		}
-		if release.Spec.PackageProxyRef.Name != proxy.Name || refNS != proxy.Namespace {
-			continue
-		}
-
+	for _, release := range releases {
 		if release.DeletionTimestamp.IsZero() {
 			changed := controllerutil.RemoveFinalizer(release, addonsv1alpha1.FinalizerRemoval)
 			if owed {
@@ -108,6 +99,60 @@ func (r *ZarfPackageProxyReconciler) finalizeReleases(ctx context.Context, proxy
 		}
 	}
 	return requeue, nil
+}
+
+// listProxyReleases returns every release realizing proxy, across namespaces - matched by
+// spec.packageProxyRef, never a name convention.
+func (r *ZarfPackageProxyReconciler) listProxyReleases(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) ([]*addonsv1alpha1.ZarfPackageRelease, error) {
+	releases := &addonsv1alpha1.ZarfPackageReleaseList{}
+	if err := r.List(ctx, releases); err != nil {
+		return nil, err
+	}
+	var owned []*addonsv1alpha1.ZarfPackageRelease
+	for i := range releases.Items {
+		release := &releases.Items[i]
+		refNS := release.Spec.PackageProxyRef.Namespace
+		if refNS == "" {
+			refNS = release.Namespace
+		}
+		if release.Spec.PackageProxyRef.Name == proxy.Name && refNS == proxy.Namespace {
+			owned = append(owned, release)
+		}
+	}
+	return owned, nil
+}
+
+// finalizeProxy handles a deleting proxy (§8B): delete its releases and wait for their own
+// finalization - uninstall or orphan, per the policy - before the proxy's finalizer lets it go.
+// Releases are deliberately not owner-referenced to the proxy (the Cluster is the sole owner,
+// §7's cascade), so this finalizer is what makes proxy deletion reach them at all. The returned
+// duration asks for a requeue when non-zero.
+func (r *ZarfPackageProxyReconciler) finalizeProxy(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) (time.Duration, error) {
+	releases, err := r.listProxyReleases(ctx, proxy)
+	if err != nil {
+		return 0, err
+	}
+	for _, release := range releases {
+		if !release.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := r.Delete(ctx, release); err != nil && !apierrors.IsNotFound(err) {
+			return 0, err
+		}
+	}
+	// Walk the just-deleted releases through their own finalization in the same pass; release
+	// events keep the proxy requeued until the last one is gone.
+	retry, err := r.finalizeReleases(ctx, proxy)
+	if err != nil {
+		return 0, err
+	}
+	if len(releases) > 0 {
+		return retry, nil
+	}
+	if controllerutil.RemoveFinalizer(proxy, addonsv1alpha1.FinalizerReleaseCleanup) {
+		return 0, r.Update(ctx, proxy)
+	}
+	return 0, nil
 }
 
 // finalizeRelease walks one deleting, removal-owing release toward letting go: run the removal
