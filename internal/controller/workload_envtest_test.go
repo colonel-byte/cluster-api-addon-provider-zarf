@@ -17,6 +17,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	zarfconfig "github.com/zarf-dev/zarf/src/config"
@@ -91,7 +92,8 @@ func TestWorkloadProbes(t *testing.T) {
 			t.Fatalf("creating %s: %v", name, err)
 		}
 		t.Cleanup(func() {
-			_ = c.Delete(ctx, secret) //nolint:errcheck // best-effort shared-state cleanup
+			// t.Context is already canceled in cleanups; the shared secret must still go.
+			_ = c.Delete(context.Background(), secret) //nolint:errcheck // best-effort cleanup
 		})
 	}
 

@@ -75,8 +75,8 @@ type ZarfPackageProxyReconciler struct {
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
-// shortcut: matching, stamping, verdicts, and resolution - the deploy-spec Secret and
-// deployment land with the next layers and M3.
+// shortcut: finished deploy Jobs are not read back into release status yet - that plumbing
+// (termination message, deployedDigest, redeploy replacement) lands with the next layers.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -127,6 +127,9 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		if err := r.writeDeploySpecs(ctx, proxy, matched); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.convergeDeploys(ctx, proxy, matched); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

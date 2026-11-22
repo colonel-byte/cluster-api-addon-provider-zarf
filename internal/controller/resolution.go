@@ -115,6 +115,7 @@ func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *
 		proxy.Status.ResolvedDigest = result.Digest
 		proxy.Status.ResolvedRef = ref
 		proxy.Status.PackageKind = packageKind(result)
+		proxy.Status.PackageName = result.Name
 		setResolved(metav1.ConditionTrue, addonsv1alpha1.ReasonResolved,
 			fmt.Sprintf("%s pinned to %s", ref, result.Digest))
 		if result.Verified {

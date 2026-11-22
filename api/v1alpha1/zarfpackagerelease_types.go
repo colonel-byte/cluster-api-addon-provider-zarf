@@ -71,6 +71,30 @@ const (
 	ReasonRenderFailed = "RenderFailed"
 )
 
+// ConditionReady is the release condition summarizing deployability (§6 step 7): True once the
+// declared package is on the cluster, False with a reason naming what the release waits on.
+const ConditionReady = "Ready"
+
+const (
+	// ReasonWaitingForZarfState holds a non-init release while its cluster has no zarf
+	// state - §6 step 5's init-first eligibility gate. Only init-capable releases may take
+	// the cluster's Job slot until the state exists.
+	ReasonWaitingForZarfState = "WaitingForZarfState"
+	// ReasonWaitingForActiveDeploy holds a ready release while another deploy or removal Job
+	// runs on its cluster - §6 step 6's one-Job-per-cluster rule.
+	ReasonWaitingForActiveDeploy = "WaitingForActiveDeploy"
+	// ReasonDeploying means this release's deploy Job is running.
+	ReasonDeploying = "Deploying"
+	// ReasonAdoptedExistingRecord means an ApplyOnce release found the package's
+	// deployed-package record already on the cluster and completed without deploying (§3).
+	ReasonAdoptedExistingRecord = "AdoptedExistingRecord"
+)
+
+// AnnotationConcurrentDeploys opts a CAPI Cluster out of the one-Job-per-cluster serialization
+// when set to "true" - on the Cluster, because concurrency tolerance is a property of the
+// target, not of any one proxy. Specified as "true" so it can grow into a slot count later.
+const AnnotationConcurrentDeploys = "addons.colonel-byte.dev/concurrent-deploys"
+
 // ZarfPackageReleaseSpec binds one cluster to one proxy.
 type ZarfPackageReleaseSpec struct {
 	// clusterRef names the CAPI Cluster, in this namespace, the package deploys to.
