@@ -120,6 +120,30 @@
       groupName: "golang",
       groupSlug: "golang",
     },
+    // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
+    // so it gets a PR of its own rather than riding in a group. The Go module and the
+    // annotated release pin (zarf.yaml, the publish workflow) describe the same version
+    // and the deploy stack vendors the packager surface, so both names move together here.
+    {
+      matchPackageNames: [
+        "github.com/zarf-dev/zarf",
+        "zarf-dev/zarf",
+      ],
+      groupName: "zarf",
+      groupSlug: "zarf",
+    },
+    // Everything indirect moves as one mechanical PR, reviewed by the vendored offline
+    // build and the test suite rather than by reading 170 version lines. It wins over the
+    // family groups above, so an indirect k8s.io bump rides here, not in the k8s PR.
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      groupName: "go indirect",
+      groupSlug: "gomod-indirect",
+    },
+    // The two families below sit under the indirect rule on purpose: their members are
+    // entirely indirect (the zarf/cosign fan-out), and these rules carve them back out of
+    // the indirect blob into PRs of their own.
     {
       matchManagers: ["gomod"],
       matchPackageNames: ["github.com/go-openapi/**"],
@@ -147,28 +171,6 @@
       ],
       groupName: "cloud-kms",
       groupSlug: "cloud-kms",
-    },
-    // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
-    // so it gets a PR of its own rather than riding in a group. The Go module and the
-    // annotated release pin (zarf.yaml, the publish workflow) describe the same version
-    // and the deploy stack vendors the packager surface, so both names move together here.
-    {
-      matchPackageNames: [
-        "github.com/zarf-dev/zarf",
-        "zarf-dev/zarf",
-      ],
-      groupName: "zarf",
-      groupSlug: "zarf",
-    },
-    // Everything indirect moves as one mechanical PR, reviewed by the vendored offline
-    // build and the test suite rather than by reading 170 version lines. Last gomod rule
-    // on purpose: it wins over the family groups above, so an indirect k8s.io bump rides
-    // here, not in the k8s PR.
-    {
-      matchManagers: ["gomod"],
-      matchDepTypes: ["indirect"],
-      groupName: "go indirect",
-      groupSlug: "gomod-indirect",
     },
     {
       matchManagers: ["pre-commit"],
