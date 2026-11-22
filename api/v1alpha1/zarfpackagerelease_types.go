@@ -58,6 +58,19 @@ const (
 	ReasonDependencyNotFound = "DependencyNotFound"
 )
 
+// ConditionDeploySpecReady is the release condition for the rendered deploy spec - the
+// per-release Secret the deploy Job mounts (§6 step 6). True once the Secret holds the current
+// rendering; False when rendering refused, with the template error in the message.
+const ConditionDeploySpecReady = "DeploySpecReady"
+
+const (
+	// ReasonDeploySpecWritten is DeploySpecReady: True.
+	ReasonDeploySpecWritten = "DeploySpecWritten"
+	// ReasonRenderFailed is DeploySpecReady: False - a value template did not parse or
+	// referenced a field the target cluster does not carry.
+	ReasonRenderFailed = "RenderFailed"
+)
+
 // ZarfPackageReleaseSpec binds one cluster to one proxy.
 type ZarfPackageReleaseSpec struct {
 	// clusterRef names the CAPI Cluster, in this namespace, the package deploys to.
