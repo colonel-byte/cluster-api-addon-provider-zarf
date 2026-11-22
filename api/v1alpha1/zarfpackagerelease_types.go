@@ -81,6 +81,11 @@ type ZarfPackageReleaseStatus struct {
 	// +optional
 	DeployedVersion string `json:"deployedVersion,omitempty"`
 
+	// deployedDigest is the package manifest digest the last successful deploy ran from -
+	// recorded per release so a fleet mid-rollout is legible digest by digest (§3).
+	// +optional
+	DeployedDigest string `json:"deployedDigest,omitempty"`
+
 	// applied is true once an ApplyOnce release has executed; it is never reset.
 	// +optional
 	Applied bool `json:"applied,omitempty"`

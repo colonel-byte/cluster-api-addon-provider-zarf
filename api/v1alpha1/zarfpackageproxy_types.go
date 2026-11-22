@@ -55,6 +55,53 @@ const (
 	ReasonDependencyCycle = "DependencyCycle"
 )
 
+// ConditionPackageResolved is the proxy condition for §6 step 4's digest resolution and
+// signature verification: True once the tag is pinned to status.resolvedDigest (and verified,
+// when a key is named), False when resolution or verification refused.
+const ConditionPackageResolved = "PackageResolved"
+
+const (
+	// ReasonResolved is PackageResolved: True.
+	ReasonResolved = "Resolved"
+	// ReasonResolutionFailed is PackageResolved: False - the registry read failed; the message
+	// carries the error.
+	ReasonResolutionFailed = "ResolutionFailed"
+	// ReasonSignatureVerificationFailed is PackageResolved: False - the package is unsigned,
+	// the signature does not verify against the named key, or it is in a form that cannot be
+	// checked. Refusal happens before any deploy Job exists (the Signature Trust Model).
+	ReasonSignatureVerificationFailed = "SignatureVerificationFailed"
+	// ReasonPackageAPIMismatch is PackageResolved: False - spec.package.api declares a schema
+	// version the pulled artifact does not carry (§4C: the declaration is a claim the
+	// controller verifies).
+	ReasonPackageAPIMismatch = "PackageAPIMismatch"
+)
+
+// ConditionTagDrift is the abnormal-true warning condition for §3's tag re-check: True with
+// reason TagContentChanged when the registry's tag no longer matches the pinned digest. Pinned
+// deploys continue untouched; the update path is a spec.package.version bump.
+const ConditionTagDrift = "TagDrift"
+
+// ReasonTagContentChanged is TagDrift: True; the message names both digests.
+const ReasonTagContentChanged = "TagContentChanged"
+
+// ConditionPackageSignatureVerified is True once the Cosign signature verified against the
+// pinned digest. Absent - not True - when no key is named, because a signature with no key to
+// check it against is not verification (the Signature Trust Model).
+const ConditionPackageSignatureVerified = "PackageSignatureVerified"
+
+// ReasonSignatureVerified is PackageSignatureVerified: True.
+const ReasonSignatureVerified = "SignatureVerified"
+
+const (
+	// AnnotationFollowTag opts a proxy into re-resolving its tag on a timer ("true"), for
+	// connected test environments - §3's tag-following. Deliberately an annotation, not spec,
+	// to keep dev toggles out of GitOps-owned state.
+	AnnotationFollowTag = "addons.colonel-byte.dev/follow-tag"
+	// AnnotationFollowTagInterval is the poll interval as a Go duration. Default 15m;
+	// meaningless without follow-tag; invalid values fall back with a warning event.
+	AnnotationFollowTagInterval = "addons.colonel-byte.dev/follow-tag-interval"
+)
+
 // NamespacedReference names an object, in the referring object's namespace by default.
 type NamespacedReference struct {
 	// name of the referenced object.
@@ -254,6 +301,23 @@ type ZarfPackageProxyStatus struct {
 	// matchingClusters are the names of the Clusters the selector currently matches.
 	// +optional
 	MatchingClusters []string `json:"matchingClusters,omitempty"`
+
+	// resolvedDigest is the package manifest digest the declared tag resolved to, pinned on
+	// first resolution. Every pull, verification, and deploy uses this digest, never the tag,
+	// so a re-pushed tag cannot change what the fleet runs. See docs/dev/architecture.md §3.
+	// +optional
+	ResolvedDigest string `json:"resolvedDigest,omitempty"`
+
+	// resolvedRef is the "repository:version" whose resolution resolvedDigest pins. The
+	// controller re-resolves only when the spec's reference no longer matches it - an edit to
+	// values or components must not silently re-pin a moved tag.
+	// +optional
+	ResolvedRef string `json:"resolvedRef,omitempty"`
+
+	// packageKind is the resolved artifact's kind - ZarfPackageConfig, or ZarfInitConfig,
+	// which is what §6 step 5's init-first eligibility gate reads.
+	// +optional
+	PackageKind string `json:"packageKind,omitempty"`
 
 	// observedGeneration is the generation the status reflects.
 	// +optional
