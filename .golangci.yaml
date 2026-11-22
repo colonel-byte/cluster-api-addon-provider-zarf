@@ -1,4 +1,9 @@
 version: "2"
+run:
+  # Load the envtest-tagged suites too - without the tag, code exercised only by an
+  # envtest test is invisible to `unused` and gets flagged.
+  build-tags:
+    - envtest
 formatters:
   enable:
     - goimports

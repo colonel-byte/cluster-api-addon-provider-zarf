@@ -36,6 +36,8 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -134,6 +136,40 @@ func Namespace(t *testing.T, c client.Client) string {
 		t.Fatalf("unable to create a namespace: %v", err)
 	}
 	return ns.Name
+}
+
+// Kubeconfig serializes the running API server's connection as a kubeconfig blob - the form a
+// CAPI <cluster-name>-kubeconfig secret carries - so a test can point the controller's
+// workload-cluster path back at this same server.
+func Kubeconfig(t *testing.T) []byte {
+	t.Helper()
+
+	kc := clientcmdapi.Config{
+		Clusters: map[string]*clientcmdapi.Cluster{
+			"envtest": {
+				Server:                   cfg.Host,
+				CertificateAuthorityData: cfg.CAData,
+			},
+		},
+		AuthInfos: map[string]*clientcmdapi.AuthInfo{
+			"envtest": {
+				ClientCertificateData: cfg.CertData,
+				ClientKeyData:         cfg.KeyData,
+			},
+		},
+		Contexts: map[string]*clientcmdapi.Context{
+			"envtest": {
+				Cluster:  "envtest",
+				AuthInfo: "envtest",
+			},
+		},
+		CurrentContext: "envtest",
+	}
+	raw, err := clientcmd.Write(kc)
+	if err != nil {
+		t.Fatalf("unable to serialize the kubeconfig: %v", err)
+	}
+	return raw
 }
 
 // repoRoot is this file's directory's parent's parent, which is the module root.
