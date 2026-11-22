@@ -115,7 +115,8 @@ func (r *ZarfPackageProxyReconciler) dependencyVerdict(ctx context.Context, prox
 }
 
 // findRelease returns the release realizing the given proxy on the given cluster, or nil. Found
-// by its spec refs, not a name convention, matching how stampReleases adopts.
+// by its spec refs, not a name convention, matching how stampReleases adopts. A deleting
+// release reads as absent.
 func (r *ZarfPackageProxyReconciler) findRelease(ctx context.Context, proxyKey types.NamespacedName, cluster *clusterv1.Cluster) (*addonsv1alpha1.ZarfPackageRelease, error) {
 	releases := &addonsv1alpha1.ZarfPackageReleaseList{}
 	if err := r.List(ctx, releases, client.InNamespace(cluster.Namespace)); err != nil {
@@ -124,6 +125,11 @@ func (r *ZarfPackageProxyReconciler) findRelease(ctx context.Context, proxyKey t
 	for i := range releases.Items {
 		release := &releases.Items[i]
 		if release.Spec.ClusterRef.Name != cluster.Name {
+			continue
+		}
+		if !release.DeletionTimestamp.IsZero() {
+			// A deleting release is finalizeReleases' concern alone: no deploy, no spec
+			// write, and - as a dependency - no longer something to build on.
 			continue
 		}
 		refNS := release.Spec.PackageProxyRef.Namespace

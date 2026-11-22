@@ -76,9 +76,6 @@ type ZarfPackageProxyReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile matches the proxy against clusters and converges its releases.
-//
-// shortcut: finished deploy Jobs are not read back into release status yet - that plumbing
-// (termination message, deployedDigest, redeploy replacement) lands with the next layers.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -97,10 +94,19 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version,
 		"matchingClusters", len(matched))
 
+	// §8B runs regardless of cycles or resolution state: deletion must never block on either.
+	removalRetry, err := r.finalizeReleases(ctx, proxy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	before := proxy.DeepCopy()
 	requeueAfter, err := r.resolvePackage(ctx, proxy)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if removalRetry > 0 && (requeueAfter == 0 || removalRetry < requeueAfter) {
+		requeueAfter = removalRetry
 	}
 
 	inCycle, err := r.inDependencyCycle(ctx, proxy)

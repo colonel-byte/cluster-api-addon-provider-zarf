@@ -33,8 +33,8 @@ import (
 // stampable cluster, in the cluster's namespace, controller-owned by the Cluster (never the
 // proxy - §8B: GC deletes a dependent only when all owners are gone, so a second owner would
 // stop Cluster deletion from collecting releases). Releases whose cluster no longer matches are
-// deleted; §8's finalizer machinery decides uninstall-vs-orphan when it lands (M4) - until then
-// deletion simply orphans the deployed package.
+// deleted; §8's finalizer machinery (finalizeReleases) decides uninstall-vs-orphan from the
+// proxy's deletionPolicy.
 func (r *ZarfPackageProxyReconciler) stampReleases(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy, matched []clusterv1.Cluster) error {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -77,6 +77,9 @@ func (r *ZarfPackageProxyReconciler) stampReleases(ctx context.Context, proxy *a
 
 		release := &addonsv1alpha1.ZarfPackageRelease{
 			ObjectMeta: metav1.ObjectMeta{
+				// The removal finalizer rides along from birth where a removal is owed, so
+				// a release deleted before its second reconcile still uninstalls (§8B).
+				Finalizers: finalizersFor(proxy),
 				// shortcut: <proxy>-<cluster> is not hash-truncated and can collide
 				// ("a-b"+"c" vs "a"+"b-c"); adoption is spec-keyed so only creation
 				// cares - add hashing when a fleet hits a 253-byte or colliding name.

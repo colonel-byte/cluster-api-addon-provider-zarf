@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -60,6 +61,34 @@ const (
 // cachePath come from the manager's --deploy-image and --cache-path flags; the proxy's deployJob
 // knobs override pod-level details.
 func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, defaultImage, cachePath string) *batchv1.Job {
+	// The subcommand reads everything from the mounted spec file - never the management
+	// cluster - and reports through the pod termination message.
+	args := []string{
+		"deploy",
+		"--spec", specMountPath + "/" + deployspec.FileName,
+		"--cache-path", cachePath,
+	}
+	return buildJob(proxy, release, defaultImage, cachePath, "-deploy", args, true)
+}
+
+// BuildRemovalJob renders the Job that uninstalls proxy's package for a deleting release
+// (docs/dev/architecture.md §8B) - the deploy Job's exact plumbing with a remove subcommand.
+// packageName keys zarf's deployed-package record on the workload cluster; the pod reads the
+// package definition from that record, so no deploy spec and no registry are involved.
+func BuildRemovalJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, defaultImage, cachePath, packageName string) *batchv1.Job {
+	args := []string{
+		"remove",
+		"--name", packageName,
+		"--cache-path", cachePath,
+	}
+	return buildJob(proxy, release, defaultImage, cachePath, "-remove", args, false)
+}
+
+// buildJob is the §6 Job contract shared by deploys and removals: the controller's image, the
+// kubeconfig mount KUBECONFIG points at, the cache volume, the deployJob knobs, backoffLimit 0,
+// and release ownership. withSpec mounts the rendered deploy-spec Secret, which a removal does
+// not need.
+func buildJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, defaultImage, cachePath, suffix string, args []string, withSpec bool) *batchv1.Job {
 	opts := proxy.Spec.DeployJob
 	if opts == nil {
 		opts = &addonsv1alpha1.DeployJobOptions{}
@@ -96,18 +125,19 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 				},
 			},
 		},
-		{
+	}
+	if withSpec {
+		volumes = append(volumes, corev1.Volume{
 			Name: "spec",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					// shortcut: the controller does not write this Secret yet; it lands
-					// with the resolver - the rendered deploy spec (package repository
-					// pinned by digest, rendered values and variables, component
-					// selection), stamped before the Job and owned by the release.
+					// The rendered deploy spec (package repository pinned by digest,
+					// rendered values and variables, component selection), stamped
+					// before the Job and owned by the release.
 					SecretName: release.Name + "-deploy-spec",
 				},
 			},
-		},
+		})
 	}
 	cacheProvided := false
 	for _, v := range opts.Volumes {
@@ -123,25 +153,20 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 		})
 	}
 
-	mounts := append([]corev1.VolumeMount{
+	mounts := []corev1.VolumeMount{
 		{Name: "kubeconfig", MountPath: kubeconfigMountPath, ReadOnly: true},
-		{Name: "spec", MountPath: specMountPath, ReadOnly: true},
 		{Name: cacheVolumeName, MountPath: cachePath},
-	}, opts.VolumeMounts...)
-
-	// The subcommand reads everything from the mounted spec file - never the management
-	// cluster - and reports through the pod termination message.
-	args := []string{
-		"deploy",
-		"--spec", specMountPath + "/" + deployspec.FileName,
-		"--cache-path", cachePath,
 	}
+	if withSpec {
+		mounts = append(mounts, corev1.VolumeMount{Name: "spec", MountPath: specMountPath, ReadOnly: true})
+	}
+	mounts = append(mounts, opts.VolumeMounts...)
 
-	// shortcut: the Job name is release.Name + "-deploy" with no truncation; releases named
+	// shortcut: the Job name is release.Name + suffix with no truncation; releases named
 	// past 56 characters break it. Hash-truncate when real cluster names arrive.
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      release.Name + "-deploy",
+			Name:      release.Name + suffix,
 			Namespace: release.Namespace,
 			Labels: map[string]string{
 				releaseLabel: release.Name,
@@ -174,7 +199,7 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 					Tolerations:        opts.Tolerations,
 					Volumes:            volumes,
 					Containers: []corev1.Container{{
-						Name:            "deploy",
+						Name:            strings.TrimPrefix(suffix, "-"),
 						Image:           image,
 						Args:            args,
 						SecurityContext: containerSecurity,

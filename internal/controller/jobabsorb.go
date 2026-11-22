@@ -147,11 +147,13 @@ func (r *ZarfPackageProxyReconciler) checkSeedRecord(ctx context.Context, proxy 
 }
 
 // jobResult reads the deploy pod's termination message back as the result document. False when
-// no pod carries a parseable message - an evicted or hand-deleted pod leaves none.
+// no pod carries a parseable message - an evicted or hand-deleted pod leaves none. Pods are
+// matched by the Job's UID, not its name: a replaced Job reuses the name, and its predecessor's
+// pods linger until garbage collection, still wearing the same job-name label.
 func (r *ZarfPackageProxyReconciler) jobResult(ctx context.Context, job *batchv1.Job) (deploy.Result, bool) {
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(job.Namespace),
-		client.MatchingLabels{batchv1.JobNameLabel: job.Name}); err != nil {
+		client.MatchingLabels{batchv1.ControllerUidLabel: string(job.UID)}); err != nil {
 		return deploy.Result{}, false
 	}
 	for i := range pods.Items {
