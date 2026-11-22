@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1d961500.js";
+            window.path_to_searchindex_js = "searchindex-7993c743.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-4fa52a72.js"></script>
@@ -644,6 +644,7 @@ status:
 <li>Supports Go template substitution referencing CAPI <code>Cluster</code> metadata and annotations (e.g. <code>{{ .Cluster.metadata.name }}</code>).</li>
 <li>Merged with the package’s internal defaults at deployment time.</li>
 </ul>
+<p><strong>Deferred, additive later: sourcing values from a Secret or ConfigMap</strong> (<code>valuesFrom</code>, CAAPH/Flux-style). The seam already exists - the deploy Job reads only the rendered deploy-spec Secret, never the proxy - so a future <code>valuesFrom</code> is purely a controller-side resolution step at render time, merged into the same <code>Values</code>/<code>Set</code> fields; the deploy pod and subcommand need no change, and a changed source changes the rendering, so the <code>spec-hash</code> redeploy path picks it up for free. Adding the optional field later is API-compatible (no version bump), and <code>signatureKeySecretRef</code>’s <code>CrossNamespaceNotEnabled</code> refusal is the reference-shape and namespace-policy precedent to reuse. The future change owes three things: ConfigMap get/list/watch RBAC (Secrets are already covered), an answer for “the referenced source changed but the proxy didn’t” (the lazy version is the periodic resync re-render, consistent with the drift-repair item owed from M3; immediate reaction needs a watch plus mapping), and precedence semantics between inline and referenced values (Flux’s “later entries win, inline wins last” is the boring default).</p>
 <h3 id="c-legacy-variables-specset-are-gated-on-a-declared-v1alpha1-package"><a class="header" href="#c-legacy-variables-specset-are-gated-on-a-declared-v1alpha1-package">C. Legacy Variables (<code>spec.set</code>) Are Gated on a Declared <code>v1alpha1</code> Package</a></h3>
 <p>Zarf rejects deploy-time variables (<code>SetVariables</code>) for <code>v1beta1</code> packages, so <code>spec.set</code> is only valid against <code>v1alpha1</code> packages - and the CRD enforces that at admission:</p>
 <ul>
