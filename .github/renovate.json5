@@ -43,18 +43,36 @@
   platformCommit: "enabled",
 
   packageRules: [
+    // Container images (Dockerfile bases, workflow runner images) move separately from the
+    // annotated release pins: an image digest bump and a tool-version bump are reviewed by
+    // different evidence.
     {
       matchDatasources: [
-        "regex",
         "docker",
-        "git-tags",
-        "github-releases",
       ],
       addLabels: [
         "renovate/oci",
       ],
-      groupName: "all dependencies",
-      groupSlug: "all-dep",
+      groupName: "container images",
+      groupSlug: "docker",
+      matchPackageNames: [
+        "*",
+      ],
+    },
+    // The annotated pins (magefiles constants, workflow tool versions) - everything the
+    // custom regex managers below surface, minus zarf, which the zarf rule further down
+    // pulls into its own group.
+    {
+      matchDatasources: [
+        "regex",
+        "git-tags",
+        "github-releases",
+      ],
+      addLabels: [
+        "renovate/pin",
+      ],
+      groupName: "release pins",
+      groupSlug: "release-pins",
       matchPackageNames: [
         "*",
       ],
@@ -108,10 +126,14 @@
       groupSlug: "golang",
     },
     // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
-    // so it gets a PR of its own rather than riding in a group.
+    // so it gets a PR of its own rather than riding in a group. The Go module and the
+    // annotated release pin (zarf.yaml, the publish workflow) describe the same version
+    // and the deploy stack vendors the packager surface, so both names move together here.
     {
-      matchManagers: ["gomod"],
-      matchPackageNames: ["github.com/zarf-dev/zarf"],
+      matchPackageNames: [
+        "github.com/zarf-dev/zarf",
+        "zarf-dev/zarf",
+      ],
       groupName: "zarf",
       groupSlug: "zarf",
     },
