@@ -71,7 +71,7 @@ type ZarfPackageProxyReconciler struct {
 // +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackagereleases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
@@ -124,6 +124,9 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		if err := r.applyDependencyVerdicts(ctx, proxy, matched); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.writeDeploySpecs(ctx, proxy, matched); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
