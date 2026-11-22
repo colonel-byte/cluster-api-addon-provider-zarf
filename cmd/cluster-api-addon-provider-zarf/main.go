@@ -52,10 +52,13 @@ func namespaceListFlag(name, usage string) *[]string {
 }
 
 func main() {
-	// The deploy Job runs this same image with a "deploy" first argument (§6 step 6); every
-	// other invocation is the controller manager.
+	// Deploy and removal Jobs run this same image with a subcommand first argument (§6 step 6,
+	// §8B); every other invocation is the controller manager.
 	if len(os.Args) > 1 && os.Args[1] == "deploy" {
 		runDeploy(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "remove" {
+		runRemove(os.Args[2:])
 	}
 
 	var metricsAddr, probeAddr, cachePath, deployImage string
