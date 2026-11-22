@@ -83,6 +83,33 @@
         "*",
       ],
     },
+    // gomod leaves `// indirect` requirements alone by default; opt them in so the grouped
+    // go-modules PRs carry them too.
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      enabled: true,
+    },
+    // Named gomod groups, split out of the all-gomod catch-all above - rules apply in
+    // order and the last match wins, so these must stay below it.
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["k8s.io/**", "sigs.k8s.io/**"],
+      groupName: "k8s",
+      groupSlug: "k8s",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["golang.org/x/**"],
+      groupName: "golang",
+      groupSlug: "golang",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["github.com/go-openapi/**"],
+      groupName: "openapi",
+      groupSlug: "openapi",
+    },
     {
       matchManagers: ["pre-commit"],
       addLabels: [
@@ -127,7 +154,7 @@
         "/(^|/).+\\.ya?ml(\\.j2)?$/",
       ],
       matchStrings: [
-        "(?m:# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-0-9]+?))?( repository=(?<registryUrl>\\S+))?\n.+?: ?\"?.*(?<currentValue>\\S+?)\"?$)",
+        "(?m:# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-0-9]+?))?( repository=(?<registryUrl>\\S+))?\n.+?: ?\"?(?<currentValue>[^\"\\s]+)\"?$)",
         "(?m:# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-0-9]+?))?( repository=(?<registryUrl>\\S+))?\n.+?(?<currentValue>(?:v|\\d|\\.)+)$)",
         "(?m:# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-0-9]+?))?\n.+?/(?<currentValue>(v|\\d)[^/]+)\\S+$)",
       ],
