@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/deployspec"
 )
 
 // Each deploy runs in its own Kubernetes Job rather than in the controller process, because the
@@ -124,12 +125,11 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 		{Name: cacheVolumeName, MountPath: cachePath},
 	}, opts.VolumeMounts...)
 
-	// shortcut: the "deploy" subcommand these args target does not exist yet; it lands with
-	// the zarf SDK integration. It reads everything from the mounted spec file - never the
-	// management cluster - and reports through the pod termination message.
+	// The subcommand reads everything from the mounted spec file - never the management
+	// cluster - and reports through the pod termination message.
 	args := []string{
 		"deploy",
-		"--spec", specMountPath + "/spec.yaml",
+		"--spec", specMountPath + "/" + deployspec.FileName,
 		"--cache-path", cachePath,
 	}
 
