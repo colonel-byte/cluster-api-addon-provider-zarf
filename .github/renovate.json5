@@ -88,11 +88,6 @@
         "*",
       ],
     },
-    // TEMPLATE: the three rules below are for a Go repository. Delete them in a repository
-    // that has no go.mod.
-    // Catch-all for gomod; the named groups and the indirect rule below carve the rest out,
-    // so what actually lands here is the direct dependencies with no family of their own
-    // (mage, testify, oras-go, image-spec).
     {
       matchManagers: ["gomod"],
       addLabels: [
@@ -124,6 +119,34 @@
       matchPackageNames: ["golang.org/x/**"],
       groupName: "golang",
       groupSlug: "golang",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["github.com/go-openapi/**"],
+      groupName: "openapi",
+      groupSlug: "openapi",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "cloud.google.com/go/**",
+        "github.com/AliyunContainerService/ack-ram-tool/**",
+        "github.com/Azure/**",
+        "github.com/AzureAD/**",
+        "github.com/alibabacloud-go/**",
+        "github.com/aws/**",
+        "github.com/awslabs/**",
+        "github.com/google/**",
+        "github.com/googleapis/**",
+        "github.com/hashicorp/**",
+        "github.com/mozillazg/docker-credential-acr-helper/**",
+        "github.com/sigstore/**",
+        "github.com/spiffe/**",
+        "github.com/theupdateframework/**",
+        "google.golang.org/**",
+      ],
+      groupName: "cloud-kms",
+      groupSlug: "cloud-kms",
     },
     // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
     // so it gets a PR of its own rather than riding in a group. The Go module and the
