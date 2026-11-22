@@ -54,7 +54,10 @@ func finishJob(t *testing.T, c client.Client, job *batchv1.Job, result deploy.Re
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: job.Name + "-",
 			Namespace:    job.Namespace,
-			Labels:       map[string]string{batchv1.JobNameLabel: job.Name},
+			Labels: map[string]string{
+				batchv1.JobNameLabel:       job.Name,
+				batchv1.ControllerUidLabel: string(job.UID),
+			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,

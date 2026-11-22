@@ -159,20 +159,15 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	}
 
 	// §6 step 6: one deploy or removal Job per cluster at a time, unless the Cluster opts out.
-	if cluster.Annotations[addonsv1alpha1.AnnotationConcurrentDeploys] != "true" {
-		jobs := &batchv1.JobList{}
-		if err := r.List(ctx, jobs, client.InNamespace(release.Namespace),
-			client.MatchingLabels{clusterLabel: cluster.Name}); err != nil {
-			return nil, err
-		}
-		for j := range jobs.Items {
-			if DeployJobPhase(&jobs.Items[j], addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseDeploying {
-				release.Status.Phase = addonsv1alpha1.PhasePending
-				setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForActiveDeploy,
-					fmt.Sprintf("Job %s holds the cluster's deploy slot", jobs.Items[j].Name))
-				return nil, nil
-			}
-		}
+	holder, err := r.clusterSlotHolder(ctx, release.Namespace, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if holder != "" {
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForActiveDeploy,
+			fmt.Sprintf("Job %s holds the cluster's deploy slot", holder))
+		return nil, nil
 	}
 
 	release.Status.Phase = addonsv1alpha1.PhaseDeploying
@@ -183,4 +178,24 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		job.Annotations = map[string]string{specHashAnnotation: hash}
 	}
 	return job, nil
+}
+
+// clusterSlotHolder returns the name of the deploy or removal Job currently running against
+// cluster - the holder of §6 step 6's one-Job-per-cluster slot - or "". Always "" when the
+// Cluster's concurrent-deploys annotation opts it out of the serialization.
+func (r *ZarfPackageProxyReconciler) clusterSlotHolder(ctx context.Context, namespace string, cluster *clusterv1.Cluster) (string, error) {
+	if cluster.Annotations[addonsv1alpha1.AnnotationConcurrentDeploys] == "true" {
+		return "", nil
+	}
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(namespace),
+		client.MatchingLabels{clusterLabel: cluster.Name}); err != nil {
+		return "", err
+	}
+	for j := range jobs.Items {
+		if DeployJobPhase(&jobs.Items[j], addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseDeploying {
+			return jobs.Items[j].Name, nil
+		}
+	}
+	return "", nil
 }

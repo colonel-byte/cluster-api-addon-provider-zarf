@@ -19,6 +19,8 @@ package controller
 import (
 	"testing"
 
+	"slices"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -119,7 +121,15 @@ func TestReleaseStamping(t *testing.T) {
 		t.Fatalf("unable to relabel the Cluster: %v", err)
 	}
 	reconcile(t)
-	if err := c.Get(t.Context(), releaseKey, release); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected the un-matched release deleted, got err=%v", err)
+	if err := c.Get(t.Context(), releaseKey, release); err != nil {
+		t.Fatalf("reading the un-matched release: %v", err)
+	}
+	// Deleted, but §8B's removal finalizer holds it while finalizeReleases decides
+	// uninstall-vs-orphan - the full walk is finalize_envtest_test.go's concern.
+	if release.DeletionTimestamp.IsZero() {
+		t.Fatal("expected the un-matched release to be deleting")
+	}
+	if !slices.Contains(release.Finalizers, addonsv1alpha1.FinalizerRemoval) {
+		t.Fatalf("expected the removal finalizer on the deleting release, got %v", release.Finalizers)
 	}
 }
