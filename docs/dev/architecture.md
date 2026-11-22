@@ -236,6 +236,8 @@ In `v1beta1`, Zarf supports structured values maps (analogous to Helm `values.ya
 - Supports Go template substitution referencing CAPI `Cluster` metadata and annotations (e.g. `{{ .Cluster.metadata.name }}`).
 - Merged with the package's internal defaults at deployment time.
 
+**Deferred, additive later: sourcing values from a Secret or ConfigMap** (`valuesFrom`, CAAPH/Flux-style). The seam already exists - the deploy Job reads only the rendered deploy-spec Secret, never the proxy - so a future `valuesFrom` is purely a controller-side resolution step at render time, merged into the same `Values`/`Set` fields; the deploy pod and subcommand need no change, and a changed source changes the rendering, so the `spec-hash` redeploy path picks it up for free. Adding the optional field later is API-compatible (no version bump), and `signatureKeySecretRef`'s `CrossNamespaceNotEnabled` refusal is the reference-shape and namespace-policy precedent to reuse. The future change owes three things: ConfigMap get/list/watch RBAC (Secrets are already covered), an answer for "the referenced source changed but the proxy didn't" (the lazy version is the periodic resync re-render, consistent with the drift-repair item owed from M3; immediate reaction needs a watch plus mapping), and precedence semantics between inline and referenced values (Flux's "later entries win, inline wins last" is the boring default).
+
 ### C. Legacy Variables (`spec.set`) Are Gated on a Declared `v1alpha1` Package
 Zarf rejects deploy-time variables (`SetVariables`) for `v1beta1` packages, so `spec.set` is only valid against `v1alpha1` packages - and the CRD enforces that at admission:
 
