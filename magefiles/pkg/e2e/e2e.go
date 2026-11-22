@@ -60,7 +60,7 @@ const (
 	// resolves it to its own kindest/node machine image.
 	//
 	// renovate: datasource=github-releases depName=kubernetes/kubernetes extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-	workloadK8sVersion = "1.34.0"
+	workloadK8sVersion = "1.37.2"
 
 	// Image digests below are owned by a written procedure rather than Renovate - the Go
 	// custom manager tracks versions, not digests. To bump one:
