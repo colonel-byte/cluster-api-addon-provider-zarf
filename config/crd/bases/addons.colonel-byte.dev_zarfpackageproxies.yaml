@@ -2873,6 +2873,12 @@ spec:
                   packageKind is the resolved artifact's kind - ZarfPackageConfig, or ZarfInitConfig,
                   which is what §6 step 5's init-first eligibility gate reads.
                 type: string
+              packageName:
+                description: |-
+                  packageName is the resolved package's declared name - the identity zarf's
+                  deployed-package record on each workload cluster is keyed on (§3), which is what the
+                  ApplyOnce probe-and-adopt looks up.
+                type: string
               resolvedDigest:
                 description: |-
                   resolvedDigest is the package manifest digest the declared tag resolved to, pinned on
