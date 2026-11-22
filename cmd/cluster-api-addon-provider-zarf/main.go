@@ -52,6 +52,12 @@ func namespaceListFlag(name, usage string) *[]string {
 }
 
 func main() {
+	// The deploy Job runs this same image with a "deploy" first argument (§6 step 6); every
+	// other invocation is the controller manager.
+	if len(os.Args) > 1 && os.Args[1] == "deploy" {
+		runDeploy(os.Args[2:])
+	}
+
 	var metricsAddr, probeAddr, cachePath, deployImage string
 	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "address the metric endpoint binds to, or 0 to disable")
