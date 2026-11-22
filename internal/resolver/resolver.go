@@ -181,8 +181,11 @@ func (Resolver) Resolve(ctx context.Context, repository, version string, opts Op
 		Verified:      len(opts.CosignPublicKey) > 0,
 		Name:          definition.Metadata.Name,
 		IsInitPackage: definition.Kind == api.ZarfInitConfig,
-		YOLO:          definition.Metadata.YOLO,
-		APIVersion:    schemaVersion(apiVersion),
+		// The deprecated field is the only source of this fact in zarf v1.0.1 - v1beta1 has
+		// no replacement, and packager.Deploy itself branches on it. Revisit when upstream
+		// drops v1alpha1 support.
+		YOLO:       definition.Metadata.YOLO, //nolint:staticcheck // see above
+		APIVersion: schemaVersion(apiVersion),
 	}, nil
 }
 
