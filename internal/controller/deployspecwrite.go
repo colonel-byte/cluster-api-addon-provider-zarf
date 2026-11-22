@@ -120,6 +120,7 @@ func (r *ZarfPackageProxyReconciler) renderSpec(proxy *addonsv1alpha1.ZarfPackag
 	spec := deployspec.Spec{
 		Package:    packageRef,
 		PackageAPI: string(proxy.Spec.Package.API),
+		PlainHTTP:  r.RegistryPlainHTTP,
 	}
 	for _, component := range proxy.Spec.Components {
 		spec.Components = append(spec.Components, deployspec.Component{
