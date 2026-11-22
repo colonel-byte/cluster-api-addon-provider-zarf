@@ -70,9 +70,6 @@ type Result struct {
 	// gate reads.
 	IsInitPackage bool
 
-	// YOLO is metadata.yolo - the package deploys without zarf init on the target.
-	YOLO bool
-
 	// APIVersion is the package's declared schema version, "v1alpha1" or "v1beta1" - what the
 	// §4C spec.package.api claim is checked against. The legacy empty form reads as v1alpha1.
 	APIVersion string
@@ -181,11 +178,7 @@ func (Resolver) Resolve(ctx context.Context, repository, version string, opts Op
 		Verified:      len(opts.CosignPublicKey) > 0,
 		Name:          definition.Metadata.Name,
 		IsInitPackage: definition.Kind == api.ZarfInitConfig,
-		// The deprecated field is the only source of this fact in zarf v1.0.1 - v1beta1 has
-		// no replacement, and packager.Deploy itself branches on it. Revisit when upstream
-		// drops v1alpha1 support.
-		YOLO:       definition.Metadata.YOLO, //nolint:staticcheck // see above
-		APIVersion: schemaVersion(apiVersion),
+		APIVersion:    schemaVersion(apiVersion),
 	}, nil
 }
 

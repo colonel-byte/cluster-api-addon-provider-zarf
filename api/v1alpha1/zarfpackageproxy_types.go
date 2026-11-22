@@ -319,6 +319,12 @@ type ZarfPackageProxyStatus struct {
 	// +optional
 	PackageKind string `json:"packageKind,omitempty"`
 
+	// packageName is the resolved package's declared name - the identity zarf's
+	// deployed-package record on each workload cluster is keyed on (§3), which is what the
+	// ApplyOnce probe-and-adopt looks up.
+	// +optional
+	PackageName string `json:"packageName,omitempty"`
+
 	// observedGeneration is the generation the status reflects.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

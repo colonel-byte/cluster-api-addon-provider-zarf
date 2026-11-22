@@ -50,6 +50,10 @@ const (
 
 	// releaseLabel on a deploy Job names the ZarfPackageRelease it realizes.
 	releaseLabel = "addons.colonel-byte.dev/release"
+
+	// clusterLabel on a deploy Job names its target cluster - what the §6 step 6
+	// one-Job-per-cluster rule lists by.
+	clusterLabel = "addons.colonel-byte.dev/cluster"
 )
 
 // BuildDeployJob renders the Job that deploys proxy's package for release. defaultImage and
@@ -141,6 +145,7 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 			Namespace: release.Namespace,
 			Labels: map[string]string{
 				releaseLabel: release.Name,
+				clusterLabel: release.Spec.ClusterRef.Name,
 			},
 			// Owned by the release so the Job is garbage-collected with it and release
 			// events requeue on Job completion once the watch is wired.
