@@ -43,18 +43,36 @@
   platformCommit: "enabled",
 
   packageRules: [
+    // Container images (Dockerfile bases, workflow runner images) move separately from the
+    // annotated release pins: an image digest bump and a tool-version bump are reviewed by
+    // different evidence.
     {
       matchDatasources: [
-        "regex",
         "docker",
-        "git-tags",
-        "github-releases",
       ],
       addLabels: [
         "renovate/oci",
       ],
-      groupName: "all dependencies",
-      groupSlug: "all-dep",
+      groupName: "container images",
+      groupSlug: "docker",
+      matchPackageNames: [
+        "*",
+      ],
+    },
+    // The annotated pins (magefiles constants, workflow tool versions) - everything the
+    // custom regex managers below surface, minus zarf, which the zarf rule further down
+    // pulls into its own group.
+    {
+      matchDatasources: [
+        "regex",
+        "git-tags",
+        "github-releases",
+      ],
+      addLabels: [
+        "renovate/pin",
+      ],
+      groupName: "release pins",
+      groupSlug: "release-pins",
       matchPackageNames: [
         "*",
       ],
@@ -70,15 +88,13 @@
         "*",
       ],
     },
-    // TEMPLATE: the three rules below are for a Go repository. Delete them in a repository
-    // that has no go.mod.
     {
       matchManagers: ["gomod"],
       addLabels: [
         "renovate/gomod",
       ],
-      groupName: "go modules",
-      groupSlug: "all-gomod",
+      groupName: "go direct",
+      groupSlug: "gomod-direct",
       matchPackageNames: [
         "*",
       ],
@@ -104,11 +120,57 @@
       groupName: "golang",
       groupSlug: "golang",
     },
+    // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
+    // so it gets a PR of its own rather than riding in a group. The Go module and the
+    // annotated release pin (zarf.yaml, the publish workflow) describe the same version
+    // and the deploy stack vendors the packager surface, so both names move together here.
+    {
+      matchPackageNames: [
+        "github.com/zarf-dev/zarf",
+        "zarf-dev/zarf",
+      ],
+      groupName: "zarf",
+      groupSlug: "zarf",
+    },
+    // Everything indirect moves as one mechanical PR, reviewed by the vendored offline
+    // build and the test suite rather than by reading 170 version lines. It wins over the
+    // family groups above, so an indirect k8s.io bump rides here, not in the k8s PR.
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      groupName: "go indirect",
+      groupSlug: "gomod-indirect",
+    },
+    // The two families below sit under the indirect rule on purpose: their members are
+    // entirely indirect (the zarf/cosign fan-out), and these rules carve them back out of
+    // the indirect blob into PRs of their own.
     {
       matchManagers: ["gomod"],
       matchPackageNames: ["github.com/go-openapi/**"],
       groupName: "openapi",
       groupSlug: "openapi",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "cloud.google.com/go/**",
+        "github.com/AliyunContainerService/ack-ram-tool/**",
+        "github.com/Azure/**",
+        "github.com/AzureAD/**",
+        "github.com/alibabacloud-go/**",
+        "github.com/aws/**",
+        "github.com/awslabs/**",
+        "github.com/google/**",
+        "github.com/googleapis/**",
+        "github.com/hashicorp/**",
+        "github.com/mozillazg/docker-credential-acr-helper/**",
+        "github.com/sigstore/**",
+        "github.com/spiffe/**",
+        "github.com/theupdateframework/**",
+        "google.golang.org/**",
+      ],
+      groupName: "cloud-kms",
+      groupSlug: "cloud-kms",
     },
     {
       matchManagers: ["pre-commit"],

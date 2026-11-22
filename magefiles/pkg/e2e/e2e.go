@@ -53,13 +53,13 @@ const (
 	// matches the sigs.k8s.io/cluster-api/api pin in go.mod so the e2e surface and the
 	// controller speak the same contract.
 	//
-	// renovate: datasource=github-releases depName=kubernetes-sigs/cluster-api
+	// renovate: datasource=github-releases depName=kubernetes-sigs/cluster-api extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 	clusterAPIVersion = "1.14.4"
 
 	// workloadK8sVersion is the Kubernetes version CAPD boots in workload clusters; CAPD
 	// resolves it to its own kindest/node machine image.
 	//
-	// renovate: datasource=github-releases depName=kubernetes/kubernetes
+	// renovate: datasource=github-releases depName=kubernetes/kubernetes extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 	workloadK8sVersion = "1.34.0"
 
 	// Image digests below are owned by a written procedure rather than Renovate - the Go
