@@ -32,6 +32,7 @@ import (
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
 	"github.com/colonel-byte/cluster-api-addon-provider-zarf/config"
 	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/controller"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/resolver"
 )
 
 // namespaceListFlag registers a comma-separated namespace list flag and returns the parsed list.
@@ -61,6 +62,9 @@ func main() {
 	flag.StringVar(&cachePath, "cache-path", "/var/lib/caapz/cache", "mount path of the zarf-cache volume inside deploy pods; back it with a volume sized for the largest package")
 	flag.StringVar(&deployImage, "deploy-image", "", "image deploy Jobs run; normally this controller's own image")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "run only one active replica")
+	var registryPlainHTTP bool
+	flag.BoolVar(&registryPlainHTTP, "registry-plain-http", false,
+		"speak HTTP to the package registry; for test topologies, never production")
 	// Mirrors cargoship's --secret-namespaces design: empty refuses every cross-namespace
 	// selection or reference, surfaced as a CrossNamespaceNotEnabled condition.
 	clusterNamespaces := namespaceListFlag("cluster-namespaces",
@@ -104,6 +108,8 @@ func main() {
 		DeployImage:       deployImage,
 		ClusterNamespaces: *clusterNamespaces,
 		SecretNamespaces:  *secretNamespaces,
+		Resolver:          resolver.Resolver{},
+		RegistryPlainHTTP: registryPlainHTTP,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up the ZarfPackageProxy controller")
