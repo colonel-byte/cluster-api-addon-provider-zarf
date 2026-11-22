@@ -95,8 +95,9 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		return nil, nil
 	}
 
-	// An existing Job - running or finished - blocks a new one. The finished case is the
-	// status-plumbing pass's to read and replace, not this one's to race.
+	// An existing Job blocks a new one: running means Deploying, finished means its outcome is
+	// absorbed into status - and a stale finished Job is deleted there, so the next pass
+	// stamps the redeploy.
 	existing := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-deploy"}, existing)
 	switch {
@@ -104,8 +105,9 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		if DeployJobPhase(existing, proxy.Spec.Strategy) == addonsv1alpha1.PhaseDeploying {
 			release.Status.Phase = addonsv1alpha1.PhaseDeploying
 			setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeploying, "the deploy Job is running")
+			return nil, nil
 		}
-		return nil, nil
+		return nil, r.absorbFinishedJob(ctx, proxy, release, existing)
 	case !apierrors.IsNotFound(err):
 		return nil, err
 	}
@@ -175,5 +177,10 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 
 	release.Status.Phase = addonsv1alpha1.PhaseDeploying
 	setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeploying, "the deploy Job is starting")
-	return BuildDeployJob(proxy, release, r.DeployImage, r.CachePath), nil
+	job := BuildDeployJob(proxy, release, r.DeployImage, r.CachePath)
+	// The spec hash is what later marks this Job stale once an edit re-renders the spec.
+	if hash := r.deploySpecHash(ctx, release); hash != "" {
+		job.Annotations = map[string]string{specHashAnnotation: hash}
+	}
+	return job, nil
 }
