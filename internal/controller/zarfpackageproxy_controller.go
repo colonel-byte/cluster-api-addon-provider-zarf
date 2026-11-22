@@ -19,6 +19,7 @@ import (
 	"context"
 	"slices"
 
+	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,6 +73,7 @@ type ZarfPackageProxyReconciler struct {
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile matches the proxy against clusters and converges its releases.
 //
@@ -169,7 +171,24 @@ func (r *ZarfPackageProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// on phase changes rather than on resync.
 		Watches(&addonsv1alpha1.ZarfPackageRelease{}, handler.EnqueueRequestsFromMapFunc(r.releaseToProxies)).
 		Watches(&clusterv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(r.clusterToProxies)).
+		// Deploy Jobs route to the proxy whose release owns them, so completion is absorbed
+		// on the event rather than on resync.
+		Watches(&batchv1.Job{}, handler.EnqueueRequestsFromMapFunc(r.jobToProxy)).
 		Complete(r)
+}
+
+// jobToProxy maps a deploy Job event to the proxy whose release the Job realizes, through the
+// release label the Job carries and the release's own packageProxyRef.
+func (r *ZarfPackageProxyReconciler) jobToProxy(ctx context.Context, obj client.Object) []reconcile.Request {
+	name, ok := obj.GetLabels()[releaseLabel]
+	if !ok {
+		return nil
+	}
+	release := &addonsv1alpha1.ZarfPackageRelease{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}, release); err != nil {
+		return nil
+	}
+	return releaseToProxy(ctx, release)
 }
 
 // releaseToProxy maps a release event to the proxy its packageProxyRef names, in the release's

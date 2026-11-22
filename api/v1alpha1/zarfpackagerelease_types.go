@@ -88,7 +88,23 @@ const (
 	// ReasonAdoptedExistingRecord means an ApplyOnce release found the package's
 	// deployed-package record already on the cluster and completed without deploying (§3).
 	ReasonAdoptedExistingRecord = "AdoptedExistingRecord"
+	// ReasonDeployed is Ready: True - the declared digest deployed successfully.
+	ReasonDeployed = "Deployed"
+	// ReasonCompleted is Ready: True for an ApplyOnce release whose one deploy ran.
+	ReasonCompleted = "Completed"
+	// ReasonDeployFailed is Ready: False - the deploy Job failed; the message carries the
+	// error the pod reported.
+	ReasonDeployFailed = "DeployFailed"
 )
+
+// ConditionSeedRecorded is set False on an ApplyOnce release whose completed deploy left no
+// deployed-package record on the cluster - a pure-actions package silently degrades the §3
+// guarantee to this garbage-collectable release, and that deserves a name. Absent otherwise.
+const ConditionSeedRecorded = "SeedRecorded"
+
+// ReasonNoDeployedPackageRecord is SeedRecorded: False - zarf stores the record only for
+// packages with at least one cluster-touching component.
+const ReasonNoDeployedPackageRecord = "NoDeployedPackageRecord"
 
 // AnnotationConcurrentDeploys opts a CAPI Cluster out of the one-Job-per-cluster serialization
 // when set to "true" - on the Cluster, because concurrency tolerance is a property of the
