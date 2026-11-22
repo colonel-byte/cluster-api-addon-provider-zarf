@@ -33,7 +33,7 @@ type (
 // kubernetes-sigs/controller-tools, which is what the annotation tracks.
 //
 // renovate: datasource=github-releases depName=kubernetes-sigs/controller-tools extractVersion=^envtest-v(?<version>.+)$
-const envtestK8sVersion = "1.34.1"
+const envtestK8sVersion = "1.37.0"
 
 // capiCRDDir is where test:envtest renders Cluster API's core CRDs. Under dist/ because it is
 // build output: regenerated on every run, ignored by git.
