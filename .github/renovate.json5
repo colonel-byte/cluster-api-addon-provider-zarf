@@ -177,7 +177,7 @@
         "/(^|/).+\\.sh$/",
       ],
       matchStrings: [
-        "(?m:(?:#|//) renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-0-9]+?))?(?: extractVersion=(?<extractVersion>\\S+?))?\n.*?\"?v?(?<currentValue>(?:\\d+\\.?)+(?:-\\S+)?)\"?.*$)",
+        "(?m:(?:#|//) renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>[a-z-0-9]+?))?(?: extractVersion=(?<extractVersion>\\S+?))?\n.*?\"?v?(?<currentValue>\\d+(?:\\.\\d+)+(?:-[^\"\\s]+)?)\"?.*$)",
       ],
       datasourceTemplate: "{{#if datasource}}{{{datasource}}}{{else}}github-releases{{/if}}",
       versioningTemplate: "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
