@@ -20,7 +20,7 @@ import (
 )
 
 // ReleasePhase is where a release is in its lifecycle.
-// +kubebuilder:validation:Enum=Pending;Deploying;Deployed;Completed;Failed
+// +kubebuilder:validation:Enum=Pending;Deploying;Deployed;Completed;Failed;Removing
 type ReleasePhase string
 
 const (
@@ -36,6 +36,9 @@ const (
 	PhaseCompleted ReleasePhase = "Completed"
 	// PhaseFailed means the last deploy attempt failed; see the conditions for why.
 	PhaseFailed ReleasePhase = "Failed"
+	// PhaseRemoving means the release is deleted and its removal Job is uninstalling the
+	// package from the workload cluster before the finalizer lets the object go (§8B).
+	PhaseRemoving ReleasePhase = "Removing"
 )
 
 // ConditionDependenciesSatisfied is the release condition carrying the per-cluster dependsOn
@@ -96,6 +99,19 @@ const (
 	// error the pod reported.
 	ReasonDeployFailed = "DeployFailed"
 )
+
+// ReasonRemoving is Ready: False while a deleted release's removal Job uninstalls its package.
+const ReasonRemoving = "Removing"
+
+// ConditionRemovalFailed is the abnormal-true condition set when a removal Job failed while the
+// cluster was alive and reachable (§8C); the message carries the error the pod reported. The
+// controller retries with backoff. The escape hatches, in preference order: flip the proxy to
+// Retain (declarative, all its releases), or remove the finalizer by hand (surgical, one
+// release). Absent otherwise.
+const ConditionRemovalFailed = "RemovalFailed"
+
+// ReasonRemovalJobFailed is RemovalFailed: True.
+const ReasonRemovalJobFailed = "RemovalJobFailed"
 
 // ConditionSeedRecorded is set False on an ApplyOnce release whose completed deploy left no
 // deployed-package record on the cluster - a pure-actions package silently degrades the §3

@@ -39,6 +39,8 @@ spec:
 
 `strategy: Reconcile` keeps matching clusters converged on the declared version; `strategy: ApplyOnce` deploys exactly once per cluster and never re-executes, for bootstrap and seed payloads.
 
+`deletionPolicy: Delete` (the default) uninstalls the package from each cluster when its release is deleted - a proxy deletion or a selector un-match; `deletionPolicy: Retain` orphans it there, left running and operator-owned. ApplyOnce proxies always behave as `Retain` - a seed cannot be un-run. Note the default's reach: deleting a `Delete` proxy uninstalls its package fleet-wide.
+
 ## Installation
 
 Each release publishes the provider three ways, all carrying the same component manifest:
