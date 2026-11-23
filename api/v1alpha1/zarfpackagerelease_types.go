@@ -88,6 +88,12 @@ const (
 	ReasonWaitingForActiveDeploy = "WaitingForActiveDeploy"
 	// ReasonDeploying means this release's deploy Job is running.
 	ReasonDeploying = "Deploying"
+	// ReasonInitializing means this release's init Job is deploying spec.init.package to a
+	// cluster that had no zarf state - §6 step 5's auto-init deploy path.
+	ReasonInitializing = "Initializing"
+	// ReasonInitFailed is Ready: False - the init Job failed; the message carries the error the
+	// pod reported. Retry is edit-to-retry via the init spec, the same stance as deploys.
+	ReasonInitFailed = "InitFailed"
 	// ReasonAdoptedExistingRecord means an ApplyOnce release found the package's
 	// deployed-package record already on the cluster and completed without deploying (§3).
 	ReasonAdoptedExistingRecord = "AdoptedExistingRecord"
