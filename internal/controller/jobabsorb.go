@@ -41,14 +41,15 @@ import (
 // and the <release>-deploy lookup stay single-valued.
 const specHashAnnotation = "addons.colonel-byte.dev/spec-hash"
 
-// deploySpecHash hashes the release's current rendered deploy spec; empty when the Secret is
-// not readable, which disables staleness detection rather than failing the pass.
-func (r *ZarfPackageProxyReconciler) deploySpecHash(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease) string {
+// specHash hashes one file of the release's current rendered deploy-spec Secret - fileName is
+// deployspec.FileName for a deploy Job, deployspec.InitFileName for an init Job. Empty when the
+// Secret is not readable, which disables staleness detection rather than failing the pass.
+func (r *ZarfPackageProxyReconciler) specHash(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, fileName string) string {
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-deploy-spec"}, secret); err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(secret.Data[deployspec.FileName])
+	sum := sha256.Sum256(secret.Data[fileName])
 	return hex.EncodeToString(sum[:])
 }
 
@@ -110,8 +111,51 @@ func (r *ZarfPackageProxyReconciler) absorbFinishedJob(ctx context.Context, prox
 	if proxy.Spec.Strategy == addonsv1alpha1.StrategyApplyOnce {
 		return nil
 	}
-	if hash := r.deploySpecHash(ctx, release); hash != "" && job.Annotations[specHashAnnotation] != hash {
+	if hash := r.specHash(ctx, release, deployspec.FileName); hash != "" && job.Annotations[specHashAnnotation] != hash {
 		log.Info("the deploy spec changed since this Job ran; deleting it to redeploy", "job", job.Name)
+		propagation := metav1.DeletePropagationBackground
+		if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// absorbFinishedInitJob reads a finished init Job's outcome (§6 step 5's auto-init deploy
+// path), reached only while the cluster still has no zarf state - a successful init normally
+// creates the state, so its Job is reaped on the has-state path, never here. Success writes no
+// status record (the zarf-state secret is the record); landing here with one means the init
+// package completed without creating state, and the release holds rather than churning fresh
+// init Jobs. Failure surfaces on Ready as InitFailed. Either way the Job stays until the init
+// spec changes: edit-to-retry, absorbFinishedJob's exact staleness rule.
+func (r *ZarfPackageProxyReconciler) absorbFinishedInitJob(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, job *batchv1.Job) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	if DeployJobPhase(job, addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseFailed {
+		result, _ := r.jobResult(ctx, job)
+		message := result.Error
+		if message == "" {
+			message = "the init Job failed and its pod left no termination message"
+		}
+		release.Status.Phase = addonsv1alpha1.PhaseFailed
+		meta.SetStatusCondition(&release.Status.Conditions, metav1.Condition{
+			Type:    addonsv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  addonsv1alpha1.ReasonInitFailed,
+			Message: message,
+		})
+	} else {
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		meta.SetStatusCondition(&release.Status.Conditions, metav1.Condition{
+			Type:    addonsv1alpha1.ConditionReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  addonsv1alpha1.ReasonWaitingForZarfState,
+			Message: "the init Job completed but the cluster still has no zarf state; edit spec.init to retry",
+		})
+	}
+
+	if hash := r.specHash(ctx, release, deployspec.InitFileName); hash != "" && job.Annotations[specHashAnnotation] != hash {
+		log.Info("the init spec changed since this Job ran; deleting it to retry", "job", job.Name)
 		propagation := metav1.DeletePropagationBackground
 		if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
 			return err

@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/deployspec"
 )
 
 // convergeDeploys walks each matched cluster's release through §6 steps 3, 5, and 6: the
@@ -140,21 +141,24 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	}
 
 	// §6 step 5: on a cluster with no zarf state, only init-capable releases may take the Job
-	// slot. No carve-out for stateless packages: v1alpha1's metadata.yolo is deprecated with
-	// no v1beta1 successor, so "needs no init" becomes a deploy-time connectivity knob on the
-	// proxy when one is designed - never package metadata.
-	initCapable := proxy.Status.PackageKind == "ZarfInitConfig" ||
-		(proxy.Spec.Init != nil && proxy.Spec.Init.AutoInit)
-	if !initCapable {
+	// slot - a package resolving as ZarfInitConfig deploys as-is, an autoInit release stamps
+	// its init Job, and everything else holds. No carve-out for stateless packages: v1alpha1's
+	// metadata.yolo is deprecated with no v1beta1 successor, so "needs no init" becomes a
+	// deploy-time connectivity knob on the proxy when one is designed - never package metadata.
+	if proxy.Status.PackageKind != "ZarfInitConfig" {
 		hasState, err := hasZarfState(ctx, workload)
 		if err != nil {
 			return nil, err
 		}
 		if !hasState {
-			release.Status.Phase = addonsv1alpha1.PhasePending
-			setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForZarfState,
-				"the cluster has no zarf state; only an init-capable release may deploy first")
-			return nil, nil
+			return r.convergeInit(ctx, proxy, cluster, release, setReady)
+		}
+		// The cluster has state; a finished auto-init Job that produced (or raced) it is
+		// scaffolding whose record is the state itself - reap it so nothing lingers.
+		if proxy.Spec.Init != nil && proxy.Spec.Init.AutoInit {
+			if err := r.reapInitJob(ctx, release); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -174,10 +178,87 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeploying, "the deploy Job is starting")
 	job := BuildDeployJob(proxy, release, r.DeployImage, r.CachePath)
 	// The spec hash is what later marks this Job stale once an edit re-renders the spec.
-	if hash := r.deploySpecHash(ctx, release); hash != "" {
+	if hash := r.specHash(ctx, release, deployspec.FileName); hash != "" {
 		job.Annotations = map[string]string{specHashAnnotation: hash}
 	}
 	return job, nil
+}
+
+// convergeInit drives §6 step 5's auto-init deploy path for one release on a state-less
+// cluster: stamp the init Job when the release declares autoInit and the init package is
+// resolved, track a running or failed one, and hold everything else with WaitingForZarfState.
+// The returned Job follows convergeDeploy's contract: nil with nil error means the release holds.
+func (r *ZarfPackageProxyReconciler) convergeInit(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, release *addonsv1alpha1.ZarfPackageRelease, setReady func(metav1.ConditionStatus, string, string)) (*batchv1.Job, error) {
+	if proxy.Spec.Init == nil || !proxy.Spec.Init.AutoInit {
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForZarfState,
+			"the cluster has no zarf state; only an init-capable release may deploy first")
+		return nil, nil
+	}
+	if !meta.IsStatusConditionTrue(proxy.Status.Conditions, addonsv1alpha1.ConditionInitPackageResolved) {
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForZarfState,
+			"the cluster has no zarf state and the init package is not resolved; see the proxy's InitPackageResolved condition")
+		return nil, nil
+	}
+
+	existing := &batchv1.Job{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-init"}, existing)
+	switch {
+	case err == nil:
+		if DeployJobPhase(existing, addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseDeploying {
+			release.Status.Phase = addonsv1alpha1.PhaseDeploying
+			setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonInitializing,
+				"the init Job is deploying the init package")
+			return nil, nil
+		}
+		return nil, r.absorbFinishedInitJob(ctx, release, existing)
+	case !apierrors.IsNotFound(err):
+		return nil, err
+	}
+
+	// §6 step 6 applies to init Jobs like any other: two autoInit proxies racing on a fresh
+	// cluster serialize here, and the loser's next state probe no-ops.
+	holder, err := r.clusterSlotHolder(ctx, release.Namespace, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if holder != "" {
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForActiveDeploy,
+			fmt.Sprintf("Job %s holds the cluster's deploy slot", holder))
+		return nil, nil
+	}
+
+	release.Status.Phase = addonsv1alpha1.PhaseDeploying
+	setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonInitializing, "the init Job is starting")
+	job := BuildInitJob(proxy, release, r.DeployImage, r.CachePath)
+	if hash := r.specHash(ctx, release, deployspec.InitFileName); hash != "" {
+		job.Annotations = map[string]string{specHashAnnotation: hash}
+	}
+	return job, nil
+}
+
+// reapInitJob deletes the release's finished init Job once its cluster carries zarf state - the
+// state is the record, so a finished init Job is scaffolding. A still-running one is left alone;
+// it holds the §6 step 6 slot until it finishes.
+func (r *ZarfPackageProxyReconciler) reapInitJob(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease) error {
+	job := &batchv1.Job{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-init"}, job)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if DeployJobPhase(job, addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseDeploying {
+		return nil
+	}
+	propagation := metav1.DeletePropagationBackground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // clusterSlotHolder returns the name of the deploy or removal Job currently running against
