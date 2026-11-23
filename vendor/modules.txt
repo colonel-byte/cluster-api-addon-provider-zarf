@@ -682,7 +682,7 @@ github.com/asaskevich/govalidator
 # github.com/avast/retry-go/v4 v4.7.0
 ## explicit; go 1.20
 github.com/avast/retry-go/v4
-# github.com/aws/aws-sdk-go-v2 v1.43.4
+# github.com/aws/aws-sdk-go-v2 v1.48.0
 ## explicit; go 1.24
 github.com/aws/aws-sdk-go-v2/aws
 github.com/aws/aws-sdk-go-v2/aws/arn
@@ -798,7 +798,7 @@ github.com/aws/aws-sdk-go-v2/service/ssooidc/types
 github.com/aws/aws-sdk-go-v2/service/sts
 github.com/aws/aws-sdk-go-v2/service/sts/internal/endpoints
 github.com/aws/aws-sdk-go-v2/service/sts/types
-# github.com/aws/smithy-go v1.27.6
+# github.com/aws/smithy-go v1.28.9
 ## explicit; go 1.24
 github.com/aws/smithy-go
 github.com/aws/smithy-go/auth
