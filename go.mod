@@ -214,7 +214,7 @@ require (
 	github.com/fluxcd/pkg/apis/meta v1.31.0 // indirect
 	github.com/fluxcd/source-controller/api v1.9.6 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/fvbommel/sortorder v1.2.0 // indirect
+	github.com/fvbommel/sortorder v1.2.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
 	github.com/github/go-spdx/v2 v2.7.0 // indirect
