@@ -105,6 +105,14 @@ const (
 	ReasonPackageAPIMismatch = "PackageAPIMismatch"
 )
 
+// ConditionInitPackageResolved is the proxy condition for resolving spec.init.package - §6 step
+// 5's auto-init deploy path. It shares PackageResolved's reasons, plus NotAnInitPackage.
+const ConditionInitPackageResolved = "InitPackageResolved"
+
+// ReasonNotAnInitPackage is InitPackageResolved: False - spec.init.package resolved to an
+// artifact that is not a ZarfInitConfig, so deploying it could never initialize the cluster.
+const ReasonNotAnInitPackage = "NotAnInitPackage"
+
 // ConditionTagDrift is the abnormal-true warning condition for §3's tag re-check: True with
 // reason TagContentChanged when the registry's tag no longer matches the pinned digest. Pinned
 // deploys continue untouched; the update path is a spec.package.version bump.
@@ -206,16 +214,37 @@ type ZarfPackageSource struct {
 	SignatureKeySecretRef *NamespacedReference `json:"signatureKeySecretRef,omitempty"`
 }
 
-// InitOptions controls Zarf initialization of a target cluster that has no Zarf state yet.
+// InitOptions controls Zarf initialization of a target cluster that has no Zarf state yet -
+// §6 step 5's auto-init deploy path (docs/dev/architecture.md).
+// +kubebuilder:validation:XValidation:rule="!(has(self.autoInit) && self.autoInit) || has(self.package)",message="init.autoInit requires init.package"
+// +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package) && has(self.package.api) && self.package.api == 'v1alpha1')",message="init.set requires init.package.api: v1alpha1; v1beta1 init packages take init.values"
 type InitOptions struct {
-	// autoInit deploys the Zarf init package first when the target cluster has no zarf-state
-	// secret in the zarf namespace.
+	// autoInit deploys init.package first when the target cluster has no zarf-state secret in
+	// the zarf namespace. Keyed on observed cluster state, never a name, so it commutes with a
+	// fleet that manages init through its own proxy: whoever initialized first, the probe finds
+	// the state and auto-init no-ops.
 	// +optional
 	AutoInit bool `json:"autoInit,omitempty"`
 
-	// storageClass is the storage class the init package uses for Zarf's internal registry.
+	// package is the init package to deploy - resolved, digest-pinned, and signature-verified
+	// exactly like spec.package, and refused unless the artifact resolves to kind
+	// ZarfInitConfig. Required when autoInit is true.
 	// +optional
-	StorageClass string `json:"storageClass,omitempty"`
+	Package *ZarfPackageSource `json:"package,omitempty"`
+
+	// values is the init deploy's structured values tree, with spec.values' semantics and
+	// templating. The registry storage class lives here on v1beta1 init packages
+	// (registry.persistence.storageClass).
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Values *apiextensionsv1.JSON `json:"values,omitempty"`
+
+	// set are the init deploy's Zarf variables, with spec.set's semantics, templating, and
+	// v1alpha1-only rule: using it requires init.package.api: v1alpha1. The init package
+	// upstream publishes is v1alpha1 and takes its registry storage class as the
+	// REGISTRY_STORAGE_CLASS variable.
+	// +optional
+	Set map[string]string `json:"set,omitempty"`
 }
 
 // ComponentSelector names a package component to deploy, optionally pinning its flavor.
@@ -356,6 +385,15 @@ type ZarfPackageProxyStatus struct {
 	// which is what §6 step 5's init-first eligibility gate reads.
 	// +optional
 	PackageKind string `json:"packageKind,omitempty"`
+
+	// initResolvedDigest is the manifest digest spec.init.package pinned to, with
+	// resolvedDigest's pin-once semantics. Every init Job deploys this digest, never the tag.
+	// +optional
+	InitResolvedDigest string `json:"initResolvedDigest,omitempty"`
+
+	// initResolvedRef is the "repository:version" whose resolution initResolvedDigest pins.
+	// +optional
+	InitResolvedRef string `json:"initResolvedRef,omitempty"`
 
 	// packageName is the resolved package's declared name - the identity zarf's
 	// deployed-package record on each workload cluster is keyed on (§3), which is what the
