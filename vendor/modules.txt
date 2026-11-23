@@ -432,7 +432,7 @@ github.com/adrg/xdg/internal/userdirs
 # github.com/agext/levenshtein v1.2.3
 ## explicit
 github.com/agext/levenshtein
-# github.com/agnivade/levenshtein v1.2.1
+# github.com/agnivade/levenshtein v1.2.2
 ## explicit; go 1.21
 github.com/agnivade/levenshtein
 # github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4
@@ -2785,8 +2785,8 @@ github.com/valyala/fastjson/fastfloat
 github.com/vbatts/go-mtree
 github.com/vbatts/go-mtree/pkg/govis
 github.com/vbatts/go-mtree/xattr
-# github.com/vektah/gqlparser/v2 v2.5.33
-## explicit; go 1.22
+# github.com/vektah/gqlparser/v2 v2.5.64
+## explicit; go 1.25
 github.com/vektah/gqlparser/v2/ast
 github.com/vektah/gqlparser/v2/gqlerror
 github.com/vektah/gqlparser/v2/lexer
