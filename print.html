@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-05391618.js";
+            window.path_to_searchindex_js = "searchindex-6a26a59d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-cabb710a.js"></script>
@@ -1096,7 +1096,7 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <p><code>goreleaser release --snapshot --clean</code> builds everything locally without publishing, signing, or needing a tag, and <code>--skip=sign</code> drops the cosign steps if the key is not to hand. That is the way to check a <code>.goreleaser.yaml</code> change before it is a release.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="renovate"><a class="header" href="#renovate">Renovate</a></h1>
-<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/renovate.yaml"><code>.github/workflows/renovate.yaml</code></a> runs Renovate against this repository and nothing else, every four hours and on demand. It replaces the hosted <code>renovate[bot]</code> GitHub App: the bot is not installed, and the config in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5"><code>.github/renovate.json5</code></a> is read by this run rather than by Mend’s servers.</p>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/renovate.yaml"><code>.github/workflows/renovate.yaml</code></a> runs Renovate against this repository and nothing else, hourly and on demand. It replaces the hosted <code>renovate[bot]</code> GitHub App: the bot is not installed, and the config in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5"><code>.github/renovate.json5</code></a> is read by this run rather than by Mend’s servers.</p>
 <h2 id="why-it-runs-self-hosted"><a class="header" href="#why-it-runs-self-hosted">Why it runs self-hosted</a></h2>
 <p>The hosted app is simpler and needs no workflow. What it cannot do is use this organization’s own GitHub App credentials, and that matters for two reasons:</p>
 <ul>
@@ -1104,6 +1104,10 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <li><strong>One app, one audit trail.</strong> The same app that release-please uses opens these, so there is one installation to grant, one private key to rotate, and one bot in the repository’s audit log.</li>
 </ul>
 <p>The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned - the <code>renovate-version</code> input in the workflow, which Renovate bumps itself via its datasource comment - rather than tracking the hosted service.</p>
+<h2 id="the-run-is-cached-which-is-what-makes-it-hourly"><a class="header" href="#the-run-is-cached-which-is-what-makes-it-hourly">The run is cached, which is what makes it hourly</a></h2>
+<p>Renovate resolves every dependency from the registry on each run, and on a 540-module vendored tree that is most of the wall clock - an uncached run takes upwards of twenty minutes. The workflow restores a <code>RENOVATE_REPOSITORY_CACHE</code> of resolved versions and changelogs before the Renovate step, which is the only reason an hourly cron is affordable rather than a way to spend the Actions budget re-asking the module proxy the same questions.</p>
+<p>Two things follow. The cache key carries <code>github.run_id</code>, so every run writes a new entry and <code>restore-keys</code> picks up the newest previous one; a fixed key would be written once and then never updated. And the <code>renovate</code> concurrency group holds <code>cancel-in-progress: false</code>, so a run that outlasts its hour queues the next one instead of overlapping it - the schedule degrades to “as often as a run takes” rather than breaking.</p>
+<p>How often this fires is not how many pull requests arrive. That ceiling is <code>prHourlyLimit</code> and <code>prConcurrentLimit</code> in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5"><code>.github/renovate.json5</code></a>; the cron only decides how quickly a new release is noticed.</p>
 <h2 id="what-it-needs-3"><a class="header" href="#what-it-needs-3">What it needs</a></h2>
 <div class="table-wrapper">
 <table>
