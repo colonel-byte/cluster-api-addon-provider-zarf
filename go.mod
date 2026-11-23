@@ -75,7 +75,7 @@ require (
 	github.com/acobaugh/osrelease v0.1.0 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
-	github.com/agnivade/levenshtein v1.2.1 // indirect
+	github.com/agnivade/levenshtein v1.2.2 // indirect
 	github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4 // indirect
 	github.com/alibabacloud-go/cr-20160607 v1.0.1 // indirect
 	github.com/alibabacloud-go/cr-20181201 v1.0.10 // indirect
@@ -463,7 +463,7 @@ require (
 	github.com/ulikunitz/xz v0.5.16 // indirect
 	github.com/valyala/fastjson v1.6.10 // indirect
 	github.com/vbatts/go-mtree v0.7.0 // indirect
-	github.com/vektah/gqlparser/v2 v2.5.33 // indirect
+	github.com/vektah/gqlparser/v2 v2.5.64 // indirect
 	github.com/vifraa/gopom v1.0.0 // indirect
 	github.com/wagoodman/go-partybus v0.0.0-20230516145632-8ccac152c651 // indirect
 	github.com/wagoodman/go-progress v0.0.0-20260303201901-10176f79b2c0 // indirect
