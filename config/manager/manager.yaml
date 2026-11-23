@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The controller holds no package cache and needs no volume - packages pull inside deploy pods,
-# which take their disk from spec.deployJob.volumes (see "Quirks worth knowing" in AGENTS.md).
+# The controller holds no package cache - packages pull inside deploy pods, which take their
+# disk from spec.deployJob.volumes (see "Quirks worth knowing" in AGENTS.md). It does need a
+# small scratch volume: resolution writes a package's metadata layers to /tmp, which this
+# container's read-only root filesystem would otherwise refuse.
 # --deploy-image is left unset here: the manager defaults deploy Jobs to its own image, and the
 # release pipeline rewrites the image reference, so one value serves both.
 ---
@@ -78,9 +80,20 @@ spec:
             runAsUser: 65532
             seccompProfile:
               type: RuntimeDefault
+          volumeMounts:
+            # Resolution stages a package's metadata layers on disk before loading them, so the
+            # controller needs somewhere to write even though it caches nothing: an unwritable
+            # /tmp fails every resolve with "read-only file system" on the mkdir, which reads
+            # as a registry or signature problem rather than a missing volume. Kilobytes -
+            # zarf.yaml, checksums, and the signature bundle - never a package.
+            - name: tmp
+              mountPath: /tmp
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
+      volumes:
+        - name: tmp
+          emptyDir: {}
