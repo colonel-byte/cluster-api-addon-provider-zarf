@@ -189,25 +189,10 @@ func Run() error {
 		"go", "-C", "test/e2e", "test", "-count=1", "-timeout=15m", "./...")
 }
 
-// buildControllerImage compiles the manager for linux on the host architecture and builds the
-// controller image with the release Dockerfile, from a context shaped like goreleaser's
-// (${TARGETPLATFORM}/<binary>) so the e2e image and the released image stay the same recipe.
+// buildControllerImage builds the e2e controller image into the e2e workdir with the release
+// recipe (release.BuildImage), so the e2e image and the released image stay the same recipe.
 func buildControllerImage() error {
-	platform := "linux/" + runtime.GOARCH
-	contextDir := filepath.Join(workDir, "image")
-	binDir := filepath.Join(contextDir, "linux", runtime.GOARCH)
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		return err
-	}
-	if err := sh.RunWithV(map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": runtime.GOARCH},
-		"go", "build", "-o", filepath.Join(binDir, "cluster-api-addon-provider-zarf"),
-		"./cmd/cluster-api-addon-provider-zarf"); err != nil {
-		return err
-	}
-	return sh.RunV("docker", "build",
-		"-f", filepath.Join("containers", "manager", "Dockerfile"),
-		"--build-arg", "TARGETPLATFORM="+platform,
-		"-t", controllerImage, contextDir)
+	return release.BuildImage(controllerImage, filepath.Join(workDir, "image"))
 }
 
 func loadControllerImage() error {

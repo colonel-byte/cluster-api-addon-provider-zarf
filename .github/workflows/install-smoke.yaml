@@ -1,0 +1,159 @@
+---
+name: Install smoke test
+
+# The check that exercises the Cluster API contract rather than the Go code, mirroring
+# cluster-api-provider-cargoship's install-smoke.yaml.
+#
+# Everything it catches is silent. A CRD missing the `cluster.x-k8s.io/<contract>` label is
+# ignored rather than rejected, so the provider installs, the controller starts, and nothing ever
+# reconciles. A metadata.yaml that does not name the contract makes `clusterctl init` refuse
+# outright. RBAC that is one verb short fails at the first reconcile, in a log nobody is reading
+# yet. None of those show up in a unit test, a lint run, or a kustomize build.
+#
+# It deploys no package: that is the e2e suite's job (docs/dev/e2e-testing.md), which needs CAPD
+# workload clusters and a registry. What this proves is that `clusterctl init` installs the
+# provider from the rendered manifests and the controller comes up, which is a different and
+# much cheaper question - so it can run on every pull request.
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup golang
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      # Through the mage target rather than a hand-written docker invocation, so the Dockerfile's
+      # ${TARGETPLATFORM}/<binary> copy is exercised against the same context layout goreleaser
+      # uses and the two cannot drift. Offline flags, because this build has to survive the same
+      # no-proxy invocation a release does.
+      - name: Build the controller image
+        run: go run ./magefiles/core release:image smoke
+        env:
+          GOFLAGS: -mod=vendor
+          GOPROXY: "off"
+          GOSUMDB: "off"
+          GOTOOLCHAIN: local
+
+      - name: Create a kind cluster
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: smoke
+
+      - name: Load the image into kind
+        run: kind load docker-image ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:smoke --name smoke
+
+      - name: Render the component manifests
+        run: go run ./magefiles/core release:manifests smoke
+        env:
+          GOFLAGS: -mod=vendor
+          GOPROXY: "off"
+          GOSUMDB: "off"
+          GOTOOLCHAIN: local
+
+      # clusterctl fetches a provider's files over HTTP from a release, so a local provider is
+      # served from a directory layout it understands: {basepath}/{provider}/{version}/{file}.
+      #
+      # The version is read out of metadata.yaml rather than written here. clusterctl refuses one
+      # that falls outside the release series metadata.yaml declares - `does not match any
+      # release series` - and release-please bumps that series on a release, so a literal goes
+      # stale at the next minor and fails naming the version rather than the drift.
+      - name: Lay out a local provider repository
+        run: |
+          major="$(sed -n 's/^[[:space:]]*-[[:space:]]*major:[[:space:]]*\([0-9]*\).*x-release-please-major.*/\1/p' out/metadata.yaml)"
+          minor="$(sed -n 's/^[[:space:]]*minor:[[:space:]]*\([0-9]*\).*x-release-please-minor.*/\1/p' out/metadata.yaml)"
+          version="v${major}.${minor}.0"
+          echo "PROVIDER_VERSION=${version}" >> "${GITHUB_ENV}"
+
+          dir="${RUNNER_TEMP}/providers/addon-zarf/${version}"
+          mkdir -p "${dir}"
+          cp out/metadata.yaml "${dir}/metadata.yaml"
+          cp out/addon-components.yaml "${dir}/addon-components.yaml"
+
+          mkdir -p "${HOME}/.config/cluster-api"
+          cat > "${HOME}/.config/cluster-api/clusterctl.yaml" <<YAML
+          providers:
+            - name: zarf
+              url: ${RUNNER_TEMP}/providers/addon-zarf/${version}/addon-components.yaml
+              type: AddonProvider
+          YAML
+
+      - name: Setup clusterctl
+        run: |
+          version="$(go list -m -f '{{.Version}}' sigs.k8s.io/cluster-api/api)"
+          curl -fsSL -o /usr/local/bin/clusterctl \
+            "https://github.com/kubernetes-sigs/cluster-api/releases/download/${version}/clusterctl-linux-amd64"
+          chmod +x /usr/local/bin/clusterctl
+          clusterctl version
+
+      # --infrastructure docker because core Cluster API will not install without one, and CAPD
+      # needs nothing here. No Cluster is ever created, so CAPD never makes a machine.
+      - name: clusterctl init
+        run: |
+          clusterctl init \
+            --infrastructure docker \
+            --addon "zarf:${PROVIDER_VERSION}" \
+            --wait-providers
+
+      - name: Check the CRDs were established and carry the contract label
+        run: |
+          for crd in \
+            zarfpackageproxies.addons.colonel-byte.dev \
+            zarfpackagereleases.addons.colonel-byte.dev; do
+            kubectl wait --for=condition=Established "crd/${crd}" --timeout=120s
+
+            # The label the core controllers read to decide which version of this provider's API
+            # to speak. Absent, everything above still passes and nothing ever reconciles.
+            label="$(kubectl get "crd/${crd}" -o jsonpath='{.metadata.labels.cluster\.x-k8s\.io/v1beta2}')"
+            if [ "${label}" != "v1alpha1" ]; then
+              echo "::error::${crd} has cluster.x-k8s.io/v1beta2=${label:-<unset>}, want v1alpha1"
+              exit 1
+            fi
+          done
+
+      - name: Check the controller is available
+        run: |
+          kubectl -n caapz-system wait --for=condition=Available \
+            deploy/caapz-controller-manager --timeout=180s
+
+      # A controller that crash-loops on a bad flag can still report Available briefly, so the
+      # log is checked for the start line and the fatal setup failures.
+      - name: Check the manager reached its start line
+        run: |
+          kubectl -n caapz-system logs \
+            deploy/caapz-controller-manager --tail=200 > manager.log
+          cat manager.log
+          if grep -Eq "unable to (build the manager|set up|register)" manager.log; then
+            echo "::error::the manager hit a fatal setup error"
+            exit 1
+          fi
+          if ! grep -q "starting the CAAPZ addon provider" manager.log; then
+            echo "::error::the manager did not reach its start line"
+            exit 1
+          fi
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl -n caapz-system describe deploy/caapz-controller-manager || true
+          kubectl -n caapz-system logs deploy/caapz-controller-manager --tail=200 || true

@@ -1,0 +1,9 @@
+# Install smoke test
+
+[`install-smoke.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/install-smoke.yaml) proves, on every pull request, that the provider actually installs through `clusterctl init` and the controller comes up - the Cluster API contract rather than the Go code, mirroring cluster-api-provider-cargoship's workflow of the same name.
+
+Everything it catches is silent elsewhere. A CRD missing the `cluster.x-k8s.io/<contract>` label is ignored rather than rejected, so the provider installs, the controller starts, and nothing ever reconciles. A `metadata.yaml` that does not name the contract makes `clusterctl init` refuse outright. RBAC one verb short fails at the first reconcile, in a log nobody reads. No unit test, lint run, or kustomize build fails on any of those.
+
+The job builds the controller image with `release:image` (the release Dockerfile against goreleaser's context layout, under the offline `GOPROXY=off` flags a release has to survive), kind-loads it, renders `out/addon-components.yaml` with `release:manifests`, lays the result out as a local clusterctl provider repository (`addon-zarf/{version}/`, version read from `metadata.yaml`'s release-please markers so it never goes stale), and runs `clusterctl init --infrastructure docker --addon zarf:<version> --wait-providers`. It then asserts the two CRDs are Established and carry `cluster.x-k8s.io/v1beta2: v1alpha1`, the `caapz-controller-manager` deployment is Available, and the manager log reaches its start line without a fatal setup error.
+
+It deploys no Zarf package - that is the e2e suite's job ([`e2e-testing.md`](../dev/e2e-testing.md)), which needs CAPD workload clusters and a registry. Installing and coming up is a different and much cheaper question, which is why this one can gate every pull request.

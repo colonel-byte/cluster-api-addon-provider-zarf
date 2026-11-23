@@ -33,6 +33,13 @@ func (Release) Manifests(tag string) error {
 	return release.Manifests(tag)
 }
 
+// Image builds the controller image at the release reference for the given tag, locally and for
+// the host architecture only - what the install smoke test kind-loads. Publishing stays with
+// goreleaser's multi-arch build.
+func (Release) Image(tag string) error {
+	return release.Image(tag)
+}
+
 // ZarfPackage builds the air-gapped Zarf package into out/, at the version zarf.yaml pins -
 // never at a tag the caller picks, so the manifest and the image cannot disagree. Needs the
 // release's images to be published and the zarf CLI on PATH; ZARF_ARCH cross-builds and a
