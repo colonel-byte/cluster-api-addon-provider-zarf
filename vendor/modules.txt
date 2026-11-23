@@ -1830,8 +1830,8 @@ github.com/invopop/jsonschema
 # github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99
 ## explicit
 github.com/jbenet/go-context/io
-# github.com/jedisct1/go-minisign v0.0.0-20230811132847-661be99b8267
-## explicit; go 1.20
+# github.com/jedisct1/go-minisign v0.0.0-20260527172527-a09352b57a22
+## explicit; go 1.25.0
 github.com/jedisct1/go-minisign
 # github.com/jellydator/ttlcache/v3 v3.4.1
 ## explicit; go 1.23.0
