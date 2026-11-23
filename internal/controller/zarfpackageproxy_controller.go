@@ -27,6 +27,7 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -85,6 +86,18 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// A deleting proxy only winds down: no resolution, no stamping - §8B's wait for its
+	// releases to finalize, then letting the proxy go.
+	if !proxy.DeletionTimestamp.IsZero() {
+		retry, err := r.finalizeProxy(ctx, proxy)
+		return ctrl.Result{RequeueAfter: retry}, err
+	}
+	if controllerutil.AddFinalizer(proxy, addonsv1alpha1.FinalizerReleaseCleanup) {
+		if err := r.Update(ctx, proxy); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	matched, err := r.matchClusters(ctx, proxy)
