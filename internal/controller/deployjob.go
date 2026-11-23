@@ -71,6 +71,18 @@ func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alp
 	return buildJob(proxy, release, defaultImage, cachePath, "-deploy", args, true)
 }
 
+// BuildInitJob renders the Job that deploys spec.init.package for release - §6 step 5's
+// auto-init deploy path. The deploy Job's exact contract, reading the init spec file rendered
+// beside the main one in the release's deploy-spec Secret.
+func BuildInitJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, defaultImage, cachePath string) *batchv1.Job {
+	args := []string{
+		"deploy",
+		"--spec", specMountPath + "/" + deployspec.InitFileName,
+		"--cache-path", cachePath,
+	}
+	return buildJob(proxy, release, defaultImage, cachePath, "-init", args, true)
+}
+
 // BuildRemovalJob renders the Job that uninstalls proxy's package for a deleting release
 // (docs/dev/architecture.md §8B) - the deploy Job's exact plumbing with a remove subcommand.
 // packageName keys zarf's deployed-package record on the workload cluster; the pod reads the
