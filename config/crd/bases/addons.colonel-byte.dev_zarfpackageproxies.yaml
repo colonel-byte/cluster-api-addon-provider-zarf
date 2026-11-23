@@ -2722,14 +2722,84 @@ spec:
                 properties:
                   autoInit:
                     description: |-
-                      autoInit deploys the Zarf init package first when the target cluster has no zarf-state
-                      secret in the zarf namespace.
+                      autoInit deploys init.package first when the target cluster has no zarf-state secret in
+                      the zarf namespace. Keyed on observed cluster state, never a name, so it commutes with a
+                      fleet that manages init through its own proxy: whoever initialized first, the probe finds
+                      the state and auto-init no-ops.
                     type: boolean
-                  storageClass:
-                    description: storageClass is the storage class the init package
-                      uses for Zarf's internal registry.
-                    type: string
+                  package:
+                    description: |-
+                      package is the init package to deploy - resolved, digest-pinned, and signature-verified
+                      exactly like spec.package, and refused unless the artifact resolves to kind
+                      ZarfInitConfig. Required when autoInit is true.
+                    properties:
+                      api:
+                        description: |-
+                          api asserts the package's Zarf schema version. When unset, the controller detects it
+                          from the pulled artifact; when set, a mismatch with the artifact fails the release
+                          before any deploy runs. Declaring v1alpha1 is required to use spec.set.
+                        enum:
+                        - v1alpha1
+                        - v1beta1
+                        type: string
+                      repository:
+                        description: repository is the OCI repository holding the
+                          package, without a tag.
+                        type: string
+                      signatureKeySecretRef:
+                        description: |-
+                          signatureKeySecretRef names a Secret holding the Cosign public key ("cosign.pub" key)
+                          the package signature is verified against before extraction. When unset, signature
+                          verification is skipped. In the proxy's namespace unless its namespace field names one
+                          the controller's --secret-namespaces flag permits.
+                        properties:
+                          name:
+                            description: name of the referenced object.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: |-
+                              namespace of the referenced object. Empty means the namespace of the object holding this
+                              reference. A namespace other than that one is refused unless the controller was started
+                              with a flag naming it (--secret-namespaces for secret references, --cluster-namespaces
+                              for the proxy references cross-namespace selection creates), surfaced as a condition with
+                              reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      version:
+                        description: version is the package version (OCI tag) to deploy.
+                        type: string
+                    required:
+                    - repository
+                    - version
+                    type: object
+                  set:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      set are the init deploy's Zarf variables, with spec.set's semantics, templating, and
+                      v1alpha1-only rule: using it requires init.package.api: v1alpha1. The init package
+                      upstream publishes is v1alpha1 and takes its registry storage class as the
+                      REGISTRY_STORAGE_CLASS variable.
+                    type: object
+                  values:
+                    description: |-
+                      values is the init deploy's structured values tree, with spec.values' semantics and
+                      templating. The registry storage class lives here on v1beta1 init packages
+                      (registry.persistence.storageClass).
+                    x-kubernetes-preserve-unknown-fields: true
                 type: object
+                x-kubernetes-validations:
+                - message: init.autoInit requires init.package
+                  rule: '!(has(self.autoInit) && self.autoInit) || has(self.package)'
+                - message: 'init.set requires init.package.api: v1alpha1; v1beta1
+                    init packages take init.values'
+                  rule: '!has(self.set) || (has(self.package) && has(self.package.api)
+                    && self.package.api == ''v1alpha1'')'
               package:
                 description: package is the package source and verification settings.
                 properties:
@@ -2870,6 +2940,15 @@ spec:
                   - type
                   type: object
                 type: array
+              initResolvedDigest:
+                description: |-
+                  initResolvedDigest is the manifest digest spec.init.package pinned to, with
+                  resolvedDigest's pin-once semantics. Every init Job deploys this digest, never the tag.
+                type: string
+              initResolvedRef:
+                description: initResolvedRef is the "repository:version" whose resolution
+                  initResolvedDigest pins.
+                type: string
               matchingClusters:
                 description: matchingClusters are the names of the Clusters the selector
                   currently matches.
