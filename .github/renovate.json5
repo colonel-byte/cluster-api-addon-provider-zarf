@@ -200,10 +200,14 @@
   ],
 
   // A vendored tree has to be regenerated in the same commit, or the branch does not build.
-  // Drop this in a repository that does not vendor.
+  // Drop this in a repository that does not vendor. `gomodUpdateImportPaths` is deliberately
+  // absent: the import-path rewriter loads the package graph, which a vendored tree forces
+  // into -mod=vendor against a vendor/ that has not been regenerated yet, so every grouped
+  // PR carrying a major bump fails its artifact step and lands as a bare go.mod edit (#66).
+  // The majors that reach the grouped PRs are all indirect - nothing here imports them, so
+  // there is no path to rewrite. A direct major bump gets its import paths rewritten by hand.
   postUpdateOptions: [
     "gomodTidy",
-    "gomodUpdateImportPaths",
   ],
 
   customManagers: [
