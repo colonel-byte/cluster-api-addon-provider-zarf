@@ -32,6 +32,7 @@
 - [codeql](workflows/codeql.md)
 - [commitlint](workflows/commitlint.md)
 - [deploy-book](workflows/deploy-book.md)
+- [install-smoke](workflows/install-smoke.md)
 - [pre-commit](workflows/pre-commit.md)
 - [publish-oci-artifact](workflows/publish-oci-artifact.md)
 - [publish-zarf-package](workflows/publish-zarf-package.md)

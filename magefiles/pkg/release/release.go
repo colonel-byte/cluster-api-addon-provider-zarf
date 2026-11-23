@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 
 	"github.com/colonel-byte/cluster-api-addon-provider-zarf/magefiles/pkg/gen/ociartifact"
 )
@@ -38,6 +39,41 @@ const ControllerImage = "ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-co
 // ImageRef returns the controller image reference at the given tag.
 func ImageRef(tag string) string {
 	return ControllerImage + ":" + tag
+}
+
+// BuildImage compiles the manager for linux on the host architecture and builds ref with the
+// release Dockerfile, from a context shaped like goreleaser's (${TARGETPLATFORM}/<binary>) so a
+// locally built image and the released image stay the same recipe. The binary and context land
+// under contextDir.
+func BuildImage(ref, contextDir string) error {
+	platform := "linux/" + runtime.GOARCH
+	binDir := filepath.Join(contextDir, "linux", runtime.GOARCH)
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+	build := exec.Command("go", "build", "-o",
+		filepath.Join(binDir, "cluster-api-addon-provider-zarf"), "./cmd/cluster-api-addon-provider-zarf")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
+	build.Stdout, build.Stderr = os.Stdout, os.Stderr
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("building the manager: %w", err)
+	}
+	docker := exec.Command("docker", "build",
+		"-f", filepath.Join("containers", "manager", "Dockerfile"),
+		"--build-arg", "TARGETPLATFORM="+platform,
+		"-t", ref, contextDir)
+	docker.Stdout, docker.Stderr = os.Stdout, os.Stderr
+	return docker.Run()
+}
+
+// Image builds the controller image at the release reference for the given tag, locally and for
+// the host architecture only - the smoke-test and dev counterpart of goreleaser's multi-arch
+// dockers_v2 build, which stays the one that publishes.
+func Image(tag string) error {
+	if tag == "" {
+		return fmt.Errorf("a tag is required: release:image <tag>")
+	}
+	return BuildImage(ImageRef(tag), filepath.Join(Dir, "image"))
 }
 
 // Manifests renders out/addon-components.yaml - the component manifest clusterctl installs,
