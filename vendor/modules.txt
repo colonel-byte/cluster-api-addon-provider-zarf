@@ -432,7 +432,7 @@ github.com/adrg/xdg/internal/userdirs
 # github.com/agext/levenshtein v1.2.3
 ## explicit
 github.com/agext/levenshtein
-# github.com/agnivade/levenshtein v1.2.1
+# github.com/agnivade/levenshtein v1.2.2
 ## explicit; go 1.21
 github.com/agnivade/levenshtein
 # github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4
