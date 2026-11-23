@@ -1,6 +1,14 @@
 # E2E testing: the kind + CAPD topology
 
-The end-to-end suite runs the things [`test:envtest`](../../magefiles/test.go) structurally cannot: real CAPI lifecycle machinery (a control-plane provider flipping `ControlPlaneInitialized`, the `<cluster-name>-kubeconfig` secrets CAPI writes, garbage-collection cascades), pods actually scheduling, and an OCI registry reachable from every side of the topology. It stands up a kind management cluster with CAPI core + CAPD initialized into it, one CAPD workload cluster, and a `ghcr.io/distribution/distribution:3` registry on the kind docker network, then runs the suite in the separate `test/e2e` module against all of it.
+The end-to-end suite runs the things [`test:envtest`](../../magefiles/test.go) structurally cannot: real CAPI lifecycle machinery (a control-plane provider flipping `ControlPlaneInitialized`, the `<cluster-name>-kubeconfig` secrets CAPI writes, garbage-collection cascades), pods actually scheduling, and an OCI registry reachable from every side of the topology. It stands up a kind management cluster with CAPI core + CAPD initialized into it, one CAPD workload cluster with a CNI, and a `ghcr.io/distribution/distribution:3` registry on the kind docker network, then runs the suite in the separate `test/e2e` module against all of it.
+
+### The workload cluster needs a CNI, and CAPD ships none
+
+Worth knowing because it is invisible until something tries to run: a cluster CAPD creates has no CNI at all. Its node stays `NotReady` reporting `cni plugin not initialized`, coredns sits `Pending` forever, and nothing can be scheduled - while `ControlPlaneInitialized` is true, the kubeconfig secret exists, and the API server answers perfectly well. Phase 0's spike assertions needed none of that, so the gap only surfaced when a deploy had somewhere to land.
+
+`e2e:up` therefore applies Calico and waits for the node to go `Ready`. Calico because the Cluster API quick start pairs it with CAPD: its default pod CIDR is the `192.168.0.0/16` the development flavor hands out, so the manifest applies with nothing to reconfigure. The same step writes the workload cluster's host-reachable kubeconfig to `dist/e2e/workload.kubeconfig` - the localhost/port-map variant `clusterctl get kubeconfig` rewrites, not the pod-reachable one in the secret - and `e2e:run` passes it to the suite as `E2E_WORKLOAD_KUBECONFIG` so assertions can read what a deploy actually left on the target cluster.
+
+A second thing that cluster does not have is a `StorageClass`, so anything wanting a PVC there has to say otherwise - for the Zarf init package, `init.set`'s `REGISTRY_PVC_ENABLED: "false"`.
 
 ```sh
 go run ./magefiles/core e2e:up     # kind + clusterctl init + CAPD workload cluster + registry
