@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d593a210.js";
+            window.path_to_searchindex_js = "searchindex-05391618.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-4fa52a72.js"></script>
+        <script src="toc-cabb710a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -834,7 +834,7 @@ sudo sysctl --system
 </code></pre>
 <p>The crashlooped pods recover on their own next restart once the limits are raised - no need to recreate the cluster.</p>
 <h2 id="what-the-suite-covers-today-and-does-not"><a class="header" href="#what-the-suite-covers-today-and-does-not">What the suite covers today, and does not</a></h2>
-<p>Phase 0 of the plan: the two spike assertions that the deploy-Job model rests on in this topology - the server address written in the CAPD-generated kubeconfig secret is reachable from a management-cluster pod, and one registry name (<code>caapz-e2e-registry:5000</code>) resolves and pulls from management pods and workload nodes alike. It does <strong>not</strong> yet run the CAAPZ controller in the cluster (that needs the manager deployment manifests), deploy any Zarf package, or exercise uninstall - those arrive phase by phase with their milestones.</p>
+<p>Phases 0 and 1 of the plan. Phase 0 is the two spike assertions the deploy-Job model rests on in this topology - the server address written in the CAPD-generated kubeconfig secret is reachable from a management-cluster pod, and one registry name (<code>caapz-e2e-registry:5000</code>) resolves and pulls from management pods and workload nodes alike. Phase 1 is the controller running in the cluster: <code>e2e:run</code> builds the manager with the release Dockerfile, kind-loads it, and installs it through a workdir kustomize overlay over <code>config/default</code> (adding <code>--registry-plain-http</code> for the HTTP test registry), then asserts pure matching behavior on real CAPI objects - a release stamped Cluster-owned on selector match and deleted on un-match, a foreign-namespace proxy reconciling to zero matches without <code>--cluster-namespaces</code>, and the three <code>dependsOn</code> hold verdicts as live conditions. It does <strong>not</strong> yet deploy any Zarf package or exercise uninstall - those arrive with their phases (fixtures and the Cosign keypair first).</p>
 <p>Every version the topology pins - clusterctl/CAPD, the workload Kubernetes version, the node/registry/test image digests - lives as annotated constants in <code>magefiles/pkg/e2e/e2e.go</code>, each with its Renovate annotation or written bump procedure per the pin-ownership rule in <a href="../magefiles/AGENTS.html#every-pin-needs-an-owner"><code>magefiles/AGENTS.md</code></a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="new-repository-checklist"><a class="header" href="#new-repository-checklist">New repository checklist</a></h1>
@@ -981,6 +981,12 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <pre><code class="language-sh">mdbook build &amp;&amp; mdbook serve
 </code></pre>
 <p><code>mdbook serve</code> watches <code>docs/</code> and reloads, which is the quick way to check a redirect actually resolves - the redirect file appears at the old path and names the new one.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="install-smoke-test"><a class="header" href="#install-smoke-test">Install smoke test</a></h1>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/install-smoke.yaml"><code>install-smoke.yaml</code></a> proves, on every pull request, that the provider actually installs through <code>clusterctl init</code> and the controller comes up - the Cluster API contract rather than the Go code, mirroring cluster-api-provider-cargoship’s workflow of the same name.</p>
+<p>Everything it catches is silent elsewhere. A CRD missing the <code>cluster.x-k8s.io/&lt;contract&gt;</code> label is ignored rather than rejected, so the provider installs, the controller starts, and nothing ever reconciles. A <code>metadata.yaml</code> that does not name the contract makes <code>clusterctl init</code> refuse outright. RBAC one verb short fails at the first reconcile, in a log nobody reads. No unit test, lint run, or kustomize build fails on any of those.</p>
+<p>The job builds the controller image with <code>release:image</code> (the release Dockerfile against goreleaser’s context layout, under the offline <code>GOPROXY=off</code> flags a release has to survive), kind-loads it, renders <code>out/addon-components.yaml</code> with <code>release:manifests</code>, lays the result out as a local clusterctl provider repository (<code>addon-zarf/{version}/</code>, version read from <code>metadata.yaml</code>’s release-please markers so it never goes stale), and runs <code>clusterctl init --infrastructure docker --addon zarf:&lt;version&gt; --wait-providers</code>. It then asserts the two CRDs are Established and carry <code>cluster.x-k8s.io/v1beta2: v1alpha1</code>, the <code>caapz-controller-manager</code> deployment is Available, and the manager log reaches its start line without a fatal setup error.</p>
+<p>It deploys no Zarf package - that is the e2e suite’s job (<a href="#e2e-testing-the-kind--capd-topology"><code>e2e-testing.md</code></a>), which needs CAPD workload clusters and a registry. Installing and coming up is a different and much cheaper question, which is why this one can gate every pull request.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="validate-pre-commit-hooks"><a class="header" href="#validate-pre-commit-hooks">Validate pre-commit hooks</a></h1>
 <p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/pre-commit.yaml"><code>.github/workflows/pre-commit.yaml</code></a> runs the hooks from <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.pre-commit-config.yaml"><code>.pre-commit-config.yaml</code></a> over the whole tree with <a href="https://github.com/j178/prek">prek</a>, on every pull request and on the merge queue.</p>
