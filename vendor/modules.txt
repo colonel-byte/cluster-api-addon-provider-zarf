@@ -484,7 +484,7 @@ github.com/anchore/go-collections
 # github.com/anchore/go-homedir v0.1.1
 ## explicit; go 1.19
 github.com/anchore/go-homedir
-# github.com/anchore/go-logger v0.1.1
+# github.com/anchore/go-logger v0.2.0
 ## explicit; go 1.25.0
 github.com/anchore/go-logger
 github.com/anchore/go-logger/adapter/discard
