@@ -36,6 +36,19 @@
   // then merge a whole family of modules on one green run.
   automerge: false,
 
+  // One pull request per module, throttled - the Dependabot shape. Ungrouping alone turns
+  // 260 pending updates into 260 pull requests at once; these are what make it a queue
+  // instead, and they are the half of the arrangement that actually matters. 5 open and 2
+  // new per hour mirrors Dependabot's `open-pull-requests-limit` default, so the backlog
+  // drains at a rate a person can review. Renovate parks the remainder on the dependency
+  // dashboard rather than dropping it - nothing is lost, it just waits.
+  //
+  // Raising these is the lever if the queue drains too slowly; `prConcurrentLimit: 0` means
+  // unlimited, which is the state this is here to prevent.
+  prConcurrentLimit: 5,
+  prHourlyLimit: 2,
+  branchConcurrentLimit: 5,
+
   // Commit through the GitHub API rather than over git. Renovate recommends this when the
   // token is a GitHub App installation token, which is what .github/workflows/renovate.yaml
   // mints - it is also what gets the commits attributed to the app and signed by GitHub.
@@ -190,6 +203,42 @@
       ],
       groupName: "commitlint",
       groupSlug: "commitlint",
+    },
+    // Indirect majors are not upgrade decisions, and Renovate's are mostly not real. It
+    // resolves a major by probing `module/vN`; where that path does not exist it falls back
+    // to the repository's git tags, which produces `golang.org/x/time v0.16.0 -> v3.0.1`,
+    // `google.golang.org/protobuf v1.36.12 -> v5.9.11`, and four outright downgrades. A
+    // 2026-11-23 dry run against v44.258.1 typed 42 updates `major`; 41 were indirect.
+    //
+    // Nothing in this module imports an indirect requirement, so its major is not ours to
+    // pick - it arrives when a direct dependency asks for it. Disabling them also retires a
+    // second failure: Renovate computes
+    // `mustSkipGoModTidy = !postUpdateOptions.includes("gomodUpdateImportPaths") && updateType === "major"`,
+    // and that flag gates every tidy variant, so a major branch runs `go get` and `go mod
+    // vendor` but never `go mod tidy` - which check-go-mod.yaml then fails on the tidy diff.
+    // With `gomodUpdateImportPaths` deliberately absent (#66), every major PR failed that
+    // check by construction. A direct major still reaches us, and still needs tidy by hand.
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      matchUpdateTypes: ["major"],
+      enabled: false,
+    },
+    // Dissolve the gomod groups: a branch per module, named `renovate/<module>-<major>.x`.
+    // The groups above stay in the file and keep applying their labels - `groupName: null`
+    // removes only the grouping, and the rules are still what attaches `renovate/gomod` and
+    // decides what is enabled. This sits last so it wins over all of them.
+    //
+    // The trade this makes is the opposite of the one the groups made, and it is only
+    // affordable because of the limits at the top of this file. The counts, from the
+    // 2026-11-23 dry run: 170 indirect updates, 82 in the cloud-kms families, 8 openapi, 1
+    // direct. Ungrouped and throttled to 2 per hour, a full backlog takes days to drain -
+    // which is the intended behaviour, not a problem to solve, because each one arrives with
+    // its own vendored diff and its own CI run. Re-group a family by deleting this rule's
+    // match for it if the trickle is not worth the per-module isolation.
+    {
+      matchManagers: ["gomod"],
+      groupName: null,
     },
     // The `go` directive and the toolchain line are a decision about the language version,
     // not a dependency update, so they are not Renovate's to move.
