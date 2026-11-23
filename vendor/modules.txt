@@ -2387,7 +2387,7 @@ github.com/scylladb/go-set/iset
 github.com/scylladb/go-set/strset
 github.com/scylladb/go-set/u32set
 github.com/scylladb/go-set/uset
-# github.com/secure-systems-lab/go-securesystemslib v0.11.0
+# github.com/secure-systems-lab/go-securesystemslib v0.11.1
 ## explicit; go 1.25.0
 github.com/secure-systems-lab/go-securesystemslib/cjson
 github.com/secure-systems-lab/go-securesystemslib/dsse
