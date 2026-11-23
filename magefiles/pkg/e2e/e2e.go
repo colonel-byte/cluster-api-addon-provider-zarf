@@ -141,6 +141,9 @@ func Up() error {
 		{"registry wiring on workload nodes", configureWorkloadRegistry},
 		{"CNI on the workload cluster", installWorkloadCNI},
 		{"spike image in registry", seedSpikeImage},
+		{"fixture signing keypairs", ensureKeypairs},
+		{"fixture packages in registry", seedFixturePackages},
+		{"init package mirror", mirrorInitPackage},
 	}
 	for _, step := range steps {
 		fmt.Println("==>", step.name)
@@ -208,10 +211,17 @@ func Run() error {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
 	}
+	keys, err := filepath.Abs(keyDir())
+	if err != nil {
+		return err
+	}
 	return sh.RunWithV(map[string]string{
 		"E2E_KUBECONFIG":          kubeconfig,
 		"E2E_WORKLOAD_KUBECONFIG": workload,
-	}, "go", "-C", "test/e2e", "test", "-count=1", "-timeout=30m", "./...")
+		// The fixture keypairs, so a test can name the public half a proxy verifies against
+		// and the unrelated one the bad-signature case needs.
+		"E2E_KEY_DIR": keys,
+	}, "go", "-C", "test/e2e", "test", "-count=1", "-timeout=40m", "./...")
 }
 
 // buildControllerImage builds the e2e controller image into the e2e workdir with the release
