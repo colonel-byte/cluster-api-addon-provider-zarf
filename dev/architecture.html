@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-ee3cd41b.js";
+            window.path_to_searchindex_js = "../searchindex-d593a210.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-4fa52a72.js"></script>
@@ -253,7 +253,18 @@ spec:
   # Zarf initialization parameters if target cluster is not initialized
   init:
     autoInit: true
-    storageClass: "ceph-bucket"
+    # The init package to deploy - a full package source, resolved, digest-pinned, and
+    # signature-verified exactly like spec.package. Required when autoInit is true.
+    package:
+      repository: zarf-docker-registry.zarf.svc.cluster.local:5000/packages/init
+      version: "v1.0.1"
+      signatureKeySecretRef:
+        name: cosign-pubkey
+    # Variables for the init deploy, same semantics as spec.set (v1alpha1 packages only; the
+    # upstream init package published at v1.0.1 is v1alpha1). A v1beta1 init package takes
+    # init.values instead - e.g. registry.persistence.storageClass.
+    set:
+      REGISTRY_STORAGE_CLASS: "ceph-bucket"
 
   # Component filtering
   components:
@@ -383,7 +394,7 @@ status:
 <p>Heterogeneous fleets (one segment wants vsphere CSI, another rook-ceph) are the reason foundational packages stay <em>separate</em> from the init package by default - the layout the CRDs already express with no extra machinery:</p>
 <ul>
 <li>One shared init proxy (or <code>autoInit</code>), identical fleet-wide; per-variant proxies (<code>csi-vsphere</code>, <code>csi-rook-ceph</code>) with disjoint <code>clusterSelector</code>s keyed on the cluster’s existing labels, each with <code>dependsOn: [zarf-init]</code>. The DAG and the init-first eligibility gate (§6) order everything; a cluster gets the variant its labels declare. Where variants share most content, Zarf <code>flavor</code>s via <code>spec.components</code> let two thin proxies select from one package.</li>
-<li><strong>Bundling components into a custom init package is the escape hatch for one constraint only</strong>: storage that must exist before init can finish - Zarf’s internal registry needing a real <code>StorageClass</code> with nothing provisioning one pre-init. Zarf’s component <code>import</code> mechanism composes this (a custom <code>ZarfInitConfig</code> importing, say, rook-ceph’s components); the cost is per-variant init packages, paid knowingly by the fleet segment that needs it. The decision rule per segment: <em>can init complete on this cluster’s day-zero storage?</em> Yes - shared init, selector-driven variants. No - that segment carries a variant init package. <code>init.storageClass</code> bridges the two where a StorageClass exists at provision time.</li>
+<li><strong>Bundling components into a custom init package is the escape hatch for one constraint only</strong>: storage that must exist before init can finish - Zarf’s internal registry needing a real <code>StorageClass</code> with nothing provisioning one pre-init. Zarf’s component <code>import</code> mechanism composes this (a custom <code>ZarfInitConfig</code> importing, say, rook-ceph’s components); the cost is per-variant init packages, paid knowingly by the fleet segment that needs it. The decision rule per segment: <em>can init complete on this cluster’s day-zero storage?</em> Yes - shared init, selector-driven variants. No - that segment carries a variant init package. The init package’s own storage-class knob (<code>init.set</code>’s <code>REGISTRY_STORAGE_CLASS</code>, or its v1beta1 value equivalent) bridges the two where a StorageClass exists at provision time.</li>
 <li><strong>Day-2 handoff of bundled components follows the package name</strong>, per the handoff rules above. The clean path is one <code>Retain</code> Reconcile proxy managing the custom init package itself - same name, same record, in-place upgrades. Splitting a bundled component out to its own proxy later changes the package name: no adoption, no shared record, and the first deploy collides with Helm releases the init components own. Zarf’s <code>DeployOptions.TakeOwnership</code> exists for exactly that adoption, which implies a proxy-level <code>takeOwnership</code> knob - <strong>not in the API today; decide whether to add it before v1alpha1 ships to real users</strong>, since the name-discontinuous handoff is impossible without it.</li>
 </ul>
 <hr>
@@ -456,18 +467,30 @@ spec:
 <hr>
 <h2 id="6-reconcile-workflow"><a class="header" href="#6-reconcile-workflow">6. Reconcile Workflow</a></h2>
 <ol>
-<li><strong>Cluster Discovery</strong>:
-The controller watches for CAPI <code>Cluster</code> resources reaching <code>status.initialization.controlPlaneInitialized == true</code> (the v1beta2 initialization signal, surfaced by the <code>ControlPlaneInitialized</code> condition) and matching <code>spec.clusterSelector</code>.</li>
-<li><strong>Kubeconfig Resolution</strong>:
-CAAPZ retrieves the cluster’s administrative kubeconfig secret (<code>&lt;cluster-name&gt;-kubeconfig</code>) using CAPI’s cluster client cache.</li>
-<li><strong>Seed Check</strong>:
-If <code>spec.strategy == ApplyOnce</code>, skip execution when the release is already <code>applied: true</code>. Otherwise probe the workload cluster for the package’s <code>zarf-package-&lt;name&gt;</code> deployed-package secret in the <code>zarf</code> namespace; if present, mark the release <code>Completed</code> without deploying (see §3, “Where the ‘never re-execute’ record actually lives”).</li>
-<li><strong>Digest Resolution &amp; Signature Verification</strong>:
-The controller resolves the tag to its pinned digest (<code>status.resolvedDigest</code>, §3) and, if <code>signatureKeySecretRef</code> is set, verifies the Cosign signature against that digest <strong>in the controller, at resolution time</strong> - a manifest-and-signature read against the registry, not a package pull, so the controller needs no package-sized disk. The deploy Job later pulls that verified digest: content addressing makes the verified artifact and the deployed artifact the same bytes. Verification binds to the digest, so a re-pushed tag never inherits a prior verification. See <code>docs/agent/choice-deploy-job.md</code> for why verification sits here rather than in the Job.</li>
-<li><strong>Auto-Init Check</strong>:
-If <code>spec.init.autoInit == true</code>, the controller probes the target cluster for Zarf state (<code>zarf-state</code> secret in the <code>zarf</code> namespace) at deploy-prep, and only an absent state triggers an init deploy. Auto-init is keyed on <em>observed cluster state</em>, never on a package or proxy name - so it commutes with a fleet that manages init through its own proxy (the §3 seed-then-manage handoff): whoever initialized first, the probe finds the state and auto-init no-ops. When both are declared, <code>dependsOn</code> naming the init proxy is the deterministic ordering; the remaining concurrent-first-deploy race is closed structurally by step 6’s one-Job-per-cluster rule. <strong>Init-first is an eligibility gate, not a priority</strong>: on a cluster with no Zarf state, the only releases eligible for a Job slot are init-capable ones - a package that resolves as an init package (<code>kind: ZarfInitConfig</code>, read at resolution) or a proxy with <code>autoInit: true</code>; everything else holds in <code>Pending</code> with condition reason <code>WaitingForZarfState</code> rather than failing inside a Job. With step 6’s one-Job-per-cluster rule, “the init package deploys first” is therefore an invariant, not a scheduling preference.</li>
-<li><strong>Deploy Execution (the deploy Job)</strong>:
-Render values and variables (<code>{{ .Cluster.metadata.name }}</code>) and stamp one Kubernetes Job per release - <strong>a deploy never runs in the controller process</strong>. The Job’s contract, which §4C, the Signature Trust Model, and §8A reference:
+<li>
+<p><strong>Cluster Discovery</strong>:
+The controller watches for CAPI <code>Cluster</code> resources reaching <code>status.initialization.controlPlaneInitialized == true</code> (the v1beta2 initialization signal, surfaced by the <code>ControlPlaneInitialized</code> condition) and matching <code>spec.clusterSelector</code>.</p>
+</li>
+<li>
+<p><strong>Kubeconfig Resolution</strong>:
+CAAPZ retrieves the cluster’s administrative kubeconfig secret (<code>&lt;cluster-name&gt;-kubeconfig</code>) using CAPI’s cluster client cache.</p>
+</li>
+<li>
+<p><strong>Seed Check</strong>:
+If <code>spec.strategy == ApplyOnce</code>, skip execution when the release is already <code>applied: true</code>. Otherwise probe the workload cluster for the package’s <code>zarf-package-&lt;name&gt;</code> deployed-package secret in the <code>zarf</code> namespace; if present, mark the release <code>Completed</code> without deploying (see §3, “Where the ‘never re-execute’ record actually lives”).</p>
+</li>
+<li>
+<p><strong>Digest Resolution &amp; Signature Verification</strong>:
+The controller resolves the tag to its pinned digest (<code>status.resolvedDigest</code>, §3) and, if <code>signatureKeySecretRef</code> is set, verifies the Cosign signature against that digest <strong>in the controller, at resolution time</strong> - a manifest-and-signature read against the registry, not a package pull, so the controller needs no package-sized disk. The deploy Job later pulls that verified digest: content addressing makes the verified artifact and the deployed artifact the same bytes. Verification binds to the digest, so a re-pushed tag never inherits a prior verification. See <code>docs/agent/choice-deploy-job.md</code> for why verification sits here rather than in the Job.</p>
+</li>
+<li>
+<p><strong>Auto-Init Check</strong>:
+If <code>spec.init.autoInit == true</code>, the controller probes the target cluster for Zarf state (<code>zarf-state</code> secret in the <code>zarf</code> namespace) at deploy-prep, and only an absent state triggers an init deploy. Auto-init is keyed on <em>observed cluster state</em>, never on a package or proxy name - so it commutes with a fleet that manages init through its own proxy (the §3 seed-then-manage handoff): whoever initialized first, the probe finds the state and auto-init no-ops. When both are declared, <code>dependsOn</code> naming the init proxy is the deterministic ordering; the remaining concurrent-first-deploy race is closed structurally by step 6’s one-Job-per-cluster rule. <strong>Init-first is an eligibility gate, not a priority</strong>: on a cluster with no Zarf state, the only releases eligible for a Job slot are init-capable ones - a package that resolves as an init package (<code>kind: ZarfInitConfig</code>, read at resolution) or a proxy with <code>autoInit: true</code>; everything else holds in <code>Pending</code> with condition reason <code>WaitingForZarfState</code> rather than failing inside a Job. With step 6’s one-Job-per-cluster rule, “the init package deploys first” is therefore an invariant, not a scheduling preference.</p>
+<p><strong>The auto-init deploy path.</strong> <code>spec.init.package</code> names the init package - a full package source (repository, version, optional <code>api</code> claim and <code>signatureKeySecretRef</code>), required when <code>autoInit: true</code>. The controller resolves and verifies it exactly as step 4 does the main package - pinned to <code>status.initResolvedDigest</code>/<code>initResolvedRef</code>, surfaced on the <code>InitPackageResolved</code> condition - and additionally refuses an artifact that does not resolve to <code>kind: ZarfInitConfig</code>. On a state-less cluster, an <code>autoInit</code> release stamps an <em>init Job</em>: the step 6 Job contract verbatim (same image, kubeconfig, cache volume, <code>deploy</code> subcommand) with an <code>-init</code> name suffix, reading <code>init-spec.yaml</code> rendered into the release’s deploy-spec Secret beside the main spec. The init Job takes the one-Job-per-cluster slot like any other Job, so two <code>autoInit</code> proxies racing on a fresh cluster serialize, and the loser’s next probe finds the state and no-ops - the commuting property above, preserved. Success leaves no status record beyond the probe finding state (the <code>zarf-state</code> secret <em>is</em> the record, and Zarf keeps its own deployed-package record for the init package); the controller deletes the finished Job and the release proceeds to its normal deploy on the next pass. Failure surfaces as <code>Ready: False, reason: InitFailed</code> with the pod’s error, and retry is edit-to-retry via the init spec hash - the same stance as deploys. The proxy’s <em>own</em> package never takes the slot while state is absent: <code>autoInit</code> makes the init Job eligible, not the main package. A proxy whose main package itself resolves as <code>ZarfInitConfig</code> needs no <code>autoInit</code> - it is init-capable as-is, and deploying it initializes the cluster. <code>spec.init.values</code> and <code>spec.init.set</code> pass through to the init deploy exactly as the proxy-level fields do to the main one - same <code>{{ .Cluster... }}</code> templating, same v1alpha1-only rule for <code>set</code> (keyed on <code>init.package.api</code>) - so there is no dedicated storage-class field: it is the <code>REGISTRY_STORAGE_CLASS</code> variable in the v1alpha1 init package upstream publishes at v1.0.1, or the <code>registry.persistence.storageClass</code> value in a v1beta1 one. CAAPZ never removes an init package it auto-deployed - <code>deletionPolicy</code> governs <code>spec.package</code> only.</p>
+</li>
+<li>
+<p><strong>Deploy Execution (the deploy Job)</strong>:
+Render values and variables (<code>{{ .Cluster.metadata.name }}</code>) and stamp one Kubernetes Job per release - <strong>a deploy never runs in the controller process</strong>. The Job’s contract, which §4C, the Signature Trust Model, and §8A reference:</p>
 <ul>
 <li>It runs the controller’s own image (or <code>spec.deployJob.image</code>) with a <code>deploy</code> subcommand. <strong>The pod acts as a pure operator: its entire input is files on disk</strong> - a rendered deploy spec the controller writes to a per-release Secret and mounts (package repository pinned by digest, rendered values and variables, component selection), the kubeconfig, and the cache. It holds no management-cluster credentials and makes no management-cluster API calls; the subcommand assembles <code>packager.DeployOptions</code> from the spec file alone.</li>
 <li>Results return in the pod’s termination message; the controller reads the finished Job and patches <code>ZarfPackageRelease.status</code>. The deploy pod’s service account grants nothing.</li>
@@ -479,8 +502,10 @@ Render values and variables (<code>{{ .Cluster.metadata.name }}</code>) and stam
 Why a Job rather than the in-process SDK - and why verification precedes it - is recorded in <code>docs/agent/choice-deploy-job.md</code>.</li>
 </ul>
 </li>
-<li><strong>Status Update</strong>:
-Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready: True</code> on the release and proxy objects.</li>
+<li>
+<p><strong>Status Update</strong>:
+Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready: True</code> on the release and proxy objects.</p>
+</li>
 </ol>
 <h3 id="signature-trust-model"><a class="header" href="#signature-trust-model">Signature Trust Model</a></h3>
 <p><code>signatureKeySecretRef</code> adopts the sister cargoship repository’s semantics verbatim (its <code>signatureKeySecretRef</code> field and the reasoning in its doc comment):</p>
