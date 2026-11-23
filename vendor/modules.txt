@@ -1430,8 +1430,8 @@ github.com/go-openapi/analysis/internal/flatten/operations
 github.com/go-openapi/analysis/internal/flatten/replace
 github.com/go-openapi/analysis/internal/flatten/schutils
 github.com/go-openapi/analysis/internal/flatten/sortref
-# github.com/go-openapi/errors v0.22.8
-## explicit; go 1.25.0
+# github.com/go-openapi/errors v0.22.9
+## explicit; go 1.26.0
 github.com/go-openapi/errors
 # github.com/go-openapi/jsonpointer v1.0.3
 ## explicit; go 1.26.0
@@ -1464,8 +1464,8 @@ github.com/go-openapi/runtime/server-middleware/negotiate/header
 # github.com/go-openapi/spec v0.22.9
 ## explicit; go 1.25.0
 github.com/go-openapi/spec
-# github.com/go-openapi/strfmt v0.27.0
-## explicit; go 1.25.0
+# github.com/go-openapi/strfmt v0.27.4
+## explicit; go 1.26.0
 github.com/go-openapi/strfmt
 github.com/go-openapi/strfmt/internal/bsonlite
 github.com/go-openapi/strfmt/internal/countries
@@ -2114,7 +2114,7 @@ github.com/nozzle/throttler
 # github.com/nwaples/rardecode/v2 v2.2.0
 ## explicit; go 1.21
 github.com/nwaples/rardecode/v2
-# github.com/oklog/ulid/v2 v2.1.1
+# github.com/oklog/ulid/v2 v2.1.2
 ## explicit; go 1.15
 github.com/oklog/ulid/v2
 # github.com/oleiade/reflections v1.1.0
