@@ -2679,8 +2679,8 @@ github.com/syndtr/goleveldb/leveldb/opt
 github.com/syndtr/goleveldb/leveldb/storage
 github.com/syndtr/goleveldb/leveldb/table
 github.com/syndtr/goleveldb/leveldb/util
-# github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd
-## explicit; go 1.23
+# github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
+## explicit; go 1.26
 github.com/tailscale/hujson
 # github.com/tchap/go-patricia/v2 v2.3.3
 ## explicit; go 1.16
