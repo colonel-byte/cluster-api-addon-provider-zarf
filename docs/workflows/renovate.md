@@ -1,6 +1,6 @@
 # Renovate
 
-[`.github/workflows/renovate.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/renovate.yaml) runs Renovate against this repository and nothing else, every four hours and on demand. It replaces the hosted `renovate[bot]` GitHub App: the bot is not installed, and the config in [`.github/renovate.json5`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5) is read by this run rather than by Mend's servers.
+[`.github/workflows/renovate.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/renovate.yaml) runs Renovate against this repository and nothing else, hourly and on demand. It replaces the hosted `renovate[bot]` GitHub App: the bot is not installed, and the config in [`.github/renovate.json5`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5) is read by this run rather than by Mend's servers.
 
 ## Why it runs self-hosted
 
@@ -10,6 +10,14 @@ The hosted app is simpler and needs no workflow. What it cannot do is use this o
 - **One app, one audit trail.** The same app that release-please uses opens these, so there is one installation to grant, one private key to rotate, and one bot in the repository's audit log.
 
 The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned - the `renovate-version` input in the workflow, which Renovate bumps itself via its datasource comment - rather than tracking the hosted service.
+
+## The run is cached, which is what makes it hourly
+
+Renovate resolves every dependency from the registry on each run, and on a 540-module vendored tree that is most of the wall clock - an uncached run takes upwards of twenty minutes. The workflow restores a `RENOVATE_REPOSITORY_CACHE` of resolved versions and changelogs before the Renovate step, which is the only reason an hourly cron is affordable rather than a way to spend the Actions budget re-asking the module proxy the same questions.
+
+Two things follow. The cache key carries `github.run_id`, so every run writes a new entry and `restore-keys` picks up the newest previous one; a fixed key would be written once and then never updated. And the `renovate` concurrency group holds `cancel-in-progress: false`, so a run that outlasts its hour queues the next one instead of overlapping it - the schedule degrades to "as often as a run takes" rather than breaking.
+
+How often this fires is not how many pull requests arrive. That ceiling is `prHourlyLimit` and `prConcurrentLimit` in [`.github/renovate.json5`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5); the cron only decides how quickly a new release is noticed.
 
 ## What it needs
 
