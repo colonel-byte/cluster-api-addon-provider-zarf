@@ -63,29 +63,15 @@ func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *
 	}
 
 	opts := resolver.Options{PlainHTTP: r.RegistryPlainHTTP}
-	if keyRef := proxy.Spec.Package.SignatureKeySecretRef; keyRef != nil {
-		key, err := keyRef.Key(proxy.Namespace, r.SecretNamespaces, "--secret-namespaces")
-		if err != nil {
-			setResolved(metav1.ConditionFalse, addonsv1alpha1.ReasonCrossNamespaceNotEnabled, err.Error())
-			return 0, nil
-		}
-		secret := &corev1.Secret{}
-		if err := r.Get(ctx, key, secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				setResolved(metav1.ConditionFalse, addonsv1alpha1.ReasonResolutionFailed,
-					fmt.Sprintf("signatureKeySecretRef names %s, which does not exist", key))
-				return 0, nil
-			}
-			return 0, err
-		}
-		publicKey, ok := secret.Data["cosign.pub"]
-		if !ok || len(publicKey) == 0 {
-			setResolved(metav1.ConditionFalse, addonsv1alpha1.ReasonResolutionFailed,
-				fmt.Sprintf("secret %s carries no cosign.pub key", key))
-			return 0, nil
-		}
-		opts.CosignPublicKey = publicKey
+	publicKey, reason, message, err := r.cosignKey(ctx, proxy.Namespace, proxy.Spec.Package.SignatureKeySecretRef)
+	if err != nil {
+		return 0, err
 	}
+	if reason != "" {
+		setResolved(metav1.ConditionFalse, reason, message)
+		return 0, nil
+	}
+	opts.CosignPublicKey = publicKey
 
 	followTag, interval := r.followTag(ctx, proxy)
 
@@ -155,6 +141,105 @@ func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *
 		meta.RemoveStatusCondition(&proxy.Status.Conditions, addonsv1alpha1.ConditionTagDrift)
 	}
 	return interval, nil
+}
+
+// cosignKey loads the Cosign public key keyRef names, resolving cross-namespace per the
+// --secret-namespaces flag. A nil keyRef returns an empty key. A refusal comes back as a
+// condition (reason, message) pair for the caller to surface; the error return is a transient
+// API failure worth a retry.
+func (r *ZarfPackageProxyReconciler) cosignKey(ctx context.Context, namespace string, keyRef *addonsv1alpha1.NamespacedReference) ([]byte, string, string, error) {
+	if keyRef == nil {
+		return nil, "", "", nil
+	}
+	key, err := keyRef.Key(namespace, r.SecretNamespaces, "--secret-namespaces")
+	if err != nil {
+		return nil, addonsv1alpha1.ReasonCrossNamespaceNotEnabled, err.Error(), nil
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, key, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, addonsv1alpha1.ReasonResolutionFailed,
+				fmt.Sprintf("signatureKeySecretRef names %s, which does not exist", key), nil
+		}
+		return nil, "", "", err
+	}
+	publicKey, ok := secret.Data["cosign.pub"]
+	if !ok || len(publicKey) == 0 {
+		return nil, addonsv1alpha1.ReasonResolutionFailed,
+			fmt.Sprintf("secret %s carries no cosign.pub key", key), nil
+	}
+	return publicKey, "", "", nil
+}
+
+// resolveInitPackage pins and verifies spec.init.package - §6 step 5's auto-init deploy path -
+// through resolvePackage's exact chain, onto status.initResolvedDigest and the
+// InitPackageResolved condition, with one extra refusal: the artifact must be a ZarfInitConfig.
+// Pin-once, no follow-tag and no drift re-check: bumping init.package.version is the update path.
+func (r *ZarfPackageProxyReconciler) resolveInitPackage(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) error {
+	if r.Resolver == nil {
+		return nil
+	}
+	initOpts := proxy.Spec.Init
+	if initOpts == nil || initOpts.Package == nil {
+		// Auto-init was un-declared; a stale pin must not keep stamping init Jobs.
+		proxy.Status.InitResolvedDigest = ""
+		proxy.Status.InitResolvedRef = ""
+		meta.RemoveStatusCondition(&proxy.Status.Conditions, addonsv1alpha1.ConditionInitPackageResolved)
+		return nil
+	}
+
+	setResolved := func(status metav1.ConditionStatus, reason, message string) {
+		meta.SetStatusCondition(&proxy.Status.Conditions, metav1.Condition{
+			Type:               addonsv1alpha1.ConditionInitPackageResolved,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: proxy.Generation,
+		})
+	}
+
+	pkg := initOpts.Package
+	ref := pkg.Repository + ":" + pkg.Version
+	if proxy.Status.InitResolvedDigest != "" && proxy.Status.InitResolvedRef == ref {
+		return nil
+	}
+
+	opts := resolver.Options{PlainHTTP: r.RegistryPlainHTTP}
+	publicKey, reason, message, err := r.cosignKey(ctx, proxy.Namespace, pkg.SignatureKeySecretRef)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		setResolved(metav1.ConditionFalse, reason, message)
+		return nil
+	}
+	opts.CosignPublicKey = publicKey
+
+	result, err := r.Resolver.Resolve(ctx, pkg.Repository, pkg.Version, opts)
+	if err != nil {
+		reason := addonsv1alpha1.ReasonResolutionFailed
+		if len(opts.CosignPublicKey) > 0 {
+			reason = addonsv1alpha1.ReasonSignatureVerificationFailed
+		}
+		setResolved(metav1.ConditionFalse, reason, err.Error())
+		return nil
+	}
+	if declared := pkg.API; declared != "" && string(declared) != result.APIVersion {
+		setResolved(metav1.ConditionFalse, addonsv1alpha1.ReasonPackageAPIMismatch,
+			fmt.Sprintf("init.package.api declares %s but the artifact is %s", declared, result.APIVersion))
+		return nil
+	}
+	if !result.IsInitPackage {
+		setResolved(metav1.ConditionFalse, addonsv1alpha1.ReasonNotAnInitPackage,
+			fmt.Sprintf("%s resolved to a %s, not the ZarfInitConfig auto-init needs", ref, packageKind(result)))
+		return nil
+	}
+
+	proxy.Status.InitResolvedDigest = result.Digest
+	proxy.Status.InitResolvedRef = ref
+	setResolved(metav1.ConditionTrue, addonsv1alpha1.ReasonResolved,
+		fmt.Sprintf("%s pinned to %s", ref, result.Digest))
+	return nil
 }
 
 // followTag reads the §3 tag-following annotations: enabled, and at what interval.

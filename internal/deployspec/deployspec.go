@@ -31,6 +31,10 @@ import (
 // FileName is the Secret key and the mounted file the deploy subcommand reads.
 const FileName = "deploy-spec.yaml"
 
+// InitFileName is the Secret key an auto-init Job's spec sits under, beside FileName in the same
+// deploy-spec Secret - the same document shape, naming the init package (§6 step 5).
+const InitFileName = "init-spec.yaml"
+
 // Version is this document's schema version, bumped on incompatible change - the controller
 // and the deploy subcommand ship in one image, but a Job stamped before an upgrade can run
 // after it. Under the project's one identity domain, same as the API group - this is a file

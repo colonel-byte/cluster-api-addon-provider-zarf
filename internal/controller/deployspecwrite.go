@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,15 +47,15 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 	}
 	log := ctrl.LoggerFrom(ctx)
 
-	// The repository comes from resolvedRef, not the live spec: an ApplyOnce proxy whose spec
-	// moved after pinning keeps deploying what it pinned. The ref is repository:version, and
-	// the last colon is the version separator (a registry port sits before a slash).
-	ref := proxy.Status.ResolvedRef
-	repository := ref
-	if i := strings.LastIndex(ref, ":"); i >= 0 {
-		repository = ref[:i]
+	packageRef := pinnedRef(proxy.Status.ResolvedRef, proxy.Status.ResolvedDigest)
+
+	// The init spec renders only from a resolved init package; until then the main spec is
+	// written alone and the init Job has nothing to start from (§6 step 5).
+	initPackageRef := ""
+	if proxy.Spec.Init != nil && proxy.Spec.Init.Package != nil &&
+		meta.IsStatusConditionTrue(proxy.Status.Conditions, addonsv1alpha1.ConditionInitPackageResolved) {
+		initPackageRef = pinnedRef(proxy.Status.InitResolvedRef, proxy.Status.InitResolvedDigest)
 	}
-	packageRef := repository + "@" + proxy.Status.ResolvedDigest
 
 	for i := range matched {
 		cluster := &matched[i]
@@ -65,7 +67,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 			continue
 		}
 
-		spec, renderErr := r.renderSpec(proxy, cluster, packageRef)
+		files, renderErr := r.renderSpecs(proxy, cluster, packageRef, initPackageRef)
 		releaseBefore := release.DeepCopy()
 		if renderErr != nil {
 			meta.SetStatusCondition(&release.Status.Conditions, metav1.Condition{
@@ -82,7 +84,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 			continue
 		}
 
-		if err := r.ensureSpecSecret(ctx, release, spec); err != nil {
+		if err := r.ensureSpecSecret(ctx, release, files); err != nil {
 			return err
 		}
 
@@ -109,18 +111,31 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 	return nil
 }
 
-// renderSpec builds one cluster's deploy spec, substituting {{ .Cluster... }} in values and set
-// entries against the target cluster's object content.
-func (r *ZarfPackageProxyReconciler) renderSpec(proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, packageRef string) ([]byte, error) {
+// pinnedRef turns a pinned "repository:version" status ref and its digest into the
+// "repository@digest" reference a deploy spec carries. The repository comes from the status ref,
+// not the live spec: an ApplyOnce proxy whose spec moved after pinning keeps deploying what it
+// pinned. The last colon is the version separator (a registry port sits before a slash).
+func pinnedRef(ref, digest string) string {
+	repository := ref
+	if i := strings.LastIndex(ref, ":"); i >= 0 {
+		repository = ref[:i]
+	}
+	return repository + "@" + digest
+}
+
+// renderSpecs builds one cluster's deploy-spec files, substituting {{ .Cluster... }} in values
+// and set entries against the target cluster's object content: the main spec under
+// deployspec.FileName, and - when initPackageRef names a resolved init package - the auto-init
+// spec under deployspec.InitFileName (§6 step 5).
+func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, packageRef, initPackageRef string) (map[string][]byte, error) {
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
 	if err != nil {
 		return nil, err
 	}
 
-	spec := deployspec.Spec{
-		Package:    packageRef,
-		PackageAPI: string(proxy.Spec.Package.API),
-		PlainHTTP:  r.RegistryPlainHTTP,
+	spec, err := buildSpec(packageRef, proxy.Spec.Package.API, proxy.Spec.Values, proxy.Spec.Set, r.RegistryPlainHTTP, content)
+	if err != nil {
+		return nil, err
 	}
 	for _, component := range proxy.Spec.Components {
 		spec.Components = append(spec.Components, deployspec.Component{
@@ -128,29 +143,58 @@ func (r *ZarfPackageProxyReconciler) renderSpec(proxy *addonsv1alpha1.ZarfPackag
 			Flavor: component.Flavor,
 		})
 	}
-	if proxy.Spec.Values != nil {
-		rendered, err := deployspec.Render(string(proxy.Spec.Values.Raw), content)
+	raw, err := spec.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	files := map[string][]byte{deployspec.FileName: raw}
+
+	if initPackageRef != "" {
+		initOpts := proxy.Spec.Init
+		initSpec, err := buildSpec(initPackageRef, initOpts.Package.API, initOpts.Values, initOpts.Set, r.RegistryPlainHTTP, content)
 		if err != nil {
 			return nil, err
 		}
+		initRaw, err := initSpec.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		files[deployspec.InitFileName] = initRaw
+	}
+	return files, nil
+}
+
+// buildSpec assembles one deploy-spec document from a source's fields, rendering its values and
+// set entries against the target cluster's object content.
+func buildSpec(packageRef string, api addonsv1alpha1.ZarfPackageAPI, values *apiextensionsv1.JSON, set map[string]string, plainHTTP bool, content map[string]any) (deployspec.Spec, error) {
+	spec := deployspec.Spec{
+		Package:    packageRef,
+		PackageAPI: string(api),
+		PlainHTTP:  plainHTTP,
+	}
+	if values != nil {
+		rendered, err := deployspec.Render(string(values.Raw), content)
+		if err != nil {
+			return deployspec.Spec{}, err
+		}
 		spec.Values = rendered
 	}
-	if len(proxy.Spec.Set) > 0 {
+	if len(set) > 0 {
 		spec.Set = map[string]string{}
-		for key, value := range proxy.Spec.Set {
+		for key, value := range set {
 			rendered, err := deployspec.Render(value, content)
 			if err != nil {
-				return nil, err
+				return deployspec.Spec{}, err
 			}
 			spec.Set[key] = rendered
 		}
 	}
-	return spec.Marshal()
+	return spec, nil
 }
 
 // ensureSpecSecret writes the release's deploy-spec Secret, controller-owned by the release so
 // it garbage-collects with it, updating in place only when the rendering changed.
-func (r *ZarfPackageProxyReconciler) ensureSpecSecret(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, spec []byte) error {
+func (r *ZarfPackageProxyReconciler) ensureSpecSecret(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, files map[string][]byte) error {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			// shortcut: not hash-truncated, same stance as the release name itself.
@@ -162,7 +206,7 @@ func (r *ZarfPackageProxyReconciler) ensureSpecSecret(ctx context.Context, relea
 	err := r.Get(ctx, client.ObjectKeyFromObject(secret), existing)
 	switch {
 	case apierrors.IsNotFound(err):
-		secret.Data = map[string][]byte{deployspec.FileName: spec}
+		secret.Data = files
 		if err := controllerutil.SetControllerReference(release, secret, r.Scheme()); err != nil {
 			return err
 		}
@@ -170,10 +214,10 @@ func (r *ZarfPackageProxyReconciler) ensureSpecSecret(ctx context.Context, relea
 	case err != nil:
 		return err
 	}
-	if bytes.Equal(existing.Data[deployspec.FileName], spec) {
+	if maps.EqualFunc(existing.Data, files, bytes.Equal) {
 		return nil
 	}
 	before := existing.DeepCopy()
-	existing.Data = map[string][]byte{deployspec.FileName: spec}
+	existing.Data = files
 	return r.Patch(ctx, existing, client.MergeFrom(before))
 }
