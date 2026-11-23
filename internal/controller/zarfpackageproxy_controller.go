@@ -118,6 +118,9 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.resolveInitPackage(ctx, proxy); err != nil {
+		return ctrl.Result{}, err
+	}
 	if removalRetry > 0 && (requeueAfter == 0 || removalRetry < requeueAfter) {
 		requeueAfter = removalRetry
 	}
