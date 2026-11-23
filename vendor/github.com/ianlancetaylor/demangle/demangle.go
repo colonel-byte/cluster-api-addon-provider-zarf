@@ -59,6 +59,9 @@ const (
 	// the parsing of the AST, only the conversion of the AST
 	// to a string.
 	LLVMStyle
+
+	// The NoABITags option tells the demangler to ignore ABI tags.
+	NoABITags
 )
 
 // maxLengthShift is how we shift the MaxLength value.
@@ -179,8 +182,8 @@ func ToAST(name string, options ...Option) (AST, error) {
 		return a, nil
 	}
 
-	const prefix = "_GLOBAL_"
-	if strings.HasPrefix(name, prefix) {
+	const ctorDtorPrefix = "_GLOBAL_"
+	if strings.HasPrefix(name, ctorDtorPrefix) {
 		// The standard demangler ignores NoParams for global
 		// constructors.  We are compatible.
 		i := 0
@@ -191,8 +194,14 @@ func ToAST(name string, options ...Option) (AST, error) {
 				i++
 			}
 		}
-		a, err := globalCDtorName(name[len(prefix):], options...)
-		return a, adjustErr(err, len(prefix))
+		a, err := globalCDtorName(name[len(ctorDtorPrefix):], options...)
+		return a, adjustErr(err, len(ctorDtorPrefix))
+	}
+
+	const allocTokenPrefix = "__alloc_token_"
+	if strings.HasPrefix(name, allocTokenPrefix) {
+		a, err := allocToken(name[len(allocTokenPrefix):], options...)
+		return a, adjustErr(err, len(allocTokenPrefix))
 	}
 
 	return nil, ErrNotMangledName
@@ -235,6 +244,40 @@ func globalCDtorName(name string, options ...Option) (AST, error) {
 	}
 }
 
+// allocToken handles Clang allocation token names,
+// as described at https://clang.llvm.org/docs/AllocToken.html.
+// Here name is the name after the __alloc_token_ prefix.
+//
+// As far as I can tell only a few such names are ever generated,
+// so I don't know why they introduced a new mangling scheme,
+// but it seems that they did.
+func allocToken(name string, options ...Option) (AST, error) {
+	// Names look like __alloc_token_[num_]NAME
+	// We've skipped the __alloc_token_ already.
+	// The num is not included in the demangled name.
+
+	adj := 0
+	if len(name) > adj && isDigit(name[adj]) {
+		adj++
+		for len(name) > adj && isDigit(name[adj]) {
+			adj++
+		}
+		if len(name) <= adj || name[adj] != '_' {
+			return nil, ErrNotMangledName
+		}
+		adj++
+	}
+	if !strings.HasPrefix(name[adj:], "_Z") {
+		return nil, ErrNotMangledName
+	}
+	adj += 2
+	a, err := doDemangle(name[adj:], options...)
+	if err == nil {
+		a = &Clone{Base: a, Suffix: ".alloc_token"}
+	}
+	return a, adjustErr(err, adj)
+}
+
 // The doDemangle function is the entry point into the demangler proper.
 func doDemangle(name string, options ...Option) (ret AST, err error) {
 	// When the demangling routines encounter an error, they panic
@@ -253,6 +296,7 @@ func doDemangle(name string, options ...Option) (ret AST, err error) {
 	params := true
 	clones := true
 	verbose := false
+	abiTags := true
 	for _, o := range options {
 		switch {
 		case o == NoParams:
@@ -260,6 +304,8 @@ func doDemangle(name string, options ...Option) (ret AST, err error) {
 			clones = false
 		case o == NoClones:
 			clones = false
+		case o == NoABITags:
+			abiTags = false
 		case o == Verbose:
 			verbose = true
 		case o == NoTemplateParams || o == NoEnclosingParams || o == LLVMStyle || isMaxLength(o):
@@ -272,7 +318,7 @@ func doDemangle(name string, options ...Option) (ret AST, err error) {
 		}
 	}
 
-	st := &state{str: name, verbose: verbose}
+	st := &state{str: name, verbose: verbose, abiTags: abiTags}
 	a := st.encoding(params, notForLocalName)
 
 	// Accept a clone suffix.
@@ -293,6 +339,7 @@ func doDemangle(name string, options ...Option) (ret AST, err error) {
 type state struct {
 	str       string        // remainder of string to demangle
 	verbose   bool          // whether to use verbose demangling
+	abiTags   bool          // whether to include ABI tags
 	off       int           // offset of str within original string
 	subs      substitutions // substitutions
 	templates []*Template   // templates being processed
@@ -451,6 +498,8 @@ func (st *state) encoding(params bool, local forLocalNameType) AST {
 			if check.Base != nil {
 				return findTemplate(check.Base)
 			}
+		case *Constraint:
+			return findTemplate(check.Name)
 		}
 		return nil
 	}
@@ -467,10 +516,13 @@ func (st *state) encoding(params bool, local forLocalNameType) AST {
 	// demangler does.  This is not very general but perhaps it is
 	// sufficient.
 	const enableIfPrefix = "Ua9enable_ifI"
-	var enableIfArgs []AST
+	var (
+		enableIfArgs       []AST
+		enableIfConstraint AST
+	)
 	if strings.HasPrefix(st.str, enableIfPrefix) {
 		st.advance(len(enableIfPrefix) - 1)
-		enableIfArgs = st.templateArgs()
+		enableIfArgs, enableIfConstraint = st.templateArgs()
 	}
 
 	ft := st.bareFunctionType(hasReturnType(a), explicitObjectParameter)
@@ -513,14 +565,27 @@ func (st *state) encoding(params bool, local forLocalNameType) AST {
 		}
 	}
 
+	// Any top-level constraint belongs on the function type.
+	var forTemplateArgs bool
+	if c, ok := a.(*Constraint); ok && constraint == nil {
+		a = c.Name
+		constraint = c.Requires
+		forTemplateArgs = c.ForTemplateArgs
+	}
+
 	r := AST(&Typed{Name: a, Type: ft})
 
 	if len(enableIfArgs) > 0 {
 		r = &EnableIf{Type: r, Args: enableIfArgs}
+		r = st.maybeAddConstraint(r, enableIfConstraint)
 	}
 
 	if constraint != nil {
-		r = &Constraint{Name: r, Requires: constraint}
+		r = &Constraint{
+			Name:            r,
+			Requires:        constraint,
+			ForTemplateArgs: forTemplateArgs,
+		}
 	}
 
 	return r
@@ -541,6 +606,8 @@ func hasReturnType(a AST) bool {
 		return hasReturnType(a.Base)
 	case *MethodWithQualifiers:
 		return hasReturnType(a.Method)
+	case *Constraint:
+		return hasReturnType(a.Name)
 	default:
 		return false
 	}
@@ -566,7 +633,9 @@ func (st *state) taggedName(a AST) AST {
 	for len(st.str) > 0 && st.str[0] == 'B' {
 		st.advance(1)
 		tag := st.sourceName()
-		a = &TaggedName{Name: a, Tag: tag}
+		if st.abiTags {
+			a = &TaggedName{Name: a, Tag: tag}
+		}
 	}
 	return a
 }
@@ -623,6 +692,7 @@ func (st *state) name() (AST, bool) {
 			}
 			subst = true
 		}
+		var constraint AST
 		if len(st.str) > 0 && st.str[0] == 'I' {
 			// This can only happen if we saw
 			// <unscoped-template-name> and are about to see
@@ -632,7 +702,8 @@ func (st *state) name() (AST, bool) {
 			if !subst {
 				st.subs.add(a)
 			}
-			args := st.templateArgs()
+			var args []AST
+			args, constraint = st.templateArgs()
 			tmpl := &Template{Name: a, Args: args}
 			if isCast {
 				st.setTemplate(a, tmpl)
@@ -644,13 +715,16 @@ func (st *state) name() (AST, bool) {
 		if isCast {
 			st.setTemplate(a, nil)
 		}
+		a = st.maybeAddConstraint(a, constraint)
 		return a, false
 	}
 
 	a, isCast := st.unqualifiedName(module)
+	var constraint AST
 	if len(st.str) > 0 && st.str[0] == 'I' {
 		st.subs.add(a)
-		args := st.templateArgs()
+		var args []AST
+		args, constraint = st.templateArgs()
 		tmpl := &Template{Name: a, Args: args}
 		if isCast {
 			st.setTemplate(a, tmpl)
@@ -662,6 +736,7 @@ func (st *state) name() (AST, bool) {
 	if isCast {
 		st.setTemplate(a, nil)
 	}
+	a = st.maybeAddConstraint(a, constraint)
 	return a, false
 }
 
@@ -749,8 +824,21 @@ func (st *state) prefix() AST {
 			next = un
 			module = nil
 			if isUnCast {
-				if tn, ok := un.(*TaggedName); ok {
+				if cast != nil {
+					st.fail("cast in scope of cast")
+				}
+				if m, ok := un.(*ModuleEntity); ok {
+					un = m.Name
+				}
+				for {
+					tn, ok := un.(*TaggedName)
+					if !ok {
+						break
+					}
 					un = tn.Name
+				}
+				if f, ok := un.(*Friend); ok {
+					un = f.Name
 				}
 				cast = un.(*Cast)
 			}
@@ -768,6 +856,12 @@ func (st *state) prefix() AST {
 				}
 				if last == nil {
 					st.fail("constructor before name is seen")
+				}
+				switch st.str[0] {
+				// 0 is not used.
+				case '1', '2', '3', '4', '5':
+				default:
+					st.fail("unknown constructor type")
 				}
 				st.advance(1)
 				var base AST
@@ -791,6 +885,12 @@ func (st *state) prefix() AST {
 					if last == nil {
 						st.fail("destructor before name is seen")
 					}
+					switch st.str[1] {
+					// 3 is not used.
+					case '0', '1', '2', '4', '5':
+					default:
+						st.fail("unknown destructor type")
+					}
 					st.advance(2)
 					next = &Destructor{Name: getLast(last)}
 					if len(st.str) > 0 && st.str[0] == 'B' {
@@ -807,8 +907,7 @@ func (st *state) prefix() AST {
 				if a == nil {
 					st.fail("unexpected template arguments")
 				}
-				var args []AST
-				args = st.templateArgs()
+				args, constraint := st.templateArgs()
 				tmpl := &Template{Name: a, Args: args}
 				if cast != nil {
 					st.setTemplate(cast, tmpl)
@@ -816,7 +915,7 @@ func (st *state) prefix() AST {
 					cast = nil
 				}
 				a = nil
-				next = tmpl
+				next = st.maybeAddConstraint(tmpl, constraint)
 			case 'T':
 				next = st.templateParam()
 			case 'E':
@@ -896,11 +995,11 @@ func (st *state) prefix() AST {
 //
 //	 <local-source-name>	::= L <source-name> <discriminator>
 func (st *state) unqualifiedName(module AST) (r AST, isCast bool) {
+	module = st.moduleName(module)
+
 	if len(st.str) < 1 {
 		st.fail("expected unqualified name")
 	}
-
-	module = st.moduleName(module)
 
 	friend := false
 	if len(st.str) > 0 && st.str[0] == 'F' {
@@ -956,6 +1055,8 @@ func (st *state) unqualifiedName(module AST) (r AST, isCast bool) {
 				st.advance(2)
 				st.compactNumber()
 				a = &Name{Name: "'block-literal'"}
+			case 'e':
+				a = st.unnamedEnum()
 			case 'l':
 				a = st.closureTypeName()
 			case 't':
@@ -1132,7 +1233,8 @@ var operators = map[string]operator{
 	"cl": {"()", 2, precPostfix},
 	// cp is not in the ABI but is used by clang "when the call
 	// would use ADL except for being parenthesized."
-	"cp": {"()", 2, precPostfix},
+	// The trailing space indicates this to the printer.
+	"cp": {"() ", 2, precPostfix},
 	"cm": {",", 2, precComma},
 	"co": {"~", 1, precUnary},
 	"dV": {"/=", 2, precAssign},
@@ -1619,8 +1721,7 @@ func (st *state) demangleType(isCast bool) AST {
 			// See the function comment to explain this.
 			if !isCast {
 				st.subs.add(ret)
-				args := st.templateArgs()
-				ret = &Template{Name: ret, Args: args}
+				ret = st.template(ret)
 			} else {
 				ret = st.demangleCastTemplateArgs(ret, true)
 			}
@@ -1635,7 +1736,11 @@ func (st *state) demangleType(isCast bool) AST {
 		if isDigit(c2) || c2 == '_' || isUpper(c2) {
 			ret = st.substitution(false)
 			if _, ok := ret.(*ModuleName); ok {
-				ret, _ = st.unqualifiedName(ret)
+				var isCast bool
+				ret, isCast = st.unqualifiedName(ret)
+				if isCast {
+					st.setTemplate(ret, nil)
+				}
 				st.subs.add(ret)
 			}
 			if len(st.str) == 0 || st.str[0] != 'I' {
@@ -1643,8 +1748,7 @@ func (st *state) demangleType(isCast bool) AST {
 			} else {
 				// See the function comment to explain this.
 				if _, ok := ret.(*TemplateParam); !ok || !isCast {
-					args := st.templateArgs()
-					ret = &Template{Name: ret, Args: args}
+					ret = st.template(ret)
 				} else {
 					next := st.demangleCastTemplateArgs(ret, false)
 					if next == ret {
@@ -1682,6 +1786,9 @@ func (st *state) demangleType(isCast bool) AST {
 			st.fail("expected source name or unnamed type")
 		}
 		switch st.str[1] {
+		case 'e':
+			ret = st.unnamedEnum()
+			addSubst = false
 		case 'l':
 			ret = st.closureTypeName()
 			addSubst = false
@@ -1692,8 +1799,7 @@ func (st *state) demangleType(isCast bool) AST {
 			st.advance(1)
 			n := st.sourceName()
 			if len(st.str) > 0 && st.str[0] == 'I' {
-				args := st.templateArgs()
-				n = &Template{Name: n, Args: args}
+				n = st.template(n)
 			}
 			t := st.demangleType(isCast)
 			ret = &VendorQualifier{Qualifier: n, Type: t}
@@ -1706,6 +1812,26 @@ func (st *state) demangleType(isCast bool) AST {
 		addSubst = false
 		c2 := st.str[0]
 		st.advance(1)
+
+		fixedPrefix := func(c byte) (string, bool) {
+			switch c {
+			case 's':
+				return "short ", true
+			case 't':
+				return "unsigned short ", true
+			case 'i':
+				return "", true
+			case 'j':
+				return "unsigned ", true
+			case 'l':
+				return "long ", true
+			case 'm':
+				return "unsigned long ", true
+			default:
+				return "", false
+			}
+		}
+
 		switch c2 {
 		case 'T', 't':
 			// decltype(expression)
@@ -1757,7 +1883,19 @@ func (st *state) demangleType(isCast bool) AST {
 					st.fail("expected non-zero number of bits")
 				}
 				st.advance(1)
-				ret = &BinaryFP{Bits: bits}
+				ret = &BinaryFP{Bits: bits, Suffix: ""}
+			} else if len(st.str) > 0 && st.str[0] == 'x' {
+				if bits == 0 {
+					st.fail("expected non-zero number of bits")
+				}
+				st.advance(1)
+				ret = &BinaryFP{Bits: bits, Suffix: "x"}
+			} else if len(st.str) > 0 && st.str[0] == 'b' {
+				if bits != 16 {
+					st.fail("expected bits to be 16 for std::bfloat16_t")
+				}
+				st.advance(1)
+				ret = &BuiltinType{Name: "std::bfloat16_t"}
 			} else {
 				base := st.demangleType(isCast)
 				if len(st.str) > 0 && isDigit(st.str[0]) {
@@ -1792,6 +1930,7 @@ func (st *state) demangleType(isCast bool) AST {
 			}
 			st.advance(1)
 			ret = &BitIntType{Size: size, Signed: signed}
+			addSubst = true
 
 		case 'k':
 			constraint, _ := st.name()
@@ -1806,6 +1945,52 @@ func (st *state) demangleType(isCast bool) AST {
 				Base:   constraint,
 				Suffix: "decltype(auto)",
 			}
+
+		case 'A', 'R':
+			if len(st.str) == 0 {
+				st.fail("missing D{A,R} code in type")
+			}
+			prefix, ok := fixedPrefix(st.str[0])
+			if !ok {
+				st.fail("unrecognized D{A,R} code in type")
+			}
+			st.advance(1)
+
+			switch c2 {
+			case 'A':
+				ret = &BuiltinType{Name: prefix + "_Accum"}
+			case 'R':
+				ret = &BuiltinType{Name: prefix + "_Fract"}
+			default:
+				panic("internal error")
+			}
+
+		case 'S':
+			if len(st.str) < 3 {
+				st.fail("missing DS code in type")
+			}
+			if st.str[0] != 'D' {
+				st.fail("unrecognized DS code in type")
+			}
+
+			var suffix string
+			switch st.str[1] {
+			case 'A':
+				suffix = "_Accum"
+			case 'R':
+				suffix = "_Fract"
+			default:
+				st.fail("unrecognized DSD code in type")
+			}
+
+			prefix, ok := fixedPrefix(st.str[2])
+			if !ok {
+				st.fail("unrecognized DSD{A,R} code in type")
+			}
+
+			st.advance(3)
+
+			ret = &BuiltinType{Name: "_Sat " + prefix + suffix}
 
 		default:
 			st.fail("unrecognized D code in type")
@@ -1884,7 +2069,10 @@ func (st *state) demangleType(isCast bool) AST {
 func (st *state) demangleCastTemplateArgs(tp AST, addSubst bool) AST {
 	save := st.copy()
 
-	var args []AST
+	var (
+		args       []AST
+		constraint AST
+	)
 	failed := false
 	func() {
 		defer func() {
@@ -1897,14 +2085,15 @@ func (st *state) demangleCastTemplateArgs(tp AST, addSubst bool) AST {
 			}
 		}()
 
-		args = st.templateArgs()
+		args, constraint = st.templateArgs()
 	}()
 
 	if !failed && len(st.str) > 0 && st.str[0] == 'I' {
 		if addSubst {
 			st.subs.add(tp)
 		}
-		return &Template{Name: tp, Args: args}
+		ret := &Template{Name: tp, Args: args}
+		return st.maybeAddConstraint(ret, constraint)
 	}
 	// Reset back to before we started reading the template arguments.
 	// They will be read again by st.prefix.
@@ -2311,6 +2500,18 @@ func (st *state) setTemplate(a AST, tmpl *Template) {
 		case *Closure:
 			// There are no template params in closure types.
 			// https://gcc.gnu.org/PR78252.
+			if tmpl == nil {
+				a.Traverse(func(a AST) bool {
+					if tmplParam, ok := a.(*TemplateParam); ok && tmplParam.Template == nil {
+						st.fail("cast template parameter not in scope of template")
+					}
+					if seen[a] {
+						return false
+					}
+					seen[a] = true
+					return true
+				})
+			}
 			return false
 		default:
 			if seen[a] {
@@ -2335,28 +2536,31 @@ func (st *state) clearTemplateArgs(args []AST) {
 // templateArgs parses:
 //
 //	<template-args> ::= I <template-arg>+ E
-func (st *state) templateArgs() []AST {
+//
+// This returns the template arguments and an optional constraint.
+func (st *state) templateArgs() ([]AST, AST) {
 	if len(st.str) == 0 || (st.str[0] != 'I' && st.str[0] != 'J') {
 		panic("internal error")
 	}
 	st.advance(1)
 
-	var ret []AST
+	var (
+		ret        []AST
+		constraint AST
+	)
 	for len(st.str) == 0 || st.str[0] != 'E' {
 		arg := st.templateArg(ret)
 		ret = append(ret, arg)
 
 		if len(st.str) > 0 && st.str[0] == 'Q' {
-			// A list of template arguments can have a
-			// constraint, but we don't demangle it.
-			st.constraintExpr()
+			constraint = st.constraintExpr()
 			if len(st.str) == 0 || st.str[0] != 'E' {
 				st.fail("expected end of template arguments after constraint")
 			}
 		}
 	}
 	st.advance(1)
-	return ret
+	return ret, constraint
 }
 
 // templateArg parses:
@@ -2385,8 +2589,9 @@ func (st *state) templateArg(prev []AST) AST {
 		return st.exprPrimary()
 
 	case 'I', 'J':
-		args := st.templateArgs()
-		return &ArgumentPack{Args: args}
+		args, constraint := st.templateArgs()
+		ret := &ArgumentPack{Args: args}
+		return st.maybeAddConstraint(ret, constraint)
 
 	case 'T':
 		var arg byte
@@ -2418,6 +2623,27 @@ func (st *state) templateArg(prev []AST) AST {
 	default:
 		return st.demangleType(false)
 	}
+}
+
+// maybeAddConstraint adds a constraint to an AST, if constraint is not nil.
+// This is only called with a constraint found at the end of
+// template arguments.
+func (st *state) maybeAddConstraint(a, constraint AST) AST {
+	if constraint == nil {
+		return a
+	}
+	return &Constraint{
+		Name:            a,
+		Requires:        constraint,
+		ForTemplateArgs: true,
+	}
+}
+
+// template parses template arguments into a Template with a given name.
+func (st *state) template(name AST) AST {
+	args, constraint := st.templateArgs()
+	ret := &Template{Name: name, Args: args}
+	return st.maybeAddConstraint(ret, constraint)
 }
 
 // exprList parses a sequence of expressions up to a terminating character.
@@ -2583,10 +2809,12 @@ func (st *state) expression() AST {
 			// Skip operator function ID.
 			st.advance(2)
 		}
-		n, _ := st.unqualifiedName(nil)
+		n, isCast := st.unqualifiedName(nil)
+		if isCast {
+			st.setTemplate(n, nil)
+		}
 		if len(st.str) > 0 && st.str[0] == 'I' {
-			args := st.templateArgs()
-			n = &Template{Name: n, Args: args}
+			n = st.template(n)
 		}
 		return n
 	} else if (st.str[0] == 'i' || st.str[0] == 't') && len(st.str) > 1 && st.str[1] == 'l' {
@@ -2686,7 +2914,11 @@ func (st *state) expression() AST {
 				right = st.expression()
 				return &Fold{Left: code[1] == 'l', Op: left, Arg1: right, Arg2: nil}
 			} else if code == "di" {
-				left, _ = st.unqualifiedName(nil)
+				var isCast bool
+				left, isCast = st.unqualifiedName(nil)
+				if isCast {
+					st.setTemplate(left, nil)
+				}
 			} else {
 				left = st.expression()
 			}
@@ -2698,8 +2930,7 @@ func (st *state) expression() AST {
 				} else {
 					right = st.unresolvedName()
 					if len(st.str) > 0 && st.str[0] == 'I' {
-						args := st.templateArgs()
-						right = &Template{Name: right, Args: args}
+						right = st.template(right)
 					}
 				}
 			} else {
@@ -2815,8 +3046,7 @@ func (st *state) unresolvedName() AST {
 			n := st.baseUnresolvedName()
 			n = &Qualified{Scope: t, Name: n, LocalName: false}
 			if len(st.str) > 0 && st.str[0] == 'I' {
-				args := st.templateArgs()
-				n = &Template{Name: n, Args: args}
+				n = st.template(n)
 				st.subs.add(n)
 			}
 			return n
@@ -2844,8 +3074,7 @@ func (st *state) unresolvedName() AST {
 				n := st.sourceName()
 				if len(st.str) > 0 && st.str[0] == 'I' {
 					st.subs.add(n)
-					args := st.templateArgs()
-					n = &Template{Name: n, Args: args}
+					n = st.template(n)
 				}
 				if s == nil {
 					s = n
@@ -2895,8 +3124,7 @@ func (st *state) baseUnresolvedName() AST {
 		n, _ = st.operatorName(true)
 	}
 	if len(st.str) > 0 && st.str[0] == 'I' {
-		args := st.templateArgs()
-		n = &Template{Name: n, Args: args}
+		n = st.template(n)
 	}
 	return n
 }
@@ -2921,6 +3149,9 @@ func (st *state) requiresExpr() AST {
 		for len(st.str) > 0 && st.str[0] != '_' {
 			typ := st.demangleType(false)
 			params = append(params, typ)
+		}
+		if len(st.str) == 0 {
+			st.fail("expected requirement parameter")
 		}
 		st.advance(1)
 	}
@@ -3277,6 +3508,21 @@ func (st *state) unnamedTypeName() AST {
 	return ret
 }
 
+// unnamedEnum parses an unnamed enum type.
+// https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2115r0.html
+func (st *state) unnamedEnum() AST {
+	st.checkChar('U')
+	st.checkChar('e')
+	typ := st.demangleType(false)
+	name := st.sourceName()
+	ret := &UnnamedEnum{
+		Underlying: typ,
+		Name:       name,
+	}
+	st.subs.add(ret)
+	return ret
+}
+
 // constraintExpr parses a constraint expression. This is just a
 // regular expression, but template parameters are handled specially.
 func (st *state) constraintExpr() AST {
@@ -3443,6 +3689,16 @@ func (st *state) substitution(forPrefix bool) AST {
 				// as a template parameter, so we may have
 				// to change back when substituting.
 				index = a.Index
+			case *PackExpansion:
+				// Find the possibly-new argument pack.
+				pack := st.findArgumentPack(a.Base)
+				if pack != a.Pack {
+					return &PackExpansion{
+						Base: a.Base,
+						Pack: pack,
+					}
+				}
+				return nil
 			default:
 				return nil
 			}
