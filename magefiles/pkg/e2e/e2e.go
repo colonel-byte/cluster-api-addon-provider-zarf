@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/magefile/mage/sh"
+
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/magefiles/pkg/release"
 )
 
 const (
@@ -69,6 +71,11 @@ const (
 	kindNodeImage = "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
 	registryImage = "ghcr.io/distribution/distribution:3@sha256:d106962e6fe3fa69c178cec77eeeee5edb626b8df6535b7bd6b95e658a0a5ca9"
 	spikeImage    = "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
+
+	// controllerImage is the locally built controller image e2e:run kind-loads - never pushed
+	// anywhere, so the tag needs no pin owner. Not :latest, so the kubelet's IfNotPresent
+	// default finds the loaded image instead of pulling.
+	controllerImage = "caapz-e2e/controller:dev"
 )
 
 // mgmtKubeconfig is where Up writes the management cluster's kubeconfig; e2e:run hands it to the
@@ -152,9 +159,10 @@ func bestEffort(cmd string, args ...string) {
 	}
 }
 
-// Run executes the spike-assertion suite in the separate test/e2e module against the running
-// topology. It does not depend on Up so a developer can iterate on tests against a long-lived
-// topology; it refuses with a pointer at e2e:up when the topology is absent.
+// Run builds and installs the controller into the running topology, then executes the suite in
+// the separate test/e2e module against it. It does not depend on Up so a developer can iterate
+// on code and tests against a long-lived topology - every run reinstalls the freshly built
+// controller; it refuses with a pointer at e2e:up when the topology is absent.
 func Run() error {
 	kubeconfig, err := filepath.Abs(mgmtKubeconfig())
 	if err != nil {
@@ -163,8 +171,98 @@ func Run() error {
 	if _, err := os.Stat(kubeconfig); err != nil {
 		return fmt.Errorf("no management kubeconfig at %s - run e2e:up first", kubeconfig)
 	}
+	steps := []struct {
+		name string
+		run  func() error
+	}{
+		{"controller image", buildControllerImage},
+		{"controller image into kind", loadControllerImage},
+		{"controller manifests", installController},
+	}
+	for _, step := range steps {
+		fmt.Println("==>", step.name)
+		if err := step.run(); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
+	}
 	return sh.RunWithV(map[string]string{"E2E_KUBECONFIG": kubeconfig},
 		"go", "-C", "test/e2e", "test", "-count=1", "-timeout=15m", "./...")
+}
+
+// buildControllerImage compiles the manager for linux on the host architecture and builds the
+// controller image with the release Dockerfile, from a context shaped like goreleaser's
+// (${TARGETPLATFORM}/<binary>) so the e2e image and the released image stay the same recipe.
+func buildControllerImage() error {
+	platform := "linux/" + runtime.GOARCH
+	contextDir := filepath.Join(workDir, "image")
+	binDir := filepath.Join(contextDir, "linux", runtime.GOARCH)
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return err
+	}
+	if err := sh.RunWithV(map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": runtime.GOARCH},
+		"go", "build", "-o", filepath.Join(binDir, "cluster-api-addon-provider-zarf"),
+		"./cmd/cluster-api-addon-provider-zarf"); err != nil {
+		return err
+	}
+	return sh.RunV("docker", "build",
+		"-f", filepath.Join("containers", "manager", "Dockerfile"),
+		"--build-arg", "TARGETPLATFORM="+platform,
+		"-t", controllerImage, contextDir)
+}
+
+func loadControllerImage() error {
+	return sh.RunV("kind", "load", "docker-image", controllerImage, "--name", mgmtCluster)
+}
+
+// controllerKustomization renders the e2e overlay over config/default: the locally built image,
+// and --registry-plain-http because the test registry speaks HTTP. The overlay lives in the
+// workdir so the working tree is never mutated the way release:manifests' kustomize-edit is.
+// The image match is the release reference, not manager.yaml's "controller" placeholder:
+// config/manager's own images transformer has already rewritten the placeholder by the time an
+// overlay transformer sees the output.
+func controllerKustomization() string {
+	return fmt.Sprintf(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../config/default
+images:
+  - name: %s
+    newName: caapz-e2e/controller
+    newTag: dev
+patches:`, release.ControllerImage) + `
+  - target:
+      kind: Deployment
+      name: controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --registry-plain-http
+`
+}
+
+// installController applies the rendered controller manifests and waits for the rollout.
+func installController() error {
+	overlayDir := filepath.Join(workDir, "controller")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(overlayDir, "kustomization.yaml"),
+		[]byte(controllerKustomization()), 0o644); err != nil { //nolint:gosec // manifest
+		return err
+	}
+	manifestPath := filepath.Join(workDir, "controller.yaml")
+	if err := sh.RunV("go", "tool", "kustomize", "build", overlayDir, "-o", manifestPath); err != nil {
+		return err
+	}
+	if err := kubectl("apply", "-f", manifestPath); err != nil {
+		return err
+	}
+	// A reinstall with an unchanged manifest changes nothing, so the rollout wait would pass on
+	// the old pod still running the old image; restart to force the fresh build in.
+	if err := kubectl("-n", "caapz-system", "rollout", "restart", "deployment/caapz-controller-manager"); err != nil {
+		return err
+	}
+	return kubectl("-n", "caapz-system", "rollout", "status", "deployment/caapz-controller-manager", "--timeout=3m")
 }
 
 func ensureClusterctl() error {
