@@ -191,6 +191,26 @@
       groupName: "commitlint",
       groupSlug: "commitlint",
     },
+    // Indirect majors are not upgrade decisions, and Renovate's are mostly not real. It
+    // resolves a major by probing `module/vN`; where that path does not exist it falls back
+    // to the repository's git tags, which produces `golang.org/x/time v0.16.0 -> v3.0.1`,
+    // `google.golang.org/protobuf v1.36.12 -> v5.9.11`, and four outright downgrades. A
+    // 2026-11-23 dry run against v44.258.1 typed 42 updates `major`; 41 were indirect.
+    //
+    // Nothing in this module imports an indirect requirement, so its major is not ours to
+    // pick - it arrives when a direct dependency asks for it. Disabling them also retires a
+    // second failure: Renovate computes
+    // `mustSkipGoModTidy = !postUpdateOptions.includes("gomodUpdateImportPaths") && updateType === "major"`,
+    // and that flag gates every tidy variant, so a major branch runs `go get` and `go mod
+    // vendor` but never `go mod tidy` - which check-go-mod.yaml then fails on the tidy diff.
+    // With `gomodUpdateImportPaths` deliberately absent (#66), every major PR failed that
+    // check by construction. A direct major still reaches us, and still needs tidy by hand.
+    {
+      matchManagers: ["gomod"],
+      matchDepTypes: ["indirect"],
+      matchUpdateTypes: ["major"],
+      enabled: false,
+    },
     // The `go` directive and the toolchain line are a decision about the language version,
     // not a dependency update, so they are not Renovate's to move.
     {
