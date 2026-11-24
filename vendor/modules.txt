@@ -12,7 +12,7 @@ atomicgo.dev/schedule
 # buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2
 ## explicit; go 1.23
 buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate
-# cel.dev/expr v0.25.3
+# cel.dev/expr v0.26.0
 ## explicit; go 1.23.0
 cel.dev/expr
 # cloud.google.com/go v0.123.0
