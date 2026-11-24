@@ -2021,8 +2021,8 @@ github.com/mgutz/ansi
 # github.com/mholt/archives v0.1.5
 ## explicit; go 1.24.0
 github.com/mholt/archives
-# github.com/miekg/dns v1.1.62
-## explicit; go 1.19
+# github.com/miekg/dns v1.1.73
+## explicit; go 1.25.0
 # github.com/miekg/pkcs11 v1.1.2
 ## explicit; go 1.12
 github.com/miekg/pkcs11
