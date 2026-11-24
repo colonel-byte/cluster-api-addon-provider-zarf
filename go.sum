@@ -277,8 +277,8 @@ github.com/anchore/go-macholibre v0.1.1 h1:sTBHi3S1WVIOCamc6NyT8Sn9mBmD30DCTfjfV
 github.com/anchore/go-macholibre v0.1.1/go.mod h1:YNq2610RlvGCK0Za+Klz/OCMtUaEnwwAGA/VfUAQaro=
 github.com/anchore/go-rpmdb v0.2.2 h1:44VC7mvFAxV9t5JUZYg3S9sqG+E94iZvyWACMDq9hSk=
 github.com/anchore/go-rpmdb v0.2.2/go.mod h1:Y64EbetdqhryMjtk8IzXkdCQw/aNDx+feZCT9aj6rjs=
-github.com/anchore/go-struct-converter v0.2.0-rc2 h1:q+859fW2/jbHJHB2etbNfRlFwYpknyvbqqk1hUdamQ4=
-github.com/anchore/go-struct-converter v0.2.0-rc2/go.mod h1:cDBA5vhcR62nXWo8QH9/Kk2807o65ISaHPNPX66L+Uw=
+github.com/anchore/go-struct-converter v0.2.1 h1:wdz5Oqi+bXXxvY667+NOwnncIOI1rp6QRORa5ERmFNk=
+github.com/anchore/go-struct-converter v0.2.1/go.mod h1:cDBA5vhcR62nXWo8QH9/Kk2807o65ISaHPNPX66L+Uw=
 github.com/anchore/go-sync v0.1.2 h1:RDD5RCanrWqhbtBulqPSZpERadUlgcYjpybYzYd3Uk8=
 github.com/anchore/go-sync v0.1.2/go.mod h1:grjZH059bCHM6f6jh+Y7VYvX/q8YcjkDJqG6nplHGkE=
 github.com/anchore/go-version v1.2.2-0.20210903204242-51efa5b487c4 h1:rmZG77uXgE+o2gozGEBoUMpX27lsku+xrMwlmBZJtbg=
