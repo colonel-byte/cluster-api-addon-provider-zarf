@@ -94,6 +94,8 @@ type iConfig interface {
 	GetUserAgent() *string
 	SetSuffix(v string) *Config
 	GetSuffix() *string
+	SetEndpointSuffix(v string) *Config
+	GetEndpointSuffix() *string
 	SetSocks5Proxy(v string) *Config
 	GetSocks5Proxy() *string
 	SetSocks5NetWork(v string) *Config
@@ -102,6 +104,8 @@ type iConfig interface {
 	GetEndpointType() *string
 	SetOpenPlatformEndpoint(v string) *Config
 	GetOpenPlatformEndpoint() *string
+	SetOssPrivateUrl(v string) *Config
+	GetOssPrivateUrl() *string
 	SetType(v string) *Config
 	GetType() *string
 	SetSignatureVersion(v string) *Config
@@ -122,6 +126,8 @@ type iConfig interface {
 	GetRetryOptions() *dara.RetryOptions
 	GetTlsMinVersion() *string
 	SetTlsMinVersion(v string) *Config
+	SetIpv4Only(v bool) *Config
+	GetIpv4Only() *bool
 }
 
 // Description:
@@ -227,6 +233,12 @@ type Config struct {
 	//
 	// aliyun
 	Suffix *string `json:"suffix,omitempty" xml:"suffix,omitempty"`
+	// domain suffix used by generated POP endpoints
+	//
+	// example:
+	//
+	// aliyuncs.com
+	EndpointSuffix *string `json:"endpointSuffix,omitempty" xml:"endpointSuffix,omitempty"`
 	// socks5 proxy
 	Socks5Proxy *string `json:"socks5Proxy,omitempty" xml:"socks5Proxy,omitempty"`
 	// socks5 network
@@ -247,6 +259,8 @@ type Config struct {
 	//
 	// openplatform.aliyuncs.com
 	OpenPlatformEndpoint *string `json:"openPlatformEndpoint,omitempty" xml:"openPlatformEndpoint,omitempty"`
+	// OSS PrivateLink 上传地址（含协议），Runtime 非空配置优先。
+	OssPrivateUrl *string `json:"ossPrivateUrl,omitempty" xml:"ossPrivateUrl,omitempty"`
 	// Deprecated
 	//
 	// credential type
@@ -302,6 +316,12 @@ type Config struct {
 	// http client
 	HttpClient    dara.HttpClient `json:"httpClient,omitempty" xml:"httpClient,omitempty"`
 	TlsMinVersion *string         `json:"tlsMinVersion,omitempty" xml:"tlsMinVersion,omitempty"`
+	// only use IPv4 to connect to the endpoint, AAAA records are ignored
+	//
+	// example:
+	//
+	// false
+	Ipv4Only *bool `json:"ipv4Only,omitempty" xml:"ipv4Only,omitempty"`
 }
 
 func (s Config) String() string {
@@ -388,6 +408,10 @@ func (s *Config) GetSuffix() *string {
 	return s.Suffix
 }
 
+func (s *Config) GetEndpointSuffix() *string {
+	return s.EndpointSuffix
+}
+
 func (s *Config) GetSocks5Proxy() *string {
 	return s.Socks5Proxy
 }
@@ -402,6 +426,10 @@ func (s *Config) GetEndpointType() *string {
 
 func (s *Config) GetOpenPlatformEndpoint() *string {
 	return s.OpenPlatformEndpoint
+}
+
+func (s *Config) GetOssPrivateUrl() *string {
+	return s.OssPrivateUrl
 }
 
 func (s *Config) GetType() *string {
@@ -442,6 +470,10 @@ func (s *Config) GetRetryOptions() *dara.RetryOptions {
 
 func (s *Config) GetHttpClient() dara.HttpClient {
 	return s.HttpClient
+}
+
+func (s *Config) GetIpv4Only() *bool {
+	return s.Ipv4Only
 }
 
 func (s *Config) SetAccessKeyId(v string) *Config {
@@ -539,6 +571,11 @@ func (s *Config) SetSuffix(v string) *Config {
 	return s
 }
 
+func (s *Config) SetEndpointSuffix(v string) *Config {
+	s.EndpointSuffix = &v
+	return s
+}
+
 func (s *Config) SetSocks5Proxy(v string) *Config {
 	s.Socks5Proxy = &v
 	return s
@@ -556,6 +593,11 @@ func (s *Config) SetEndpointType(v string) *Config {
 
 func (s *Config) SetOpenPlatformEndpoint(v string) *Config {
 	s.OpenPlatformEndpoint = &v
+	return s
+}
+
+func (s *Config) SetOssPrivateUrl(v string) *Config {
+	s.OssPrivateUrl = &v
 	return s
 }
 
@@ -606,6 +648,11 @@ func (s *Config) SetRetryOptions(v *dara.RetryOptions) *Config {
 
 func (s *Config) SetHttpClient(v dara.HttpClient) *Config {
 	s.HttpClient = v
+	return s
+}
+
+func (s *Config) SetIpv4Only(v bool) *Config {
+	s.Ipv4Only = &v
 	return s
 }
 

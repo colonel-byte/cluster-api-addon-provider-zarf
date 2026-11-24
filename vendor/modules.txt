@@ -451,7 +451,7 @@ github.com/alibabacloud-go/cr-20160607/v2/client
 # github.com/alibabacloud-go/cr-20181201/v3 v3.2.3
 ## explicit; go 1.14
 github.com/alibabacloud-go/cr-20181201/v3/client
-# github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.4
+# github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.6
 ## explicit; go 1.14
 github.com/alibabacloud-go/darabonba-openapi/v2/client
 github.com/alibabacloud-go/darabonba-openapi/v2/models
