@@ -5,6 +5,7 @@
 package bundle
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -479,7 +480,7 @@ func activateBundles(opts *ActivateOpts) error {
 			for _, item := range b.Raw {
 				path := filepath.ToSlash(item.Path)
 
-				if filepath.Base(path) == dataFile || filepath.Base(path) == yamlDataFile {
+				if filepath.Base(path) == dataFile || IsYAMLDataFile(path) {
 					var val map[string]json.RawMessage
 					err = util.Unmarshal(item.Value, &val)
 					if err == nil {
@@ -757,7 +758,11 @@ func readModuleInfoFromStore(ctx context.Context, store storage.Store, txn stora
 						if err != nil {
 							return nil, errors.New("corrupt rego version")
 						}
-						versions[k] = moduleInfo{RegoVersion: ast.RegoVersionFromInt(int(i))}
+						rv, err := ast.RegoVersionFromIntStrict(int(i))
+						if err != nil {
+							return nil, fmt.Errorf("corrupt rego version: %w", err)
+						}
+						versions[k] = moduleInfo{RegoVersion: rv}
 					}
 				}
 			}
@@ -779,12 +784,14 @@ func erasePolicies(ctx context.Context, store storage.Store, txn storage.Transac
 		return nil, nil, fmt.Errorf("failed to read module info from store: %w", err)
 	}
 
-	getRegoVersion := func(modId string) (ast.RegoVersion, bool) {
-		info, ok := modulesInfo[strings.TrimPrefix(modId, "/")]
-		if !ok {
-			return ast.RegoUndefined, false
+	parserOptsFor := func(modID string) ast.ParserOptions {
+		info, ok := modulesInfo[strings.TrimPrefix(modID, "/")]
+		if !ok || info.RegoVersion == parserOpts.RegoVersion {
+			return parserOpts
 		}
-		return info.RegoVersion, true
+		opts := parserOpts
+		opts.RegoVersion = info.RegoVersion
+		return opts
 	}
 
 	remaining := map[string]*ast.Module{}
@@ -796,38 +803,69 @@ func erasePolicies(ctx context.Context, store storage.Store, txn storage.Transac
 			return nil, nil, err
 		}
 
-		parserOptsCpy := parserOpts
-		if regoVersion, ok := getRegoVersion(id); ok {
-			parserOptsCpy.RegoVersion = regoVersion
-		}
-
-		module, err := ast.ParseModuleWithOpts(id, string(bs), parserOptsCpy)
+		// Modules that are about to be deleted only need their package.
+		erase, err := underRoots(packageOnly(bs), roots)
 		if err != nil {
 			return nil, nil, err
 		}
-		path, err := storage.NewPathForRef(module.Package.Path)
-		if err != nil {
-			return nil, nil, err
-		}
-		deleted := false
-		for root := range roots {
-			if rootPathsContainSegments([]string{root}, path) {
-				if err := store.DeletePolicy(ctx, txn, id); err != nil {
-					return nil, nil, err
-				}
-				deleted = true
-				break
+		var module *ast.Module
+		if !erase {
+			if module, err = ast.ParseModuleWithOpts(id, util.ByteSliceToString(bs), parserOptsFor(id)); err != nil {
+				return nil, nil, err
+			}
+			if erase, err = underRoots(module.Package, roots); err != nil {
+				return nil, nil, err
 			}
 		}
 
-		if deleted {
+		if erase {
+			if err := store.DeletePolicy(ctx, txn, id); err != nil {
+				return nil, nil, err
+			}
 			removed = append(removed, id)
-		} else {
-			remaining[id] = module
+			continue
 		}
+		remaining[id] = module
 	}
 
 	return remaining, removed, nil
+}
+
+// underRoots reports whether pkg is under one of roots, and false for pkg=nil.
+func underRoots(pkg *ast.Package, roots map[string]struct{}) (bool, error) {
+	if pkg == nil {
+		return false, nil
+	}
+	path, err := storage.NewPathForRef(pkg.Path)
+	if err != nil {
+		return false, err
+	}
+	for root := range roots {
+		if rootPathsContainSegments([]string{root}, path) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// packageOnly parses the package statement of a module if it is the first
+// non-comment line, and returns nil if it is not or cannot be parsed alone.
+func packageOnly(bs []byte) *ast.Package {
+	for line := range bytes.Lines(bs) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("package ")) {
+			return nil
+		}
+		pkg, err := ast.ParsePackage(util.ByteSliceToString(line))
+		if err != nil {
+			return nil
+		}
+		return pkg
+	}
+	return nil
 }
 
 func writeManifestToStore(opts *ActivateOpts, name string, manifest Manifest) error {
@@ -850,7 +888,7 @@ func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn
 ) error {
 	var regoVersion ast.RegoVersion
 	if mf.Parsed != nil {
-		regoVersion = mf.Parsed.RegoVersion()
+		regoVersion = mf.Parsed.RegoVersionSpan().Min()
 	}
 
 	if regoVersion == ast.RegoUndefined {
@@ -861,7 +899,9 @@ func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn
 		}
 	}
 
-	if regoVersion != ast.RegoUndefined && regoVersion != runtimeRegoVersion {
+	// A module without a recorded rego-version is read back at the runtime's, so only record one
+	// whose integer form differs. An undefined runtime records every version.
+	if regoVersion != ast.RegoUndefined && (runtimeRegoVersion == ast.RegoUndefined || regoVersion.Int() != runtimeRegoVersion.Int()) {
 		if err := write(ctx, store, txn, moduleRegoVersionPath(storagePath), regoVersion.Int()); err != nil {
 			return fmt.Errorf("failed to write rego version for module '%s': %w", storagePath, err)
 		}
@@ -990,60 +1030,6 @@ func compileModules(compiler *ast.Compiler, m metrics.Metrics, bundles map[strin
 	}
 
 	return iCompiler.VerifyAuthorizationPolicySchema(compiler, authorizationDecisionRef)
-}
-
-func writeModules(ctx context.Context, store storage.Store, txn storage.Transaction, compiler *ast.Compiler, m metrics.Metrics, bundles map[string]*Bundle, extraModules map[string]*ast.Module, legacy bool, externalSources *util.HasherMap[ast.Ref, ast.ExternalRuleSource]) error {
-	m.Timer(metrics.RegoModuleCompile).Start()
-	defer m.Timer(metrics.RegoModuleCompile).Stop()
-
-	// Apply external sources before compilation
-	if externalSources != nil {
-		externalSources.Iter(func(ref ast.Ref, source ast.ExternalRuleSource) bool {
-			compiler = compiler.WithExternalSource(ref, source)
-			return false
-		})
-	}
-
-	modules := map[string]*ast.Module{}
-
-	// preserve any modules already on the compiler
-	maps.Copy(modules, compiler.Modules)
-
-	// preserve any modules passed in from the store
-	maps.Copy(modules, extraModules)
-
-	// include all the new bundle modules
-	for bundleName, b := range bundles {
-		if legacy {
-			for _, mf := range b.Modules {
-				modules[mf.Path] = mf.Parsed
-			}
-		} else {
-			maps.Copy(modules, b.ParsedModules(bundleName))
-		}
-	}
-
-	if compiler.Compile(modules); compiler.Failed() {
-		return compiler.Errors
-	}
-	for bundleName, b := range bundles {
-		for _, mf := range b.Modules {
-			var path string
-
-			// For backwards compatibility, in legacy mode, upsert policies to
-			// the unprefixed path.
-			if legacy {
-				path = mf.Path
-			} else {
-				path = modulePathWithPrefix(bundleName, mf.Path)
-			}
-
-			if err := store.UpsertPolicy(ctx, txn, path, mf.Raw); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func lookup(path storage.Path, data map[string]any) (any, bool) {

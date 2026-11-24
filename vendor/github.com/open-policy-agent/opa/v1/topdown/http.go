@@ -571,8 +571,8 @@ func createHTTPRequest(bctx BuiltinContext, obj ast.Object) (*http.Request, *htt
 
 	if tlsClientCertEnvVar != "" && tlsClientKeyEnvVar != "" {
 		cert, err := tls.X509KeyPair(
-			[]byte(os.Getenv(tlsClientCertEnvVar)),
-			[]byte(os.Getenv(tlsClientKeyEnvVar)))
+			util.StringToByteSlice(os.Getenv(tlsClientCertEnvVar)),
+			util.StringToByteSlice(os.Getenv(tlsClientKeyEnvVar)))
 		if err != nil {
 			return nil, nil, fmt.Errorf("cannot extract public/private key pair from envvars %q, %q: %w",
 				tlsClientCertEnvVar, tlsClientKeyEnvVar, err)
@@ -1333,13 +1333,13 @@ func newHTTPRequestExecutor(bctx BuiltinContext, req ast.Object, key ast.Object)
 	}
 
 	if useInterQueryCache && bctx.InterQueryBuiltinCache != nil {
-		return newInterQueryCache(bctx, req, key, forceCacheParams)
+		return newInterQueryCache(bctx, req, key, forceCacheParams), nil
 	}
-	return newIntraQueryCache(bctx, req, key)
+	return newIntraQueryCache(bctx, req, key), nil
 }
 
-func newInterQueryCache(bctx BuiltinContext, req ast.Object, key ast.Object, forceCacheParams forceCacheParams) (*interQueryCache, error) {
-	return &interQueryCache{bctx: bctx, req: req, key: key, forceCacheParams: forceCacheParams}, nil
+func newInterQueryCache(bctx BuiltinContext, req ast.Object, key ast.Object, forceCacheParams forceCacheParams) *interQueryCache {
+	return &interQueryCache{bctx: bctx, req: req, key: key, forceCacheParams: forceCacheParams}
 }
 
 // CheckCache checks the cache for the value of the key set on this object
@@ -1401,8 +1401,8 @@ func (c *interQueryCache) ExecuteHTTPRequest() (*http.Response, error) {
 	return executeHTTPRequest(c.httpReq, c.httpClient, c.req)
 }
 
-func newIntraQueryCache(bctx BuiltinContext, req ast.Object, key ast.Object) (*intraQueryCache, error) {
-	return &intraQueryCache{bctx: bctx, req: req, key: key}, nil
+func newIntraQueryCache(bctx BuiltinContext, req ast.Object, key ast.Object) *intraQueryCache {
+	return &intraQueryCache{bctx: bctx, req: req, key: key}
 }
 
 // CheckCache checks the cache for the value of the key set on this object

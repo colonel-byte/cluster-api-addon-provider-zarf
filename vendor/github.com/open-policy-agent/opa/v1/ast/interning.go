@@ -18,6 +18,9 @@ type interned struct {
 }
 
 type internedRefs struct {
+	AnyPrefixMatch    Ref
+	AnySuffixMatch    Ref
+	EndsWith          Ref
 	Equal             Ref
 	Equality          Ref
 	GlobMatch         Ref
@@ -29,6 +32,7 @@ type internedRefs struct {
 	Print             Ref
 	RegoMetadataChain Ref
 	RegoMetadataRule  Ref
+	StartsWith        Ref
 }
 
 // NOTE! Great care must be taken **not** to modify the terms returned
@@ -39,6 +43,9 @@ type internedRefs struct {
 var (
 	Interned = &interned{
 		Refs: &internedRefs{
+			AnyPrefixMatch:    AnyPrefixMatch.Ref(),
+			AnySuffixMatch:    AnySuffixMatch.Ref(),
+			EndsWith:          EndsWith.Ref(),
 			Equal:             Equal.Ref(),
 			Equality:          Equality.Ref(),
 			GlobMatch:         GlobMatch.Ref(),
@@ -50,6 +57,7 @@ var (
 			Print:             Print.Ref(),
 			RegoMetadataChain: RegoMetadataChain.Ref(),
 			RegoMetadataRule:  RegoMetadataRule.Ref(),
+			StartsWith:        StartsWith.Ref(),
 		},
 	}
 
@@ -383,10 +391,18 @@ func internedIntNumberValue(i int) Value {
 // cached between -1 to 512, and for values outside of that range, this function
 // is equivalent to IntNumberTerm.
 func internedIntNumberTerm(i int) *Term {
-	if i >= 0 && i < len(intNumberTerms) {
+	if uint(i) < uint(len(intNumberTerms)) {
 		return intNumberTerms[i]
 	}
 
+	return uninternedIntNumberTerm(i)
+}
+
+// Kept out of line so internedIntNumberTerm stays within the inlining budget;
+// inlined back, it would push the cost of its callers over it again.
+//
+//go:noinline
+func uninternedIntNumberTerm(i int) *Term {
 	if i == -1 {
 		return minusOneTerm
 	}
