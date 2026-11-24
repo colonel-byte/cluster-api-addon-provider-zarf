@@ -26,9 +26,11 @@ import (
 	"os"
 	"runtime"
 	"sync"
+
+	"github.com/zeebo/xxh3"
 )
 
-// NewWriter returns a new Writer that compresses as an MinLZ stream to w.
+// NewWriter returns a new Writer that compresses a MinLZ stream to w.
 //
 // Users must call Close to guarantee all data has been forwarded to
 // the underlying io.Writer and that resources are released.
@@ -46,10 +48,39 @@ func NewWriter(w io.Writer, opts ...WriterOption) *Writer {
 			return &w2
 		}
 	}
+	if w2.searchCfg != nil {
+		w2.searchCfg.baseTableSize = autoTableSize(w2.blockSize)
+		if w2.searchCfg.baseTableSize < searchTableMinLog2 {
+			w2.errState = fmt.Errorf("minlz: block size %d too small for search tables (min table size %d bits)",
+				w2.blockSize, 1<<searchTableMinLog2)
+			return &w2
+		}
+		w2.searchCfg.resolveDefaults()
+	}
+	if w2.sidecar != nil {
+		if w2.searchCfg == nil {
+			w2.errState = errors.New("minlz: WriterSidecar requires WriterSearchTable")
+			return &w2
+		}
+		w2.sidecarMaxBlock = 1 << bits.Len(uint(w2.blockSize-1))
+	}
 	w2.obufLen = obufHeaderLen + MaxEncodedLen(w2.blockSize)
+	if w2.searchCfg != nil {
+		// 0x46 is only emitted when strictly smaller than the equivalent
+		// 0x45, so a single reservation of cfg.maxChunkSize() covers both
+		// chunk forms — no headroom needed.
+		w2.searchMaxChunk = w2.searchCfg.maxChunkSize()
+		w2.obufLen += w2.searchMaxChunk
+	}
 	w2.paramsOK = true
-	w2.ibuf = make([]byte, 0, w2.blockSize)
-	w2.buffers.New = func() interface{} {
+	// With search tables, hold one block plus its overlap so the search table
+	// for a streaming block can be built once the next block's bytes arrive.
+	ibufCap := w2.blockSize
+	if w2.searchCfg != nil {
+		ibufCap += w2.searchCfg.overlapBytes()
+	}
+	w2.ibuf = make([]byte, 0, ibufCap)
+	w2.buffers.New = func() any {
 		return make([]byte, w2.obufLen)
 	}
 	w2.Reset(w)
@@ -79,23 +110,62 @@ type Writer struct {
 	index     *Index
 	customEnc func(dst, src []byte) int
 
+	searchCfg      *SearchTableConfig
+	searchInfoBuf  []byte // cached 0x44 chunk
+	searchHdrBuf   []byte // scratch 0x45 header (sync path)
+	searchMaxChunk int    // max 0x45 chunk size, 0 if no search
+
+	// sidecar holds the optional sidecar destination. When non-nil, the
+	// 0x44/0x45/0x46 chunks and a 0x47 remote-block-reference per data
+	// block are written to sidecar; the main writer receives only the
+	// stream header, data chunks, EOF, and (optionally) the seek index.
+	sidecar io.Writer
+	// sidecarHeaderWritten tracks whether the sidecar stream header and
+	// 0x44 info chunk have been emitted.
+	sidecarHeaderWritten bool
+	// sidecarMaxBlock is the max block size declared in the stream header
+	// (blockSize rounded up to a power of two); used to compute the
+	// (max - actual) field encoded in 0x47 chunks.
+	sidecarMaxBlock int
+
 	// wroteStreamHeader is whether we have written the stream header.
 	wroteStreamHeader bool
 	paramsOK          bool
 	flushOnWrite      bool
 	appendIndex       bool
 	genIndex          bool
-	level             uint8
+	level             int
 }
 
 type result struct {
 	b []byte
+	// pooled is the underlying w.buffers buffer that b is sliced from
+	// (b's cap may be reduced by front-padding for search chunks). The
+	// writer goroutine returns this to w.buffers after writing b. Nil for
+	// results whose b is not pool-owned (stream headers, search-info
+	// chunk, flush sentinels).
+	pooled []byte
 	// Uncompressed start offset
 	startOffset int64
+	// indexAt is the offset of the data chunk in b, after its search table.
+	indexAt int
+
+	// Sidecar fields (only populated when Writer.sidecar != nil).
+	// sidecarPre holds the 0x45/0x46 search-table chunk to write to the
+	// sidecar immediately before the corresponding 0x47 reference. It may
+	// be nil if no search table was produced for this block.
+	sidecarPre []byte
+	// uncompSize is the block's uncompressed size, used to encode the
+	// 0x47 chunk's (maxUncompressed - actualUncompressed) field. A value
+	// of 0 signals "no sidecar emission for this result" — for example
+	// when the result represents the stream header or a flush sentinel.
+	uncompSize int
 }
 
-var errClosed = errors.New("minlz: Writer is closed")
-var errNilWriter = errors.New("minlz: Writer has not been set")
+var (
+	errClosed    = errors.New("minlz: Writer is closed")
+	errNilWriter = errors.New("minlz: Writer has not been set")
+)
 
 // err returns the previously set error.
 // If no error has been set it is set to err if not nil.
@@ -128,9 +198,11 @@ func (w *Writer) Reset(writer io.Writer) {
 	w.errState = nil
 	w.ibuf = w.ibuf[:0]
 	w.wroteStreamHeader = false
+	w.searchInfoBuf = nil
 	w.written = 0
 	w.writer = writer
 	w.uncompWritten = 0
+	w.sidecarHeaderWritten = false
 	w.index.reset(w.blockSize)
 
 	// If we didn't get a writer, stop here.
@@ -145,17 +217,19 @@ func (w *Writer) Reset(writer io.Writer) {
 
 	toWrite := make(chan chan result, w.concurrency)
 	w.output = toWrite
-	w.writerWg.Add(1)
 
 	// Start a writer goroutine that will write all output in order.
-	go func() {
-		defer w.writerWg.Done()
+	w.writerWg.Go(func() {
 
 		// Get a queued write.
 		for write := range toWrite {
 			// Wait for the data to be available.
 			input := <-write
 			in := input.b
+			// Record the main offset where this block's data will land, BEFORE
+			// the main Write advances w.written. The sidecar's 0x47 chunk
+			// uses this offset.
+			mainBlockOffset := w.written
 			if len(in) > 0 {
 				if w.err(nil) == nil {
 					// Don't expose data from previous buffers.
@@ -166,18 +240,38 @@ func (w *Writer) Reset(writer io.Writer) {
 						err = io.ErrShortBuffer
 					}
 					_ = w.err(err)
-					w.err(w.index.add(w.written, input.startOffset))
+					w.err(w.index.add(w.written+int64(input.indexAt), input.startOffset))
 					w.written += int64(n)
 				}
 			}
-			if cap(in) >= w.obufLen {
+			// Sidecar emission for data blocks. uncompSize > 0 indicates the
+			// result represents a data block (not the stream header or a
+			// flush sentinel).
+			if w.sidecar != nil && input.uncompSize > 0 && w.err(nil) == nil {
+				if err := w.writeSidecarStartIfNeeded(); err == nil {
+					if len(input.sidecarPre) > 0 {
+						n, err := w.sidecar.Write(input.sidecarPre)
+						if err != nil {
+							_ = w.err(err)
+						} else if n != len(input.sidecarPre) {
+							_ = w.err(io.ErrShortWrite)
+						}
+					}
+					if w.err(nil) == nil {
+						_ = w.writeSidecarRemoteRef(mainBlockOffset, input.uncompSize)
+					}
+				}
+			}
+			if input.pooled != nil {
+				w.buffers.Put(input.pooled)
+			} else if cap(in) >= w.obufLen {
 				w.buffers.Put(in)
 			}
 			// close the incoming write request.
 			// This can be used for synchronizing flushes.
 			close(write)
 		}
-	}()
+	})
 }
 
 // Write satisfies the io.Writer interface.
@@ -186,20 +280,22 @@ func (w *Writer) Write(p []byte) (nRet int, errRet error) {
 		return 0, err
 	}
 	if w.flushOnWrite {
-		return w.write(p)
+		return w.write(p, nil, true, true)
 	}
 	// If we exceed the input buffer size, start writing
 	for len(p) > (cap(w.ibuf)-len(w.ibuf)) && w.err(nil) == nil {
 		var n int
 		if len(w.ibuf) == 0 {
-			// Large write, empty buffer.
-			// Write directly from p to avoid copy.
-			n, _ = w.write(p)
+			// Large write, empty buffer. Write directly from p to avoid a copy.
+			// write() retains a trailing block + overlap (deferred emission); the
+			// retained tail stays in p and is buffered into w.ibuf below.
+			n, _ = w.write(p, nil, false, false)
 		} else {
 			n = copy(w.ibuf[len(w.ibuf):cap(w.ibuf)], p)
 			w.ibuf = w.ibuf[:len(w.ibuf)+n]
-			w.write(w.ibuf)
-			w.ibuf = w.ibuf[:0]
+			consumed, _ := w.write(w.ibuf, nil, false, false)
+			// Slide the retained tail (held block + overlap) to the front.
+			w.ibuf = w.ibuf[:copy(w.ibuf, w.ibuf[consumed:])]
 		}
 		nRet += n
 		p = p[n:]
@@ -219,26 +315,38 @@ func (w *Writer) Write(p []byte) (nRet int, errRet error) {
 // ReadFrom reads data from r until EOF or error.
 // The return value n is the number of bytes read.
 // Any error except io.EOF encountered during the read is also returned.
+//
+// With search tables the last block is held back until the next write, Flush
+// or Close, as with Write.
 func (w *Writer) ReadFrom(r io.Reader) (n int64, err error) {
 	if err := w.err(nil); err != nil {
 		return 0, err
 	}
-	if len(w.ibuf) > 0 {
+	if bb, ok := r.(*bytes.Buffer); ok {
+		buf := bb.Bytes()
+		if err := w.EncodeBuffer(buf); err != nil {
+			return 0, err
+		}
+		// EncodeBuffer borrows buf until its blocks are written, and ReadFrom must consume r.
+		// A last block held back for search tables is a copy.
+		err := w.wait()
+		bb.Next(len(buf))
+		return int64(len(buf)), err
+	}
+	if len(w.ibuf) > 0 && w.searchCfg == nil {
 		err := w.AsyncFlush()
 		if err != nil {
 			return 0, err
 		}
 	}
-	if br, ok := r.(byter); ok {
-		buf := br.Bytes()
-		if err := w.EncodeBuffer(buf); err != nil {
-			return 0, err
-		}
-		return int64(len(buf)), w.AsyncFlush()
-	}
+	smc := w.searchMaxChunk
+	// With search tables a block is emitted once the next one is read, so its
+	// table can index the windows crossing into it. The tail is held in w.ibuf,
+	// as Write does.
+	var cur []byte
 	for {
-		inbuf := w.buffers.Get().([]byte)[:w.blockSize+obufHeaderLen]
-		n2, err := io.ReadFull(r, inbuf[obufHeaderLen:])
+		inbuf := w.buffers.Get().([]byte)[:smc+w.blockSize+obufHeaderLen]
+		n2, err := io.ReadFull(r, inbuf[smc+obufHeaderLen:])
 		if err != nil {
 			if err == io.ErrUnexpectedEOF {
 				err = io.EOF
@@ -251,14 +359,39 @@ func (w *Writer) ReadFrom(r io.Reader) (n int64, err error) {
 			break
 		}
 		n += int64(n2)
-		err2 := w.writeFull(inbuf[:n2+obufHeaderLen])
-		if w.err(err2) != nil {
-			break
+		inbuf = inbuf[:smc+n2+obufHeaderLen]
+		if w.searchCfg == nil {
+			if w.err(w.writeFull(inbuf, nil)) != nil {
+				break
+			}
+		} else {
+			next := inbuf[smc+obufHeaderLen:]
+			if len(w.ibuf) > 0 {
+				if w.asyncFlush(next, true) != nil {
+					break
+				}
+			}
+			if cur != nil {
+				if len(next) < w.searchCfg.overlapBytes() {
+					w.ibuf = append(w.ibuf, cur[smc+obufHeaderLen:]...)
+					w.buffers.Put(cur)
+				} else if w.err(w.writeFull(cur, next)) != nil {
+					break
+				}
+			}
+			cur = inbuf
 		}
 
 		if err != nil {
 			// We got EOF and wrote everything
 			break
+		}
+	}
+	if cur != nil && w.err(nil) == nil {
+		w.ibuf = append(w.ibuf, cur[smc+obufHeaderLen:]...)
+		w.buffers.Put(cur)
+		if w.flushOnWrite {
+			return n, w.AsyncFlush()
 		}
 	}
 
@@ -298,7 +431,7 @@ func (w *Writer) AddUserChunk(id uint8, data []byte) (err error) {
 		}
 		if !w.wroteStreamHeader {
 			w.wroteStreamHeader = true
-			if err := write(makeHeader(w.blockSize)); err != nil {
+			if err := write(w.header()); err != nil {
 				return err
 			}
 		}
@@ -318,7 +451,7 @@ func (w *Writer) AddUserChunk(id uint8, data []byte) (err error) {
 		w.wroteStreamHeader = true
 		hWriter := make(chan result)
 		w.output <- hWriter
-		hWriter <- result{startOffset: w.uncompWritten, b: makeHeader(w.blockSize)}
+		hWriter <- result{startOffset: w.uncompWritten, b: w.header()}
 	}
 
 	// Copy input.
@@ -344,24 +477,41 @@ func (w *Writer) AddUserChunk(id uint8, data []byte) (err error) {
 // Note that input is not buffered.
 // This means that each write will result in discrete blocks being created.
 // For buffered writes, use the regular Write function.
+//
+// With search tables the last block is copied and held back until the next
+// write, Flush or Close, so its table can index the windows crossing into the
+// following data.
 func (w *Writer) EncodeBuffer(buf []byte) (err error) {
 	if err := w.err(nil); err != nil {
 		return err
 	}
 
 	if w.flushOnWrite {
-		_, err := w.write(buf)
+		_, err := w.write(buf, nil, true, true)
 		return err
 	}
 	// Flush queued data first.
 	if len(w.ibuf) > 0 {
-		err := w.AsyncFlush()
-		if err != nil {
+		if err := w.asyncFlush(buf, true); err != nil {
 			return err
 		}
 	}
+	var held []byte
+	if w.searchCfg != nil && len(buf) > 0 {
+		keep := (len(buf)-1)%w.blockSize + 1
+		if keep < w.searchCfg.overlapBytes() {
+			// Too short to be the overlap of the block before it; hold both.
+			keep = min(len(buf), keep+w.blockSize)
+		}
+		buf, held = buf[:len(buf)-keep], buf[len(buf)-keep:]
+		defer func() {
+			if err == nil {
+				w.ibuf = append(w.ibuf, held...)
+			}
+		}()
+	}
 	if w.concurrency == 1 {
-		_, err := w.writeSync(buf)
+		_, err := w.writeSync(buf, held, true, false)
 		return err
 	}
 
@@ -370,7 +520,15 @@ func (w *Writer) EncodeBuffer(buf []byte) (err error) {
 		w.wroteStreamHeader = true
 		hWriter := make(chan result)
 		w.output <- hWriter
-		hWriter <- result{startOffset: w.uncompWritten, b: makeHeader(w.blockSize)}
+		hWriter <- result{startOffset: w.uncompWritten, b: w.header()}
+		// In sidecar mode, the 0x44 info chunk goes on the sidecar
+		// (emitted lazily on first block); skip the inline emit.
+		if w.sidecar == nil && w.searchCfg != nil && w.searchInfoBuf == nil {
+			w.searchInfoBuf = w.searchCfg.marshalSearchInfoChunk()
+			infoOut := make(chan result)
+			w.output <- infoOut
+			infoOut <- result{startOffset: w.uncompWritten, b: w.searchInfoBuf}
+		}
 	}
 
 	for len(buf) > 0 {
@@ -380,74 +538,110 @@ func (w *Writer) EncodeBuffer(buf []byte) (err error) {
 			uncompressed = uncompressed[:w.blockSize]
 		}
 		buf = buf[len(uncompressed):]
-		// Get an output buffer.
-		obuf := w.buffers.Get().([]byte)[:len(uncompressed)+obufHeaderLen]
+
+		// Overlap for search table boundary patterns.
+		var overlap []byte
+		if w.searchCfg != nil {
+			overlap = w.overlapOf(buf, held)
+		}
+
+		// Get output buffer. Front is reserved for search chunk, data starts at searchMaxChunk.
+		smc := w.searchMaxChunk
+		// The encoders need MaxEncodedLen of the block, more than its raw chunk.
+		obuf := w.buffers.Get().([]byte)[:w.obufLen]
 		output := make(chan result)
-		// Queue output now, so we keep order.
 		w.output <- output
 		res := result{
 			startOffset: w.uncompWritten,
 		}
 		w.uncompWritten += int64(len(uncompressed))
-		go func() {
-			checksum := crc(uncompressed)
-
-			// Set to uncompressed.
-			chunkType := uint8(chunkTypeUncompressedData)
-			chunkLen := 4 + len(uncompressed)
-
-			// Attempt compressing.
-			n := binary.PutUvarint(obuf[obufHeaderLen:], uint64(len(uncompressed)))
-			n2 := w.encodeBlock(obuf[obufHeaderLen+n:], uncompressed)
-
-			// Check if we should use this, or store as uncompressed instead.
+		go func(searchCfg *SearchTableConfig, overlap []byte) {
+			dbuf := obuf[smc:]
+			n2 := w.encodeBlock(dbuf, uncompressed)
 			if n2 > 0 {
-				chunkType = uint8(chunkTypeMinLZCompressedData)
-				chunkLen = 4 + n + n2
-				obuf = obuf[:obufHeaderLen+n+n2]
+				dbuf = dbuf[:n2]
 			} else {
-				// copy uncompressed
-				copy(obuf[obufHeaderLen:], uncompressed)
+				dbuf = dbuf[:obufHeaderLen+len(uncompressed)]
+				putUncompressed(dbuf, uncompressed)
 			}
 
-			// Fill in the per-chunk header that comes before the body.
-			obuf[0] = chunkType
-			obuf[1] = uint8(chunkLen >> 0)
-			obuf[2] = uint8(chunkLen >> 8)
-			obuf[3] = uint8(chunkLen >> 16)
-			obuf[4] = uint8(checksum >> 0)
-			obuf[5] = uint8(checksum >> 8)
-			obuf[6] = uint8(checksum >> 16)
-			obuf[7] = uint8(checksum >> 24)
+			// Index compressible blocks; also incompressible blocks when a prefix
+			// is set (prefix tables stay sparse; no-prefix ones would be dropped).
+			searchLen := 0
+			if searchCfg != nil && (n2 > 0 || searchCfg.hasPrefix()) {
+				var stBuf []byte
+				if v := searchTablePool.Get(); v != nil {
+					stBuf = v.([]byte)
+				}
+				table, reductions := searchCfg.buildSearchTable(uncompressed, overlap, stBuf, searchCfg.shouldPack(w.concurrency))
+				if table != nil {
+					searchLen = len(w.appendSearchTableEitherChunk(obuf[:0], reductions, table))
+				}
+				searchTablePool.Put(table)
+			}
 
-			// Queue final output.
-			res.b = obuf
+			if w.sidecar != nil {
+				// Sidecar mode: data chunk stays in main; the search chunk
+				// (if any) plus a 0x47 ref go to the sidecar. We copy the
+				// search chunk out of obuf so obuf can be safely recycled.
+				if searchLen > 0 {
+					res.sidecarPre = append([]byte(nil), obuf[:searchLen]...)
+				}
+				res.uncompSize = len(uncompressed)
+				res.b = dbuf
+			} else if searchLen > 0 {
+				start := smc - searchLen
+				copy(obuf[start:], obuf[:searchLen])
+				res.b = obuf[start : smc+len(dbuf)]
+				res.indexAt = searchLen
+			} else {
+				res.b = dbuf
+			}
+			res.pooled = obuf
 			output <- res
-		}()
+		}(w.searchCfg, overlap)
 	}
 	return nil
 }
 
-func (w *Writer) encodeBlock(obuf, uncompressed []byte) int {
+// encodeBlock writes uncompressed as a compressed chunk to dst and returns the chunk size.
+// It returns 0 if uncompressed doesn't compress.
+func (w *Writer) encodeBlock(dst, uncompressed []byte) int {
+	h := binary.PutUvarint(dst[obufHeaderLen:], uint64(len(uncompressed)))
+	obuf := dst[obufHeaderLen+h:]
+	n := -1
 	if w.customEnc != nil {
-		if ret := w.customEnc(obuf, uncompressed); ret >= 0 {
-			return ret
-		}
+		n = w.customEnc(obuf, uncompressed)
 	}
-	var n int
-
-	switch w.level {
-	case LevelFastest:
-		n = encodeBlock(obuf, uncompressed)
-	case LevelBalanced:
-		n = encodeBlockBetter(obuf, uncompressed)
-	case LevelSmallest:
-		n = encodeBlockBest(obuf, uncompressed, nil)
+	if n < 0 {
+		switch w.level {
+		case LevelUncompressed:
+			return 0
+		case LevelSuperFast:
+			n = encodeBlockFast(obuf, uncompressed)
+		case LevelFastest:
+			n = encodeBlock(obuf, uncompressed)
+		case LevelBalanced:
+			n = encodeBlockBetter(obuf, uncompressed)
+		case LevelSmallest:
+			n = encodeBlockBest(obuf, uncompressed)
+		default:
+			// No SIMD block is this small, and dst may have no room for the hash.
+			if len(uncompressed) <= simdMinSaving {
+				return 0
+			}
+			n = encodeBlockSIMD(dst[chunkHeaderSize+simdHashSize:], uncompressed, w.level)
+			if n == 0 {
+				return 0
+			}
+			binary.LittleEndian.PutUint64(dst[chunkHeaderSize:], xxh3.Hash(uncompressed))
+			return putChunkHeader(dst, chunkTypeMinLZSIMD, simdHashSize+n)
+		}
 	}
 
 	if debugValidateBlocks && n > 0 {
 		fmt.Println("debugValidateBlocks:", len(uncompressed), "->", n)
-		//debug.PrintStack()
+		// debug.PrintStack()
 		src := uncompressed
 		block := obuf[:n]
 		dst := make([]byte, len(src))
@@ -457,29 +651,78 @@ func (w *Writer) encodeBlock(obuf, uncompressed []byte) int {
 			x := crc32.ChecksumIEEE(src)
 			name := fmt.Sprintf("errs/block-%08x-%d", x, ret)
 			fmt.Println(name, "mismatch at pos", n)
-			os.WriteFile(name+"input.bin", src, 0644)
-			os.WriteFile(name+"decoded.bin", dst, 0644)
-			os.WriteFile(name+"compressed.bin", block, 0644)
+			os.WriteFile(name+"input.bin", src, 0o644)
+			os.WriteFile(name+"decoded.bin", dst, 0o644)
+			os.WriteFile(name+"compressed.bin", block, 0o644)
 		}
 	}
-	return n
+	// A block that doesn't shrink must be stored (SPEC 4.4). Checking the size, not only
+	// whether it fit dst, also keeps the output independent of the size of dst.
+	if n == 0 || h+n >= len(uncompressed) {
+		return 0
+	}
+	binary.LittleEndian.PutUint32(dst[chunkHeaderSize:], crc(uncompressed))
+	return putChunkHeader(dst, chunkTypeMinLZCompressedData, checksumSize+h+n)
 }
 
-func (w *Writer) write(p []byte) (nRet int, errRet error) {
+// putChunkHeader writes the header of a chunk with n bytes of content to dst, and returns the chunk size.
+func putChunkHeader(dst []byte, chunkType uint8, n int) int {
+	dst[0] = chunkType
+	dst[1] = uint8(n >> 0)
+	dst[2] = uint8(n >> 8)
+	dst[3] = uint8(n >> 16)
+	return chunkHeaderSize + n
+}
+
+// putUncompressed writes an uncompressed chunk with src to dst. It copies src in pieces and checksums each
+// while it is in cache, which makes the checksum nearly free. The copy goes first: it fetches from memory
+// faster than the checksum, which is 27% slower first on a 4 MiB block that isn't in cache, and 2.5% faster in L3.
+func putUncompressed(dst, src []byte) {
+	const piece = 32 << 10
+	var c uint32
+	for i := 0; i < len(src); i += piece {
+		p := src[i:min(i+piece, len(src))]
+		copy(dst[obufHeaderLen+i:], p)
+		c = crc32.Update(c, crcTable, p)
+	}
+	binary.LittleEndian.PutUint32(dst[chunkHeaderSize:], crcMask(c))
+	putChunkHeader(dst, chunkTypeUncompressedData, checksumSize+len(src))
+}
+
+// putUncompressedHeader writes the chunk header and checksum of an uncompressed chunk with src to dst.
+func putUncompressedHeader(dst, src []byte) {
+	binary.LittleEndian.PutUint32(dst[chunkHeaderSize:], crc(src))
+	putChunkHeader(dst, chunkTypeUncompressedData, checksumSize+len(src))
+}
+
+// write emits p as blocks. next is the data following p, used for the overlap
+// of the last block when p is exhausted.
+func (w *Writer) write(p, next []byte, final, omitTrailing bool) (nRet int, errRet error) {
 	if err := w.err(nil); err != nil {
 		return 0, err
 	}
 	if w.concurrency == 1 {
-		return w.writeSync(p)
+		return w.writeSync(p, next, final, omitTrailing)
 	}
 
 	// Spawn goroutine and write block to output channel.
 	for len(p) > 0 {
+		if !final && w.searchCfg != nil && len(p) < w.blockSize+w.searchCfg.overlapBytes() {
+			break // retain a block + its overlap for the next call (deferred emission)
+		}
 		if !w.wroteStreamHeader {
 			w.wroteStreamHeader = true
 			hWriter := make(chan result)
 			w.output <- hWriter
-			hWriter <- result{startOffset: w.uncompWritten, b: makeHeader(w.blockSize)}
+			hWriter <- result{startOffset: w.uncompWritten, b: w.header()}
+			// In sidecar mode, the 0x44 info chunk goes on the sidecar
+			// (emitted lazily on first block); skip the inline emit.
+			if w.sidecar == nil && w.searchCfg != nil && w.searchInfoBuf == nil {
+				w.searchInfoBuf = w.searchCfg.marshalSearchInfoChunk()
+				infoOut := make(chan result)
+				w.output <- infoOut
+				infoOut <- result{startOffset: w.uncompWritten, b: w.searchInfoBuf}
+			}
 		}
 
 		var uncompressed []byte
@@ -489,75 +732,115 @@ func (w *Writer) write(p []byte) (nRet int, errRet error) {
 			uncompressed, p = p, nil
 		}
 
-		// Copy input.
-		// If the block is incompressible, this is used for the result.
-		inbuf := w.buffers.Get().([]byte)[:len(uncompressed)+obufHeaderLen]
+		// Overlap for search table from contiguous p (before copying to inbuf).
+		var overlap []byte
+		if w.searchCfg != nil {
+			overlap = bytes.Clone(w.overlapOf(p, next))
+		}
+
+		// Copy the caller's input into a pool buffer (p must not be retained).
+		// Reserve smc bytes in front: if the block turns out incompressible its
+		// buffer becomes the output, and this headroom lets the search chunk be
+		// prepended in place — matching compressed blocks — instead of copying
+		// the whole block.
+		smc := w.searchMaxChunk
+		inbuf := w.buffers.Get().([]byte)[:smc+len(uncompressed)+obufHeaderLen]
 		obuf := w.buffers.Get().([]byte)[:w.obufLen]
-		copy(inbuf[obufHeaderLen:], uncompressed)
-		uncompressed = inbuf[obufHeaderLen:]
+		copy(inbuf[smc+obufHeaderLen:], uncompressed)
+		uncompressed = inbuf[smc+obufHeaderLen:]
+
+		// A flushed/final block without full overlap omits its table (pass a nil
+		// config to the goroutine): a boundary-incomplete table could hide a
+		// straddling match, so emit none and let the searcher always scan it.
+		gcfg := w.searchCfg
+		if omitTrailing && w.searchCfg != nil && len(overlap) < w.searchCfg.overlapBytes() {
+			gcfg = nil
+		}
 
 		output := make(chan result)
-		// Queue output now, so we keep order.
 		w.output <- output
 		res := result{
 			startOffset: w.uncompWritten,
 		}
 		w.uncompWritten += int64(len(uncompressed))
 
-		go func() {
-			checksum := crc(uncompressed)
-
-			// Set to uncompressed.
-			chunkType := uint8(chunkTypeUncompressedData)
-			chunkLen := 4 + len(uncompressed)
-
-			// Attempt compressing.
-			n := binary.PutUvarint(obuf[obufHeaderLen:], uint64(len(uncompressed)))
-			n2 := w.encodeBlock(obuf[obufHeaderLen+n:], uncompressed)
-
-			// Check if we should use this, or store as uncompressed instead.
+		go func(searchCfg *SearchTableConfig, overlap []byte) {
+			dbuf := obuf[smc:]
+			n2 := w.encodeBlock(dbuf, uncompressed)
 			if n2 > 0 {
-				chunkType = uint8(chunkTypeMinLZCompressedData)
-				chunkLen = 4 + n + n2
-				obuf = obuf[:obufHeaderLen+n+n2]
+				dbuf = dbuf[:n2]
 			} else {
-				// Use input as output.
+				// Incompressible: the raw data's buffer (inbuf, with smc headroom
+				// in front) becomes the output; the scratch obuf is freed.
 				obuf, inbuf = inbuf, obuf
+				dbuf = obuf[smc:]
+				putUncompressedHeader(dbuf, uncompressed)
 			}
 
-			// Fill in the per-chunk header that comes before the body.
-			obuf[0] = chunkType
-			obuf[1] = uint8(chunkLen >> 0)
-			obuf[2] = uint8(chunkLen >> 8)
-			obuf[3] = uint8(chunkLen >> 16)
-			obuf[4] = uint8(checksum >> 0)
-			obuf[5] = uint8(checksum >> 8)
-			obuf[6] = uint8(checksum >> 16)
-			obuf[7] = uint8(checksum >> 24)
+			// Index compressible blocks; also incompressible blocks when a prefix
+			// is set (prefix tables stay sparse; no-prefix ones would be dropped).
+			searchLen := 0
+			if searchCfg != nil && (n2 > 0 || searchCfg.hasPrefix()) {
+				var stBuf []byte
+				if v := searchTablePool.Get(); v != nil {
+					stBuf = v.([]byte)
+				}
+				table, reductions := searchCfg.buildSearchTable(uncompressed, overlap, stBuf, searchCfg.shouldPack(w.concurrency))
+				if table != nil {
+					// Data is at obuf[smc:]; the chunk prepends into the free front.
+					searchLen = len(w.appendSearchTableEitherChunk(obuf[:0], reductions, table))
+				}
+				searchTablePool.Put(table)
+			}
 
-			// Queue final output.
-			res.b = obuf
+			if w.sidecar != nil {
+				// Sidecar mode: data chunk to main; search chunk + 0x47 to sidecar.
+				if searchLen > 0 {
+					res.sidecarPre = append([]byte(nil), obuf[:searchLen]...)
+				}
+				res.uncompSize = len(uncompressed)
+				res.b = dbuf
+			} else if searchLen > 0 {
+				// Prepend the search chunk in place: the data sits at obuf[smc:]
+				// with smc bytes free in front, so only the small chunk moves.
+				start := smc - searchLen
+				copy(obuf[start:], obuf[:searchLen])
+				res.b = obuf[start : smc+len(dbuf)]
+				res.indexAt = searchLen
+			} else {
+				res.b = dbuf
+			}
+			res.pooled = obuf
 			output <- res
 
-			// Put unused buffer back in pool.
 			w.buffers.Put(inbuf)
-		}()
+		}(gcfg, overlap)
 		nRet += len(uncompressed)
 	}
 	return nRet, nil
+}
+
+// overlapOf returns the search table overlap of a block followed by p, then next.
+func (w *Writer) overlapOf(p, next []byte) []byte {
+	ov := w.searchCfg.overlapBytes()
+	if len(p) >= ov {
+		return p[:ov]
+	}
+	return append(p[:len(p):len(p)], next[:min(len(next), ov-len(p))]...)
 }
 
 // writeFull is a special version of write that will always write the full buffer.
 // Data to be compressed should start at offset obufHeaderLen and fill the remainder of the buffer.
 // The data will be written as a single block.
 // The caller is not allowed to use inbuf after this function has been called.
-func (w *Writer) writeFull(inbuf []byte) (errRet error) {
+// next is the data following the block, used for the search table overlap.
+func (w *Writer) writeFull(inbuf, next []byte) (errRet error) {
 	if err := w.err(nil); err != nil {
 		return err
 	}
 
 	if w.concurrency == 1 {
-		_, err := w.writeSync(inbuf[obufHeaderLen:])
+		_, err := w.writeSync(inbuf[w.searchMaxChunk+obufHeaderLen:], next, true, false)
 		return err
 	}
 
@@ -566,63 +849,90 @@ func (w *Writer) writeFull(inbuf []byte) (errRet error) {
 		w.wroteStreamHeader = true
 		hWriter := make(chan result)
 		w.output <- hWriter
-		hWriter <- result{startOffset: w.uncompWritten, b: makeHeader(w.blockSize)}
+		hWriter <- result{startOffset: w.uncompWritten, b: w.header()}
+		// In sidecar mode, the 0x44 info chunk goes on the sidecar
+		// (emitted lazily on first block); skip the inline emit.
+		if w.sidecar == nil && w.searchCfg != nil && w.searchInfoBuf == nil {
+			w.searchInfoBuf = w.searchCfg.marshalSearchInfoChunk()
+			infoOut := make(chan result)
+			w.output <- infoOut
+			infoOut <- result{startOffset: w.uncompWritten, b: w.searchInfoBuf}
+		}
 	}
 
 	// Get an output buffer.
+	smc := w.searchMaxChunk
 	obuf := w.buffers.Get().([]byte)[:w.obufLen]
-	uncompressed := inbuf[obufHeaderLen:]
+	uncompressed := inbuf[smc+obufHeaderLen:]
+	var overlap []byte
+	if w.searchCfg != nil {
+		overlap = bytes.Clone(w.overlapOf(nil, next))
+	}
 
 	output := make(chan result)
-	// Queue output now, so we keep order.
 	w.output <- output
 	res := result{
 		startOffset: w.uncompWritten,
 	}
 	w.uncompWritten += int64(len(uncompressed))
 
-	go func() {
-		checksum := crc(uncompressed)
-
-		// Set to uncompressed.
-		chunkType := uint8(chunkTypeUncompressedData)
-		chunkLen := 4 + len(uncompressed)
-
-		// Attempt compressing.
-		n := binary.PutUvarint(obuf[obufHeaderLen:], uint64(len(uncompressed)))
-		n2 := w.encodeBlock(obuf[obufHeaderLen+n:], uncompressed)
-
-		// Check if we should use this, or store as uncompressed instead.
+	go func(searchCfg *SearchTableConfig) {
+		dbuf := obuf[smc:]
+		n2 := w.encodeBlock(dbuf, uncompressed)
 		if n2 > 0 {
-			chunkType = uint8(chunkTypeMinLZCompressedData)
-			chunkLen = 4 + n + n2
-			obuf = obuf[:obufHeaderLen+n+n2]
+			dbuf = dbuf[:n2]
 		} else {
-			// Use input as output.
+			// Incompressible: the raw data's buffer (inbuf, with smc headroom
+			// in front) becomes the output; the scratch obuf is freed.
 			obuf, inbuf = inbuf, obuf
+			dbuf = obuf[smc:]
+			putUncompressedHeader(dbuf, uncompressed)
 		}
 
-		// Fill in the per-chunk header that comes before the body.
-		obuf[0] = chunkType
-		obuf[1] = uint8(chunkLen >> 0)
-		obuf[2] = uint8(chunkLen >> 8)
-		obuf[3] = uint8(chunkLen >> 16)
-		obuf[4] = uint8(checksum >> 0)
-		obuf[5] = uint8(checksum >> 8)
-		obuf[6] = uint8(checksum >> 16)
-		obuf[7] = uint8(checksum >> 24)
+		// Index compressible blocks; also incompressible blocks when a prefix is
+		// set (prefix tables stay sparse; a no-prefix table on incompressible
+		// data would exceed maxPopPct and be dropped). The data sits at
+		// obuf[smc:] with smc bytes free in front, so the search chunk prepends
+		// in place — no block copy.
+		searchLen := 0
+		if searchCfg != nil && (n2 > 0 || searchCfg.hasPrefix()) {
+			var stBuf []byte
+			if v := searchTablePool.Get(); v != nil {
+				stBuf = v.([]byte)
+			}
+			table, reductions := searchCfg.buildSearchTable(uncompressed, overlap, stBuf, searchCfg.shouldPack(w.concurrency))
+			if table != nil {
+				searchLen = len(w.appendSearchTableEitherChunk(obuf[:0], reductions, table))
+			}
+			searchTablePool.Put(table)
+		}
 
-		// Queue final output.
-		res.b = obuf
+		if w.sidecar != nil {
+			// Sidecar mode: data chunk to main; search chunk + 0x47 to sidecar.
+			if searchLen > 0 {
+				res.sidecarPre = append([]byte(nil), obuf[:searchLen]...)
+			}
+			res.uncompSize = len(uncompressed)
+			res.b = dbuf
+		} else if searchLen > 0 {
+			// Prepend the search chunk in place: the data sits at obuf[smc:]
+			// with smc bytes free in front, so only the small chunk moves.
+			start := smc - searchLen
+			copy(obuf[start:], obuf[:searchLen])
+			res.b = obuf[start : smc+len(dbuf)]
+			res.indexAt = searchLen
+		} else {
+			res.b = dbuf
+		}
+		res.pooled = obuf
 		output <- res
 
-		// Put unused buffer back in pool.
 		w.buffers.Put(inbuf)
-	}()
+	}(w.searchCfg)
 	return nil
 }
 
-func (w *Writer) writeSync(p []byte) (nRet int, errRet error) {
+func (w *Writer) writeSync(p, next []byte, final, omitTrailing bool) (nRet int, errRet error) {
 	if err := w.err(nil); err != nil {
 		return 0, err
 	}
@@ -630,7 +940,7 @@ func (w *Writer) writeSync(p []byte) (nRet int, errRet error) {
 		w.wroteStreamHeader = true
 		var n int
 		var err error
-		n, err = w.writer.Write(makeHeader(w.blockSize))
+		n, err = w.writer.Write(w.header())
 		if err != nil {
 			return 0, w.err(err)
 		}
@@ -638,9 +948,15 @@ func (w *Writer) writeSync(p []byte) (nRet int, errRet error) {
 			return 0, w.err(io.ErrShortWrite)
 		}
 		w.written += int64(n)
+		if err := w.writeSearchInfoSync(); err != nil {
+			return 0, err
+		}
 	}
 
 	for len(p) > 0 {
+		if !final && w.searchCfg != nil && len(p) < w.blockSize+w.searchCfg.overlapBytes() {
+			break // retain a block + its overlap for the next call (deferred emission)
+		}
 		var uncompressed []byte
 		if len(p) > w.blockSize {
 			uncompressed, p = p[:w.blockSize], p[w.blockSize:]
@@ -649,33 +965,44 @@ func (w *Writer) writeSync(p []byte) (nRet int, errRet error) {
 		}
 
 		obuf := w.buffers.Get().([]byte)[:w.obufLen]
-		checksum := crc(uncompressed)
-
-		// Set to uncompressed.
-		chunkType := uint8(chunkTypeUncompressedData)
-		chunkLen := 4 + len(uncompressed)
-
-		// Attempt compressing.
-		n := binary.PutUvarint(obuf[obufHeaderLen:], uint64(len(uncompressed)))
-		n2 := w.encodeBlock(obuf[obufHeaderLen+n:], uncompressed)
-
+		n2 := w.encodeBlock(obuf, uncompressed)
 		if n2 > 0 {
-			chunkType = uint8(chunkTypeMinLZCompressedData)
-			chunkLen = 4 + n + n2
-			obuf = obuf[:obufHeaderLen+n+n2]
+			obuf = obuf[:n2]
 		} else {
-			obuf = obuf[:8]
+			putUncompressedHeader(obuf, uncompressed)
+			obuf = obuf[:obufHeaderLen]
 		}
 
-		// Fill in the per-chunk header that comes before the body.
-		obuf[0] = chunkType
-		obuf[1] = uint8(chunkLen >> 0)
-		obuf[2] = uint8(chunkLen >> 8)
-		obuf[3] = uint8(chunkLen >> 16)
-		obuf[4] = uint8(checksum >> 0)
-		obuf[5] = uint8(checksum >> 8)
-		obuf[6] = uint8(checksum >> 16)
-		obuf[7] = uint8(checksum >> 24)
+		var overlap []byte
+		if w.searchCfg != nil {
+			overlap = w.overlapOf(p, next)
+		}
+
+		// In sidecar mode, emit the sidecar header lazily before the first
+		// block, then write the search table (if any) + 0x47 ref to sidecar.
+		// Otherwise, the search table is written inline before the data chunk.
+		// Omit the table for a flushed block without full overlap (a sidecar
+		// 0x47 ref is still written); the searcher always scans tableless blocks.
+		emitTable := w.searchCfg != nil && (n2 > 0 || w.searchCfg.hasPrefix()) &&
+			(!omitTrailing || len(overlap) >= w.searchCfg.overlapBytes())
+		mainBlockOffset := w.written
+		if w.sidecar != nil {
+			if err := w.writeSidecarStartIfNeeded(); err != nil {
+				return 0, err
+			}
+			if emitTable {
+				if err := w.writeSearchTableSync(uncompressed, overlap); err != nil {
+					return 0, err
+				}
+			}
+			if err := w.writeSidecarRemoteRef(mainBlockOffset, len(uncompressed)); err != nil {
+				return 0, err
+			}
+		} else if emitTable {
+			if err := w.writeSearchTableSync(uncompressed, overlap); err != nil {
+				return 0, err
+			}
+		}
 
 		n, err := w.writer.Write(obuf)
 		if err != nil {
@@ -688,7 +1015,7 @@ func (w *Writer) writeSync(p []byte) (nRet int, errRet error) {
 		w.written += int64(n)
 		w.uncompWritten += int64(len(uncompressed))
 
-		if chunkType == chunkTypeUncompressedData {
+		if n2 == 0 {
 			// Write uncompressed data.
 			n, err := w.writer.Write(uncompressed)
 			if err != nil {
@@ -709,6 +1036,16 @@ func (w *Writer) writeSync(p []byte) (nRet int, errRet error) {
 // AsyncFlush writes any buffered bytes to a block and starts compressing it.
 // It does not wait for the output has been written as Flush() does.
 func (w *Writer) AsyncFlush() error {
+	// A user-initiated flush emits the buffered block without forward overlap;
+	// omitTrailing makes it skip the (boundary-incomplete) search table so the
+	// block is always scanned. Close uses omitTrailing=false to keep the
+	// stream-final block's table.
+	return w.asyncFlush(nil, true)
+}
+
+// asyncFlush queues the buffered bytes. next is the data that will follow,
+// used for the search table overlap of the last buffered block.
+func (w *Writer) asyncFlush(next []byte, omitTrailing bool) error {
 	if err := w.err(nil); err != nil {
 		return err
 	}
@@ -716,32 +1053,45 @@ func (w *Writer) AsyncFlush() error {
 	// Queue any data still in input buffer.
 	if len(w.ibuf) != 0 {
 		if !w.wroteStreamHeader {
-			_, err := w.writeSync(w.ibuf)
+			_, err := w.writeSync(w.ibuf, next, true, omitTrailing)
 			w.ibuf = w.ibuf[:0]
 			return w.err(err)
-		} else {
-			_, err := w.write(w.ibuf)
-			w.ibuf = w.ibuf[:0]
-			err = w.err(err)
-			if err != nil {
-				return err
-			}
 		}
+		_, err := w.write(w.ibuf, next, true, omitTrailing)
+		w.ibuf = w.ibuf[:0]
+		err = w.err(err)
+		if err != nil {
+			return err
+		}
+
 	}
 	return w.err(nil)
 }
 
 // Flush flushes the Writer to its underlying io.Writer.
 // This does not apply padding.
+//
+// When search tables are enabled, the block flushed here is written without a
+// search table (its following bytes aren't available yet to index boundary
+// windows); it remains fully searchable but is always scanned, not skipped.
 func (w *Writer) Flush() error {
-	if err := w.AsyncFlush(); err != nil {
+	return w.flush(true)
+}
+
+func (w *Writer) flush(omitTrailing bool) error {
+	err := w.asyncFlush(nil, omitTrailing)
+	if w.output == nil {
 		return err
 	}
+	return w.wait()
+}
 
+// wait blocks until the queued blocks are written.
+func (w *Writer) wait() error {
 	if w.output == nil {
 		return w.err(nil)
 	}
-
+	// Wait even after an error: queued blocks may still read EncodeBuffer input.
 	// Send empty buffer
 	res := make(chan result)
 	w.output <- res
@@ -769,13 +1119,16 @@ func (w *Writer) Written() (input, output int64) {
 }
 
 // CloseIndex calls Close and returns an index on first call.
+// An empty stream has no index, and nil is returned.
 // This is not required if you are only adding index to a stream.
 func (w *Writer) CloseIndex() ([]byte, error) {
 	return w.closeIndex(true)
 }
 
 func (w *Writer) closeIndex(idx bool) ([]byte, error) {
-	err := w.Flush()
+	// omitTrailing=false: the stream-final block has no successor, so its
+	// no-overlap table is sound and worth keeping (unlike a mid-stream flush).
+	err := w.flush(false)
 	if w.output != nil {
 		close(w.output)
 		w.writerWg.Wait()
@@ -796,10 +1149,15 @@ func (w *Writer) closeIndex(idx bool) ([]byte, error) {
 		_ = w.err(err)
 		w.written += int64(n)
 	}
+	// Write the sidecar EOF (also writes the sidecar stream header lazily
+	// if no blocks were ever emitted, so the sidecar is a valid empty stream).
+	if w.err(err) == nil && w.sidecar != nil {
+		_ = w.writeSidecarEOF()
+	}
 	var index []byte
 	if w.err(err) == nil && w.writer != nil {
-		// Create index.
-		if idx {
+		// Create index. An empty stream has nothing to seek to.
+		if idx && w.uncompWritten > 0 {
 			compSize := int64(-1)
 			if w.pad <= 1 {
 				compSize = w.written
@@ -876,10 +1234,10 @@ func skippableFrame(dst []byte, total int, r io.Reader) ([]byte, error) {
 		return dst, nil
 	}
 	if total < skippableFrameHeader {
-		return dst, fmt.Errorf("s2: requested skippable frame (%d) < 4", total)
+		return dst, fmt.Errorf("minlz: requested skippable frame (%d) < %d", total, skippableFrameHeader)
 	}
 	if int64(total) >= maxBlockSize+skippableFrameHeader {
-		return dst, fmt.Errorf("s2: requested skippable frame (%d) >= max 1<<24", total)
+		return dst, fmt.Errorf("minlz: requested skippable frame (%d) >= max %d", total, maxBlockSize+skippableFrameHeader)
 	}
 	// Chunk type 0xfe "Section 4.4 Padding (chunk type 0xfe)"
 	dst = append(dst, ChunkTypePadding)
@@ -911,7 +1269,7 @@ func WriterConcurrency(n int) WriterOption {
 }
 
 // WriterAddIndex will append an index to the end of a stream
-// when it is closed.
+// when it is closed. An empty stream gets no index.
 func WriterAddIndex(b bool) WriterOption {
 	return func(w *Writer) error {
 		if b && !w.genIndex {
@@ -923,19 +1281,23 @@ func WriterAddIndex(b bool) WriterOption {
 }
 
 // WriterLevel will set the compression level.
+// The SIMD levels write SIMD blocks, which need a decoder for MinLZ format specification v1.1 or later.
 func WriterLevel(n int) WriterOption {
 	return func(w *Writer) error {
-		if n < 0 || n > LevelSmallest {
-			return ErrInvalidLevel
+		switch n {
+		case LevelSuperFast, LevelUncompressed, LevelFastest, LevelBalanced, LevelSmallest,
+			LevelSuperFastSIMD, LevelFastestSIMD, LevelBalancedSIMD, LevelSmallestSIMD,
+			LevelSuperFastSIMD | LevelSIMDDelta, LevelFastestSIMD | LevelSIMDDelta, LevelBalancedSIMD | LevelSIMDDelta:
+			w.level = n
+			return nil
 		}
-		w.level = uint8(n)
-		return nil
+		return ErrInvalidLevel
 	}
 }
 
 // WriterUncompressed will bypass compression.
 // The stream will be written as uncompressed blocks only.
-// If concurrency is > 1 CRC and output will still be done async.
+// If concurrency is > 1 CRC calculation and output will be done async.
 func WriterUncompressed() WriterOption {
 	return func(w *Writer) error {
 		w.level = 0
@@ -945,42 +1307,39 @@ func WriterUncompressed() WriterOption {
 
 // WriterBlockSize allows to override the default block size.
 // Blocks will be this size or smaller.
-// Minimum size is 4KB and and maximum size is 4MB.
+// Minimum size is 4KB and the maximum size is 8MB.
 //
 // Bigger blocks may give bigger throughput on systems with many cores,
 // and will increase compression slightly, but it will limit the possible
 // concurrency for smaller payloads for both encoding and decoding.
-// Default block size is 1MB.
-//
-// When writing Snappy compatible output using WriterSnappyCompat,
-// the maximum block size is 64KB.
+// Default block size is 2MB.
 func WriterBlockSize(n int) WriterOption {
 	return func(w *Writer) error {
 		if n > maxBlockSize || n < minBlockSize {
-			return errors.New("minlz: block size out of bounds. Must be <= 4MB and >=4KB")
+			return fmt.Errorf("minlz: block size out of bounds. Must be <= %d and >= %d", maxBlockSize, minBlockSize)
 		}
 		w.blockSize = n
 		return nil
 	}
 }
 
-// WriterPadding will add padding to all output so the size will be a multiple of n.
+// WriterPadding will add padding to all output, so the size will be a multiple of n.
 // This can be used to obfuscate the exact output size or make blocks of a certain size.
 // The contents will be a skippable frame, so it will be invisible by the decoder.
-// n must be > 0 and <= 4MB.
+// n must be > 0 and <= 8MB.
 // The padded area will be filled with data from crypto/rand.Reader.
 // The padding will be applied whenever Close is called on the writer.
 func WriterPadding(n int) WriterOption {
 	return func(w *Writer) error {
 		if n <= 0 {
-			return fmt.Errorf("s2: padding must be at least 1")
+			return fmt.Errorf("minlz: padding must be at least 1")
 		}
 		// No need to waste our time.
 		if n == 1 {
 			w.pad = 0
 		}
 		if n > maxBlockSize {
-			return fmt.Errorf("s2: padding must less than 4MB")
+			return fmt.Errorf("minlz: padding must be <= %d", maxBlockSize)
 		}
 		w.pad = n
 		return nil
@@ -1034,7 +1393,253 @@ func WriterCreateIndex(b bool) WriterOption {
 	}
 }
 
-func makeHeader(blockSize int) []byte {
+func (w *Writer) writeSearchInfoSync() error {
+	if w.searchCfg == nil || w.searchInfoBuf != nil {
+		return nil
+	}
+	// In sidecar mode, the 0x44 info chunk lives on the sidecar instead
+	// of the main stream; it is emitted lazily via writeSidecarStartIfNeeded.
+	if w.sidecar != nil {
+		return nil
+	}
+	w.searchInfoBuf = w.searchCfg.marshalSearchInfoChunk()
+	n, err := w.writer.Write(w.searchInfoBuf)
+	if err != nil {
+		return w.err(err)
+	}
+	if n != len(w.searchInfoBuf) {
+		return w.err(io.ErrShortWrite)
+	}
+	w.written += int64(n)
+	return nil
+}
+
+// dstWriter selects the destination for the search-table chunk in sync mode.
+// In sidecar mode the chunk goes to the sidecar; otherwise it is inlined in
+// the main stream and counts towards w.written.
+func (w *Writer) writeSearchTableSync(uncompressed, overlap []byte) error {
+	var stBuf []byte
+	if v := searchTablePool.Get(); v != nil {
+		stBuf = v.([]byte)
+	}
+	table, reductions := w.searchCfg.buildSearchTable(uncompressed, overlap, stBuf, w.searchCfg.shouldPack(1))
+	defer searchTablePool.Put(table)
+	if table == nil {
+		return nil
+	}
+	// Pick destination. The sidecar's writes do NOT advance w.written.
+	dst := w.writer
+	countWritten := true
+	if w.sidecar != nil {
+		dst = w.sidecar
+		countWritten = false
+	}
+	// Try compressed form first. When emitted, the chunk is fully serialized
+	// (no large-bitmap separate write).
+	if w.searchCfg.compression != nil && w.searchCfg.compression.enabled {
+		e := cstEncoderPool.Get().(*cstEncoder)
+		out, ok, err := appendSearchTableCompressedChunk(w.searchHdrBuf[:0], w.searchCfg, reductions, table, e)
+		cstEncoderPool.Put(e)
+		if err != nil {
+			return w.err(err)
+		}
+		if ok {
+			w.searchHdrBuf = out
+			n, err := dst.Write(out)
+			if err != nil {
+				return w.err(err)
+			}
+			if n != len(out) {
+				return w.err(io.ErrShortWrite)
+			}
+			if countWritten {
+				w.written += int64(n)
+			}
+			return nil
+		}
+	}
+	w.searchHdrBuf = appendSearchTableHeader(w.searchHdrBuf[:0], w.searchCfg, reductions, table)
+	n, err := dst.Write(w.searchHdrBuf)
+	if err != nil {
+		return w.err(err)
+	}
+	if n != len(w.searchHdrBuf) {
+		return w.err(io.ErrShortWrite)
+	}
+	if countWritten {
+		w.written += int64(n)
+	}
+	n, err = dst.Write(table)
+	if err != nil {
+		return w.err(err)
+	}
+	if n != len(table) {
+		return w.err(io.ErrShortWrite)
+	}
+	if countWritten {
+		w.written += int64(n)
+	}
+	return nil
+}
+
+// writeSidecarStartIfNeeded writes the sidecar's stream header and 0x44 info
+// chunk on first use. Idempotent. Must only be called while w.sidecar != nil.
+func (w *Writer) writeSidecarStartIfNeeded() error {
+	if w.sidecarHeaderWritten {
+		return nil
+	}
+	hdr := w.header()
+	n, err := w.sidecar.Write(hdr)
+	if err != nil {
+		return w.err(err)
+	}
+	if n != len(hdr) {
+		return w.err(io.ErrShortWrite)
+	}
+	info := w.searchCfg.marshalSearchInfoChunk()
+	n, err = w.sidecar.Write(info)
+	if err != nil {
+		return w.err(err)
+	}
+	if n != len(info) {
+		return w.err(io.ErrShortWrite)
+	}
+	w.sidecarHeaderWritten = true
+	return nil
+}
+
+// writeSidecarRemoteRef writes a single-block 0x47 Remote Block Reference
+// pointing at mainOffset in the main stream with the given uncompressed
+// block size. Must only be called while w.sidecar != nil.
+func (w *Writer) writeSidecarRemoteRef(mainOffset int64, uncompSize int) error {
+	var rb [4 + binary.MaxVarintLen64*2]byte
+	chunk := appendRemoteBlockRef(rb[:0], mainOffset, w.sidecarMaxBlock-uncompSize)
+	n, err := w.sidecar.Write(chunk)
+	if err != nil {
+		return w.err(err)
+	}
+	if n != len(chunk) {
+		return w.err(io.ErrShortWrite)
+	}
+	return nil
+}
+
+// writeSidecarEOF writes the sidecar's EOF chunk. Called once during Close.
+// Safe to call when w.sidecar == nil (no-op).
+func (w *Writer) writeSidecarEOF() error {
+	if w.sidecar == nil {
+		return nil
+	}
+	if err := w.writeSidecarStartIfNeeded(); err != nil {
+		return err
+	}
+	var tmp [4 + binary.MaxVarintLen64]byte
+	tmp[0] = chunkTypeEOF
+	// Sidecar carries no uncompressed payload — encode 0.
+	n := binary.PutUvarint(tmp[4:], 0)
+	tmp[1] = uint8(n)
+	buf := tmp[:4+n]
+	wn, err := w.sidecar.Write(buf)
+	if err != nil {
+		return w.err(err)
+	}
+	if wn != len(buf) {
+		return w.err(io.ErrShortWrite)
+	}
+	return nil
+}
+
+// appendSearchTableEitherChunk dispatches between the compressed (0x46) and
+// uncompressed (0x45) search-table chunk encoders. When compression is
+// disabled or not beneficial, falls back to 0x45. An internal encoder error
+// is recorded on the Writer (visible to subsequent operations via w.err) so
+// it isn't silently masked by the 0x45 fallback.
+func (w *Writer) appendSearchTableEitherChunk(dst []byte, reductions uint8, table []byte) []byte {
+	if w.searchCfg.compression != nil && w.searchCfg.compression.enabled {
+		e := cstEncoderPool.Get().(*cstEncoder)
+		out, ok, err := appendSearchTableCompressedChunk(dst, w.searchCfg, reductions, table, e)
+		cstEncoderPool.Put(e)
+		if err != nil {
+			_ = w.err(err)
+		}
+		if ok {
+			return out
+		}
+	}
+	return appendSearchTableChunk(dst, w.searchCfg, reductions, table)
+}
+
+// WriterSearchTable enables per-block search table generation.
+// The config controls match length, prefix filtering, and heuristics.
+// Use NewSearchTableConfig to create the config.
+func WriterSearchTable(cfg SearchTableConfig) WriterOption {
+	return func(w *Writer) error {
+		if err := cfg.validate(); err != nil {
+			return err
+		}
+		c := cfg
+		w.searchCfg = &c
+		return nil
+	}
+}
+
+// WriterSidecar redirects search-index chunks (0x44/0x45/0x46) to a separate
+// sidecar writer rather than embedding them in the main stream. For each
+// data block written to the main stream a 0x47 Remote Block Reference is
+// appended to the sidecar that points at the block's offset in the main
+// stream.
+//
+// WriterSearchTable must also be supplied. Both the main stream and the
+// sidecar are valid MinLZ streams on their own; the sidecar can be searched
+// using NewSidecarSearcher with the main stream as the data source.
+func WriterSidecar(sidecar io.Writer) WriterOption {
+	return func(w *Writer) error {
+		if sidecar == nil {
+			return errors.New("minlz: WriterSidecar requires a non-nil writer")
+		}
+		w.sidecar = sidecar
+		return nil
+	}
+}
+
+// SetSidecar configures or replaces the sidecar destination for subsequent
+// blocks. Pass nil to disable sidecar mode. Must be called before any data
+// is written for the current stream (i.e., immediately after NewWriter or
+// after Reset, before the first Write/EncodeBuffer/ReadFrom). The Writer
+// must have been constructed with WriterSearchTable.
+//
+// This is primarily intended for tools that reuse a single Writer across
+// many files and want to direct each file's index to a separate sidecar.
+func (w *Writer) SetSidecar(sidecar io.Writer) error {
+	if !w.paramsOK {
+		return errClosed
+	}
+	if w.wroteStreamHeader {
+		return errors.New("minlz: SetSidecar must be called before the first write")
+	}
+	if sidecar != nil && w.searchCfg == nil {
+		return errors.New("minlz: SetSidecar requires WriterSearchTable")
+	}
+	w.sidecar = sidecar
+	w.sidecarHeaderWritten = false
+	if sidecar != nil {
+		w.sidecarMaxBlock = 1 << bits.Len(uint(w.blockSize-1))
+	}
+	return nil
+}
+
+// makeHeader returns a stream identifier. simd sets the flag of streams with SIMD chunks.
+func makeHeader(blockSize int, simd bool) []byte {
 	hdr := append(make([]byte, 0, len(magicChunk)+1), magicChunk...)
-	return append(hdr, byte(bits.Len(uint(blockSize-1)))-10)
+	b := byte(bits.Len(uint(blockSize-1))) - 10
+	if simd {
+		b |= streamFlagSIMD
+	}
+	return append(hdr, b)
+}
+
+// header returns the stream identifier of w.
+// A sidecar gets the SIMD flag of its stream, so decoders without SIMD support reject it up front.
+func (w *Writer) header() []byte {
+	return makeHeader(w.blockSize, w.level >= LevelSuperFastSIMD)
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !amd64 || appengine || !gc || noasm || purego
+//go:build (!amd64 && !arm64) || appengine || !gc || noasm || purego
 
 package minlz
 
@@ -24,3 +24,20 @@ package minlz
 func minLZDecode(dst, src []byte) int {
 	return minLZDecodeGo(dst, src)
 }
+
+// simdExec runs the first n operations of c. See simdExecGo.
+func simdExec(dst, lits []byte, c *simdChunk, n int, st *[4]int) {
+	simdExecGo(dst, lits, c, n, st)
+}
+
+// simdExecFlat runs operations k0 to k of c, which has the no-overlap flag, from stream positions cur.
+// See simdExecFlatGo.
+func simdExecFlat(dst, lits []byte, c *simdChunk, k0, k int, cur [4]int, st *[4]int) {
+	simdExecFlatGo(dst, lits, c, k0, k, cur, st)
+}
+
+func simdTokStatsAsm(tok []byte) (out, nLit, nRep, nEsc, n int, ok bool) { return 0, 0, 0, 0, 0, true }
+
+func simdLLStatsAsm(ll []byte) (sum, nEsc, n int, ok bool) { return 0, 0, 0, true }
+
+func simdOffStatsAsm(offc []byte) (bits, n int, ok bool) { return 0, 0, true }
