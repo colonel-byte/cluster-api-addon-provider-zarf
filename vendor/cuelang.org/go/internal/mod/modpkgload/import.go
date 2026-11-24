@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/internal/mod/modrequirements"
+	"cuelang.org/go/mod/modregistry"
 	"cuelang.org/go/mod/module"
 )
 
@@ -209,7 +211,7 @@ func FindPackageLocations(
 		}
 		mloc, isLocal, err := fetch(ctx, v)
 		if err != nil {
-			return nil, fmt.Errorf("cannot fetch %v: %w", v, err)
+			return nil, modregistry.WrapModuleError("cannot fetch", v, err)
 		}
 		if mloc.FS == nil {
 			// Not found but not an error.
@@ -314,13 +316,16 @@ func isDirWithCUEFiles(loc module.SourceLoc) (bool, error) {
 			return result, err
 		}
 	}
-	// It would be nice if we could inspect the error returned from ReadDir to see
-	// if it's failing because it's not a directory, but unfortunately that doesn't
-	// seem to be something defined by the Go fs interface.
-	// For now, catching fs.ErrNotExist seems to be enough.
 	entries, err := fs.ReadDir(fsys, loc.Dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		// There is no directory here: nothing exists, or the path is a
+		// file or is below one. The fs interfaces define no error for
+		// the latter, so we rely on ENOTDIR from the OS, or failing that,
+		// on a stat of the path.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return false, nil
+		}
+		if info, serr := fs.Stat(fsys, loc.Dir); serr == nil && !info.IsDir() {
 			return false, nil
 		}
 		return false, err
@@ -333,7 +338,7 @@ func isDirWithCUEFiles(loc module.SourceLoc) (bool, error) {
 		// If the directory entry is a symlink, stat it to obtain the info for the
 		// link target instead of the link itself.
 		if ftype&fs.ModeSymlink != 0 {
-			info, err := fs.Stat(fsys, filepath.Join(loc.Dir, e.Name()))
+			info, err := fs.Stat(fsys, path.Join(loc.Dir, e.Name()))
 			if err != nil {
 				continue // Ignore broken symlinks.
 			}

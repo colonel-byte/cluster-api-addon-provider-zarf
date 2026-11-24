@@ -51,6 +51,7 @@ type Cache struct {
 	reg              *modregistry.Client
 	downloadZipCache par.ErrCache[module.Version, string]
 	modFileCache     par.ErrCache[module.Version, *modfile.File]
+	fetchCache       par.ErrCache[module.Version, module.SourceLoc]
 }
 
 // Deprecated: use [Cache.ModFile] instead.
@@ -67,14 +68,14 @@ func (c *Cache) Requirements(ctx context.Context, mv module.Version) ([]module.V
 // ModFile returns the parsed module file for the given module version,
 // downloading it if necessary. Results are cached.
 func (c *Cache) ModFile(ctx context.Context, mv module.Version) (*modfile.File, error) {
-	return c.modFileCache.Do(mv, func() (*modfile.File, error) {
+	return c.modFileCache.DoContext(ctx, mv, func() (*modfile.File, error) {
 		data, err := c.fetchModFileData(ctx, mv)
 		if err != nil {
 			return nil, err
 		}
-		mf, err := modfile.Parse(data, mv.String())
+		mf, err := modfile.Parse(data, "cue.mod/module.cue")
 		if err != nil {
-			return nil, fmt.Errorf("cannot parse module file from %v: %v", mv, err)
+			return nil, &modregistry.ModuleError{Module: mv.String(), Err: err}
 		}
 		return mf, nil
 	})
@@ -82,6 +83,10 @@ func (c *Cache) ModFile(ctx context.Context, mv module.Version) (*modfile.File, 
 
 // FetchFromCache implements [cuelang.org/go/mod/modconfig.CachedRegistry].
 func (c *Cache) FetchFromCache(mv module.Version) (module.SourceLoc, error) {
+	// A location memoized by Fetch is necessarily in the cache already.
+	if loc, err := c.fetchCache.Get(mv); err == nil {
+		return loc, nil
+	}
 	dir, err := c.downloadDir(mv)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -95,6 +100,17 @@ func (c *Cache) FetchFromCache(mv module.Version) (module.SourceLoc, error) {
 // Fetch returns the location of the contents for the given module
 // version, downloading it if necessary.
 func (c *Cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc, error) {
+	// Perform the on-disk work for each module version at most once per
+	// process, mirroring the download cache in Go's cmd/go/internal/modfetch.
+	// This also keeps repeated fetches away from the transient stat errors
+	// described in downloadDir (https://cuelang.org/issue/3413).
+	return c.fetchCache.DoContext(ctx, mv, func() (module.SourceLoc, error) {
+		return c.fetch(ctx, mv)
+	})
+}
+
+// fetch performs the work of [Cache.Fetch], without memoization.
+func (c *Cache) fetch(ctx context.Context, mv module.Version) (module.SourceLoc, error) {
 	dir, err := c.downloadDir(mv)
 	if err == nil {
 		// The directory has already been completely extracted (no .partial file exists).
@@ -125,19 +141,10 @@ func (c *Cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc,
 	}
 	_, dirExists := dirErr.(*downloadDirPartialError)
 
-	// Clean up any partially extracted directories (indicated by
-	// DownloadDirPartialError, usually because of a .partial file). This is only
-	// safe to do because the lock file ensures that their writers are no longer
+	// Clean up a partially extracted directory (indicated by
+	// downloadDirPartialError, usually because of a .partial file). This is only
+	// safe to do because the lock file ensures that its writer is no longer
 	// active.
-	parentDir := filepath.Dir(dir)
-	tmpPrefix := filepath.Base(dir) + ".tmp-"
-
-	entries, _ := os.ReadDir(parentDir)
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), tmpPrefix) {
-			RemoveAll(filepath.Join(parentDir, entry.Name())) // best effort
-		}
-	}
 	if dirExists {
 		if err := RemoveAll(dir); err != nil {
 			return module.SourceLoc{}, err
@@ -159,14 +166,12 @@ func (c *Cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc,
 	// then rename it into place with os.Rename. On Windows, this can fail with
 	// ERROR_ACCESS_DENIED when another process (usually an anti-virus scanner)
 	// opened files in the temporary directory.
-	if err := os.MkdirAll(parentDir, 0777); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dir), 0777); err != nil {
 		return module.SourceLoc{}, err
 	}
-	// Upstream Go's modfetch uses a plain os.WriteFile here, but we hit
-	// transient Windows ERROR_ACCESS_DENIED on this path more often, likely
-	// because each testscript test starts with a cold module cache on an
-	// antivirus-scanned drive. Retry via robustio to absorb those.
-	// See https://cuelang.org/issue/3413.
+	// Unlike upstream Go's modfetch, retry via robustio: recreating a
+	// just-removed .partial file can hit the same transient Windows errors
+	// as statting one in downloadDir. See https://cuelang.org/issue/3413.
 	if err := robustio.WriteFile(partialPath, nil, 0666); err != nil {
 		return module.SourceLoc{}, err
 	}
@@ -190,7 +195,7 @@ func (c *Cache) ModuleVersions(ctx context.Context, mpath string) ([]string, err
 }
 
 func (c *Cache) downloadZip(ctx context.Context, mv module.Version) (zipfile string, err error) {
-	return c.downloadZipCache.Do(mv, func() (string, error) {
+	return c.downloadZipCache.DoContext(ctx, mv, func() (string, error) {
 		zipfile, err := c.cachePath(mv, "zip")
 		if err != nil {
 			return "", err

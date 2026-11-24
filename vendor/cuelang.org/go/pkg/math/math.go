@@ -16,6 +16,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//cue:pure
 package math
 
 import (
@@ -24,15 +25,16 @@ import (
 	"github.com/cockroachdb/apd/v3"
 
 	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/core/adt"
 )
 
 // Abs returns the absolute value of x.
 //
 // Special case: Abs(±Inf) = +Inf
-func Abs(x *internal.Decimal) (*internal.Decimal, error) {
-	var d internal.Decimal
-	_, err := internal.BaseContext.Abs(&d, x)
-	return &d, err
+func Abs(x *adt.Num) *adt.Num {
+	d := &adt.Num{K: x.K}
+	d.X.Abs(&x.X)
+	return d
 }
 
 // Acosh returns the inverse hyperbolic cosine of x.
@@ -158,14 +160,12 @@ const (
 
 // Copysign returns a value with the magnitude
 // of x and the sign of y.
-func Copysign(x, y *internal.Decimal) *internal.Decimal {
-	var d internal.Decimal
-	d.Set(x)
-	d.Negative = y.Negative
-	return &d
+func Copysign(x, y *adt.Num) *adt.Num {
+	d := &adt.Num{K: x.K}
+	d.X.Set(&x.X)
+	d.X.Negative = y.X.Negative
+	return d
 }
-
-var zero = apd.New(0, 0)
 
 // Dim returns the maximum of x-y or 0.
 //
@@ -174,16 +174,15 @@ var zero = apd.New(0, 0)
 //	Dim(+Inf, +Inf) = NaN
 //	Dim(-Inf, -Inf) = NaN
 //	Dim(x, NaN) = Dim(NaN, x) = NaN
-func Dim(x, y *internal.Decimal) (*internal.Decimal, error) {
-	var d internal.Decimal
-	_, err := internal.BaseContext.Sub(&d, x, y)
+func Dim(x, y *adt.Num) (*adt.Num, error) {
+	d, err := adt.NumSub(x, y)
 	if err != nil {
 		return nil, err
 	}
-	if d.Negative {
-		return zero, nil
+	if d.X.Negative {
+		return &adt.Num{K: d.K}, nil
 	}
-	return &d, nil
+	return d, nil
 }
 
 // Erf returns the error function of x.
@@ -490,6 +489,10 @@ func Mod(x, y float64) float64 {
 //	Pow(-Inf, y) = Pow(-0, -y)
 //	Pow(x, y) = NaN for finite x < 0 and finite non-integer y
 func Pow(x, y *internal.Decimal) (*internal.Decimal, error) {
+	if y.IsZero() {
+		// Pow(x, ±0) = 1 for any x, but apd rejects Pow(0, 0).
+		return apd.New(1, 0), nil
+	}
 	var d internal.Decimal
 	_, err := internal.BaseContext.Pow(&d, x, y)
 	return &d, err

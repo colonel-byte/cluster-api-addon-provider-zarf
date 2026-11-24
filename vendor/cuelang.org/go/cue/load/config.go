@@ -15,6 +15,7 @@
 package load
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"io/fs"
@@ -148,11 +149,41 @@ type Config struct {
 	// to accept module files that lack a language.version field.
 	AcceptLegacyModules bool
 
+	// LanguageVersion sets the fallback language version for input outside a
+	// CUE module, such as standalone CUE files or standard input. For example,
+	// "v0.17.0" selects that version. An empty value defaults to
+	// [cue.LanguageVersion].
+	//
+	// It is only a fallback: files of a module that declares a language
+	// version keep the module's version, and it is not an error if the
+	// fallback applies to no input at all, so that the same load can be
+	// repeated while files move into modules or gain @version attributes.
+	//
+	// For a file outside a module, @version takes precedence for that file;
+	// LanguageVersion still selects the export target.
+	//
+	// AST overlays added with [FromFile] are used as given, so their
+	// language version is the one they were parsed with.
+	LanguageVersion string
+
+	// fallbackVersion is [Config.LanguageVersion] for a load in which some
+	// inputs belong to a module, so that the load is that of the module
+	// holding [Config.Dir], and only the files belonging to no module fall
+	// back to it. fallbackFiles records which files do, as decided when they
+	// are first read.
+	fallbackVersion string
+	fallbackFiles   map[*build.File]bool
+
 	// modFile holds the contents of the module file, or nil
 	// if no module file was present. If non-nil, then
 	// after calling Config.complete, modFile.Module will be
 	// equal to Module.
 	modFile *modfile.File
+
+	// baseModFile holds the contents of cue.mod/module.cue when a
+	// cue.mod/local-module.cue file is present and hence modFile holds
+	// the main-module view derived from both files. It is nil otherwise.
+	baseModFile *modfile.File
 
 	// parserConfig holds the configuration that will be passed
 	// when parsing CUE files. It includes the version from
@@ -280,7 +311,8 @@ type Config struct {
 	//
 	// An application may supply a custom implementation of ParseFile to change
 	// the effective file contents or the behavior of the parser, or to modify
-	// the syntax tree.
+	// the syntax tree. The loader owns the returned file and may modify it,
+	// such as when injecting tags, so ParseFile must not share it.
 	ParseFile func(name string, src interface{}, cfg parser.Config) (*ast.File, error)
 
 	// Overlay provides a mapping of absolute file paths to file contents,
@@ -410,7 +442,11 @@ func (c Config) complete() (cfg *Config, err error) {
 	// TODO(mvdan): note that setting Config.ModuleRoot to a directory
 	// without a cue.mod file does not result in any error, which is confusing
 	// or can lead to not using the right CUE module silently.
-	if c.ModuleRoot == "" {
+	if c.LanguageVersion != "" {
+		// No input belongs to a module, so none is loaded; see
+		// [Config.completeFor].
+		c.ModuleRoot = c.Dir
+	} else if c.ModuleRoot == "" {
 		// Only consider the current directory by default
 		c.ModuleRoot = c.Dir
 		if root := c.findModRoot(c.Dir); root != "" {
@@ -435,6 +471,10 @@ func (c Config) complete() (cfg *Config, err error) {
 		}}
 	}
 	c.parserConfig = parser.NewConfig(parser.ParseComments)
+	if c.LanguageVersion != "" {
+		c.parserConfig = c.parserConfig.Apply(parser.Version(c.LanguageVersion))
+		return &c, nil
+	}
 	if err := c.loadModule(); err != nil {
 		return nil, err
 	}
@@ -497,7 +537,41 @@ func (c *Config) completeFS() error {
 	return nil
 }
 
+// parserConfigFor returns the configuration to parse p's files with, at the
+// language version of the module p belongs to. A package that declares none
+// falls back to [Config.parserConfig], which holds the main module's version;
+// passing an empty version to [parser.Version] would instead select the
+// current one.
+func (c *Config) parserConfigFor(p *build.Instance) parser.Config {
+	if mf := p.ModuleFile; mf != nil && mf.Language != nil && mf.Language.Version != "" {
+		return c.parserConfig.Apply(parser.Version(mf.Language.Version))
+	}
+	return c.parserConfig
+}
+
+// parserConfigForFile is [Config.parserConfigFor] for the file f of p, at
+// path, which falls back to [Config.fallbackVersion] if it belongs to no
+// module.
+func (c *Config) parserConfigForFile(p *build.Instance, f *build.File, path string) parser.Config {
+	cfg := c.parserConfigFor(p)
+	if c.fallbackVersion == "" {
+		return cfg
+	}
+	fallback, ok := c.fallbackFiles[f]
+	if !ok {
+		fallback = path == "-" || !c.inModule(pkgpath.Dir(path, c.pathOS))
+		c.fallbackFiles[f] = fallback
+	}
+	if fallback {
+		cfg = cfg.Apply(parser.Version(c.fallbackVersion))
+	}
+	return cfg
+}
+
 func (c *Config) languageVersion() string {
+	if c.LanguageVersion != "" {
+		return c.LanguageVersion
+	}
 	if c.modFile == nil || c.modFile.Language == nil {
 		return ""
 	}
@@ -516,25 +590,7 @@ func (c *Config) loadModule() error {
 	modFile := pkgpath.Join([]string{modDir, moduleFile}, c.pathOS)
 	f, cerr := c.fileSystem.openFile(modFile)
 	if cerr != nil {
-		// If we could not load cue.mod/module.cue, check whether the reason was
-		// a legacy cue.mod file and give the user a clear error message.
-		//
-		// Common case: the file does not exist. Avoid an extra stat
-		// syscall using the error code when we can.
-		//
-		// TODO(mvdan): we can remove this in mid 2026, once we can safely assume that
-		// practically all cue.mod files have vanished.
-		if errors.Is(cerr, fs.ErrNotExist) && (c.FS != nil || runtime.GOOS != "windows") {
-			// The file definitely does not exist. On Windows unfortunately due
-			// to https://github.com/golang/go/issues/46734
-			// we can't tell the difference between "does not exist"
-			// and "is not a directory", hence the special casing.
-			return nil
-		}
-		info, cerr2 := c.fileSystem.stat(modDir)
-		if cerr2 == nil && !info.IsDir() {
-			return fmt.Errorf("cue.mod files are no longer supported; use cue.mod/module.cue")
-		}
+		// No module file; this includes a legacy cue.mod file rather than a directory.
 		return nil
 	}
 	defer f.Close()
@@ -592,6 +648,7 @@ func (c *Config) loadModule() error {
 		if err != nil {
 			return err
 		}
+		c.baseModFile = mf
 		c.modFile = localMF
 	} else if !errors.Is(cerr, fs.ErrNotExist) && runtime.GOOS != "windows" {
 		// On Windows we cannot reliably distinguish "does not exist" from
@@ -605,20 +662,31 @@ func (c *Config) loadModule() error {
 		return err
 	}
 	if repls != nil {
+		// A replacement directory is a module of its own, so its files must
+		// be read at its own language version, not ours. Resolve those here,
+		// where the replacements are walked anyway: the source location below
+		// is built once per package resolved through a replacement, too often
+		// to read and unify a module file each time.
+		replVersions := make(map[string]string)
 		for replaced, r := range repls.All() {
-			if r.Dir != "" {
-				if err := c.checkReplaceDirModulePath(replaced, r.Dir); err != nil {
-					return err
-				}
+			if r.Dir == "" {
+				continue
+			}
+			if err := c.checkReplaceDirModulePath(replaced, r.Dir); err != nil {
+				return err
+			}
+			// Key by the resolved directory, as the source location resolves
+			// what it is given before looking it up.
+			dir := c.absReplaceDir(r.Dir)
+			if mf := c.replaceDirModFile(dir); mf != nil && mf.Language != nil {
+				replVersions[dir] = mf.Language.Version
 			}
 		}
 		c.replacements = repls
 		c.Registry = modpkgload.NewReplacingRegistry(c.Registry, repls, func(dir string) (module.SourceLoc, error) {
-			if !pkgpath.IsAbs(dir, c.pathOS) {
-				dir = pkgpath.Join([]string{c.ModuleRoot, dir}, c.pathOS)
-			}
+			dir = c.absReplaceDir(dir)
 			return module.SourceLoc{
-				FS:  c.fileSystem.ioFS(dir, c.languageVersion()),
+				FS:  c.fileSystem.ioFS(dir, cmp.Or(replVersions[dir], c.languageVersion())),
 				Dir: ".",
 			}, nil
 		})
@@ -626,9 +694,18 @@ func (c *Config) loadModule() error {
 	return nil
 }
 
-// checkReplaceDirModulePath verifies that the module.cue in a replacement
-// directory declares the same module path as the module being replaced.
-func (c *Config) checkReplaceDirModulePath(wantPath string, dir string) error {
+// absReplaceDir resolves a replacement directory against the main module root.
+func (c *Config) absReplaceDir(dir string) string {
+	if pkgpath.IsAbs(dir, c.pathOS) {
+		return dir
+	}
+	return pkgpath.Join([]string{c.ModuleRoot, dir}, c.pathOS)
+}
+
+// replaceDirModFile returns the module file of the module in a replacement
+// directory, or nil if it cannot be read: any real problem with it is
+// reported when that module is loaded through the registry.
+func (c *Config) replaceDirModFile(dir string) *modfile.File {
 	modFilePath := pkgpath.Join([]string{dir, "cue.mod", "module.cue"}, c.pathOS)
 	rc, cerr := c.fileSystem.openFile(modFilePath)
 	if cerr != nil {
@@ -643,10 +720,43 @@ func (c *Config) checkReplaceDirModulePath(wantPath string, dir string) error {
 	if err != nil {
 		return nil
 	}
+	return replMF
+}
+
+// checkReplaceDirModulePath verifies that the module.cue in a replacement
+// directory declares the same module path as the module being replaced.
+func (c *Config) checkReplaceDirModulePath(wantPath string, dir string) error {
+	replMF := c.replaceDirModFile(dir)
+	if replMF == nil {
+		return nil
+	}
 	if got := replMF.QualifiedModule(); got != "" && got != wantPath {
 		return fmt.Errorf("replacement directory %s has module path %q, want %q", dir, got, wantPath)
 	}
 	return nil
+}
+
+// localModuleHint returns a parenthesized hint to append to the error
+// reported when the package with the given import path cannot be found,
+// or the empty string if there is no useful hint to give.
+//
+// A cue.mod/local-module.cue file replaces module.cue's dependencies
+// entirely rather than adding to them, so a dependency that it omits
+// cannot be resolved even though module.cue declares it. That is easy to
+// mistake for a broken cache or registry, so point at the file and at
+// "cue mod tidy", which restores the missing entry.
+func (c *Config) localModuleHint(importPath string) string {
+	if c.baseModFile == nil {
+		return ""
+	}
+	mv, ok := c.baseModFile.ModuleForImportPath(importPath)
+	if !ok {
+		return ""
+	}
+	if _, ok := c.modFile.ModuleForImportPath(importPath); ok {
+		return ""
+	}
+	return fmt.Sprintf(" (module %s is declared in cue.mod/%s but missing from cue.mod/%s; try running \"cue mod tidy\")", mv.Path(), moduleFile, localModuleFile)
 }
 
 func (c Config) isModRoot(dir string) bool {

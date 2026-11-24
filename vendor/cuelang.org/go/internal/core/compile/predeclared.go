@@ -15,12 +15,26 @@
 package compile
 
 import (
-	"strconv"
+	"strings"
+	"sync"
 
 	"cuelang.org/go/cue/ast"
-	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
 )
+
+// experimentPredeclared resolves identifiers that are predeclared only
+// under an experiment the file enables; it returns nil otherwise, so
+// that files without the experiment keep today's "reference not found"
+// error.
+func (c *compiler) experimentPredeclared(n *ast.Ident) adt.Expr {
+	switch n.Name {
+	case "validator", "__validator":
+		if c.experiments.Functions {
+			return validatorBuiltin
+		}
+	}
+	return nil
+}
 
 func predeclared(n *ast.Ident) adt.Expr {
 	// TODO: consider supporting GraphQL-style names:
@@ -78,112 +92,34 @@ func predeclared(n *ast.Ident) adt.Expr {
 		return testExperiment
 	}
 
-	if r, ok := predefinedRanges[n.Name]; ok {
+	if r := LookupRange(n.Name); r != nil {
 		return r
 	}
 
 	return nil
 }
 
-// LookupRange returns a CUE expressions for the given predeclared identifier
-// representing a range, such as uint8, int128, and float64.
+// LookupRange returns a CUE expression for the given predeclared identifier
+// representing a range, such as uint8, int128, and float64, or nil if there
+// is none. Like other predeclared identifiers, a range may carry a "__" prefix.
 func LookupRange(name string) adt.Expr {
-	return predefinedRanges[name]
+	return predefinedRanges()[strings.TrimPrefix(name, "__")]
 }
 
-var predefinedRanges = map[string]adt.Expr{
-	"rune":  mkIntRange("0", strconv.Itoa(0x10FFFF)),
-	"int8":  mkIntRange("-128", "127"),
-	"int16": mkIntRange("-32768", "32767"),
-	"int32": mkIntRange("-2147483648", "2147483647"),
-	"int64": mkIntRange("-9223372036854775808", "9223372036854775807"),
-	"int128": mkIntRange(
-		"-170141183460469231731687303715884105728",
-		"170141183460469231731687303715884105727"),
-
-	// Do not include an alias for "byte", as it would be too easily confused
-	// with the builtin "bytes".
-	"uint":    mkUint(),
-	"uint8":   mkIntRange("0", "255"),
-	"uint16":  mkIntRange("0", "65535"),
-	"uint32":  mkIntRange("0", "4294967295"),
-	"uint64":  mkIntRange("0", "18446744073709551615"),
-	"uint128": mkIntRange("0", "340282366920938463463374607431768211455"),
-
-	// 2**127 * (2**24 - 1) / 2**23
-	"float32": mkFloatRange(
-		"-3.40282346638528859811704183484516925440e+38",
-		"3.40282346638528859811704183484516925440e+38",
-	),
-	// 2**1023 * (2**53 - 1) / 2**52
-	"float64": mkFloatRange(
-		"-1.797693134862315708145274237317043567981e+308",
-		"1.797693134862315708145274237317043567981e+308",
-	),
+// Predeclared returns the adt expression for a predeclared identifier
+// such as "len", "and", or "int", or nil if name is not predeclared.
+// It is used to reconstruct references to builtins that were resolved
+// at compile time.
+func Predeclared(name string) adt.Expr {
+	return predeclared(&ast.Ident{Name: name})
 }
 
-func init() {
-	for k, v := range predefinedRanges {
-		predefinedRanges["__"+k] = v
+// predefinedRanges returns the expressions for [BuiltinRanges].
+// They are built on first use, as building them is costly at init time.
+var predefinedRanges = sync.OnceValue(func() map[string]adt.Expr {
+	m := make(map[string]adt.Expr)
+	for _, r := range builtinRanges() {
+		m[r.Name] = r.expr()
 	}
-}
-
-// TODO: use an adt.BoundValue here. and conjunctions here.
-
-func mkUint() adt.Expr {
-	from := newBound(adt.GreaterEqualOp, adt.IntKind, parseInt("0"))
-	ident := ast.NewIdent("__int")
-	src := ast.NewBinExpr(token.AND, ident, from.Src)
-	return &adt.Conjunction{
-		Src: src,
-		Values: []adt.Value{
-			&adt.BasicType{Src: ident, K: adt.IntKind}, from,
-		},
-	}
-}
-
-func mkIntRange(a, b string) adt.Expr {
-	from := newBound(adt.GreaterEqualOp, adt.IntKind, parseInt(a))
-	to := newBound(adt.LessEqualOp, adt.IntKind, parseInt(b))
-	ident := ast.NewIdent("__int")
-	src := ast.NewBinExpr(token.AND, ident, from.Src, to.Src)
-	return &adt.Conjunction{
-		Src: src,
-		Values: []adt.Value{
-			&adt.BasicType{Src: ident, K: adt.IntKind}, from, to,
-		},
-	}
-}
-
-func mkFloatRange(a, b string) adt.Expr {
-	from := newBound(adt.GreaterEqualOp, adt.NumberKind, parseFloat(a))
-	to := newBound(adt.LessEqualOp, adt.NumberKind, parseFloat(b))
-	src := ast.NewBinExpr(token.AND, from.Src, to.Src)
-	return &adt.Conjunction{Src: src, Values: []adt.Value{from, to}}
-}
-
-func newBound(op adt.Op, k adt.Kind, v adt.Value) *adt.BoundValue {
-	src := &ast.UnaryExpr{Op: op.Token(), X: v.Source().(ast.Expr)}
-	return &adt.BoundValue{Src: src, Op: op, Value: v}
-}
-
-func parseInt(s string) *adt.Num {
-	n := parseNum(adt.IntKind, s)
-	n.Src = &ast.BasicLit{Kind: token.INT, Value: s}
-	return n
-}
-
-func parseFloat(s string) *adt.Num {
-	n := parseNum(adt.FloatKind, s)
-	n.Src = &ast.BasicLit{Kind: token.FLOAT, Value: s}
-	return n
-}
-
-func parseNum(k adt.Kind, s string) *adt.Num {
-	num := &adt.Num{K: k}
-	_, _, err := num.X.SetString(s)
-	if err != nil {
-		panic(err)
-	}
-	return num
-}
+	return m
+})

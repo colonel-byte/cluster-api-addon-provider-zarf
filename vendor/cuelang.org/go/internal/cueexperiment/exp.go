@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-
-	"cuelang.org/go/internal/cueversion"
 )
 
 // Flags holds the set of global CUE_EXPERIMENT flags. It is initialized by Init.
@@ -21,10 +19,18 @@ type Config struct {
 
 	// FormatV2 selects the Wadler-Lindig pretty-printer as the
 	// implementation behind "cue fmt" and "cue/format".
-	// It only exists from v0.18.0 onwards; v0.17 knows about it solely so that
-	// CUE_EXPERIMENT=formatv2=0 is accepted across both versions. Enabling it
-	// is rejected, as the implementation is not present.
-	FormatV2 bool `experiment:"preview:v0.18.0"`
+	FormatV2 bool `experiment:"preview:v0.18.0,default:v0.18.0"`
+
+	// OpenAPIV2 selects the new whole-document OpenAPI implementation behind
+	// the openapi encoding used by "cue import" and "cue export", extracting
+	// and generating a complete OpenAPI document rather than only its schemas.
+	OpenAPIV2 bool `experiment:"preview:v0.18.0"`
+
+	// YAMLGoccy selects the github.com/goccy/go-yaml based YAML decoder
+	// and encoder. The new decoder retains more precise position and
+	// comment information than the default go.yaml.in/yaml/v3 based
+	// implementation.
+	YAMLGoccy bool `experiment:"preview:v0.18.0"`
 
 	// The flags in this second section describe completed experiments; they can still be set
 	// as long as the value aligns with the final behavior once the experiment finished.
@@ -59,9 +65,8 @@ type Config struct {
 
 	// KeepValidators prevents validators from simplifying into concrete values,
 	// even if their concrete value could be derived, such as '>=1 & <=1' to '1'.
-	// Proposal:     https://cuelang.org/discussion/3775.
-	// Spec change:  https://cuelang.org/cl/1217013
-	// Spec change:  https://cuelang.org/cl/1217014
+	//
+	// Proposal: https://cuelang.org/discussion/3775.
 	KeepValidators bool `experiment:"preview:v0.14.0,default:v0.14.0,stable:v0.15.0"`
 
 	// CmdReferencePkg requires referencing an imported tool package to declare tasks.
@@ -75,13 +80,9 @@ func initExperimentFlags() error {
 	a := strings.Split(os.Getenv("CUE_EXPERIMENT"), ",")
 	experiments, err := parseEnvExperiments(a...)
 	if err != nil {
-		return err
+		return fmt.Errorf("error in CUE_EXPERIMENT: %w", err)
 	}
-
-	// Use this binary's language version rather than an empty version, which
-	// is treated as the newest version and would wrongly allow enabling
-	// experiments that only exist in later CUE versions.
-	if err := parseConfig(&Flags, cueversion.LanguageVersion(), experiments); err != nil {
+	if err := parseConfig(&Flags, "", experiments); err != nil {
 		return fmt.Errorf("error in CUE_EXPERIMENT: %w", err)
 	}
 	return nil
@@ -92,7 +93,17 @@ func initExperimentFlags() error {
 // called when running "cue help"), and also because we want the failure
 // mode to be one of error not panic, which would be the only option if
 // it was a top level init function.
+//
+// TODO: only the cue command reports the error; Go API users such as
+// [cuelang.org/go/cue/cuecontext.New] and [cuelang.org/go/cue/format] ignore it.
 func Init() error {
+	// Read CUE_EXPERIMENT on every call so go test records it as a cache
+	// input. go test only notices an env var read via os.Getenv while a test
+	// runs; the once-guarded read below usually happens at package-init time
+	// (via runtime.New in a package-level var), too early to be seen.
+	//
+	// TODO(mvdan): remove these workarounds if https://go.dev/issue/44625 is fixed
+	os.Getenv("CUE_EXPERIMENT")
 	return initOnce()
 }
 

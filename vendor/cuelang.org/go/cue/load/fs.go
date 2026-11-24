@@ -148,12 +148,14 @@ func newOverlayFS(cfg *Config) (*overlayFileSystem, error) {
 				break
 			}
 			m := fs.getDir(parent, true)
-			if m[base] == nil {
-				m[base] = &overlayFile{
-					basename: base,
-					modtime:  time.Now(),
-					isDir:    true,
-				}
+			if m[base] != nil {
+				// An earlier overlay file already added dir and its parents.
+				break
+			}
+			m[base] = &overlayFile{
+				basename: base,
+				modtime:  time.Now(),
+				isDir:    true,
 			}
 			dir = parent
 		}
@@ -220,18 +222,6 @@ func (fs *overlayFileSystem) stat(path string) (iofs.FileInfo, errors.Error) {
 	return fi, nil
 }
 
-func (fs *overlayFileSystem) lstat(path string) (iofs.FileInfo, errors.Error) {
-	path = fs.makeAbs(path)
-	if fi := fs.getOverlay(path); fi != nil {
-		return fi, nil
-	}
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, errors.Wrapf(err, token.NoPos, "stat")
-	}
-	return fi, nil
-}
-
 func (fs *overlayFileSystem) openFile(path string) (io.ReadCloser, errors.Error) {
 	path = fs.makeAbs(path)
 	if fi := fs.getOverlay(path); fi != nil {
@@ -250,7 +240,9 @@ var skipDir = errors.Newf(token.NoPos, "skip directory")
 type walkFunc func(path string, entry iofs.DirEntry, err errors.Error) errors.Error
 
 func (fs *overlayFileSystem) walk(root string, f walkFunc) error {
-	info, err := fs.lstat(root)
+	// Symlinks below the root are not followed, but the root itself is,
+	// as it may be the current directory reached through a symlink.
+	info, err := fs.stat(root)
 	entry := iofs.FileInfoToDirEntry(info)
 	if err != nil {
 		err = f(root, entry, err)
@@ -443,9 +435,7 @@ func (fs *overlayIOFS) ReadCUEFile(path string, cfg parser.Config) (*ast.File, e
 			return nil, err
 		}
 	}
-	if fs.languageVersion != "" {
-		cfg = cfg.Apply(parser.Version(fs.languageVersion))
-	}
+	cfg = cfg.Apply(parser.Version(fs.languageVersion))
 	return fs.fs.getCUESyntax(&build.File{
 		Filename: fpath,
 		Encoding: build.CUE,
@@ -540,20 +530,45 @@ func (fc *fileCache) getCUESyntax(bf *build.File, cfg parser.Config) (*ast.File,
 			// Repopulate bf.Source so subsequent cache hits still surface
 			// the file's raw bytes to callers, just like a cache miss does.
 			bf.Source = syntax.src
+			setSyntaxFSLoc(syntax.file, bf)
 			return syntax.file, syntax.err
 		}
 	}
 	encodingCfg := fc.config
 	encodingCfg.ParserConfig = cfg
+	encodingCfg.TargetLanguageVersion = cfg.Version
 	d := encoding.NewDecoder(fc.ctx, bf, &encodingCfg)
 	defer d.Close()
 	// Note: CUE files can never have multiple file parts.
+	// The evaluation order matters: File may record an error that only
+	// Err reports afterwards, so File must be evaluated first (Go
+	// evaluates the expressions left to right).
 	f, err := d.File(), d.Err()
 	if useCache {
 		src, _ := bf.Source.([]byte)
 		fc.entries[key] = fileCacheEntry{f, err, src}
 	}
+	setSyntaxFSLoc(f, bf)
 	return f, err
+}
+
+// setSyntaxFSLoc records bf's FS location on the token file underlying f so
+// that positions can be traced back to a file in an [fs.FS], as needed by
+// @embed. Each parser config produces a distinct [token.File] for the same
+// build file, and a cache entry may have been created by a caller without
+// FilenameLoc set, so this must happen on every call, not just cache misses;
+// a token file that already has a location is left untouched.
+func setSyntaxFSLoc(f *ast.File, bf *build.File) {
+	// Note: with no declarations, f.Pos() makes up a throwaway token file.
+	// TODO(https://cuelang.org/issue/4458): give declaration-less files a
+	// persistent token file so that information like this location can be
+	// recorded on it.
+	if f == nil || len(f.Decls) == 0 || bf.FilenameLoc.IsZero() {
+		return
+	}
+	if tokFile := f.Pos().File(); tokFile != nil && tokFile.FSLoc().IsZero() {
+		tokFile.SetFSLoc(bf.FilenameLoc)
+	}
 }
 
 type fileCacheKey struct {

@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/cueexperiment"
 )
 
 // An ErrorHandler is a generic error handler used throughout CUE packages.
@@ -51,6 +52,7 @@ type Scanner struct {
 	spacesSinceLast int
 	insertEOL       bool // insert a comma before next newline
 	nextHasComma    bool // next token was preceded by an explicit comma
+	experiments     *cueexperiment.File
 
 	quoteStack []quoteInfo
 
@@ -86,7 +88,17 @@ func (s *Scanner) next() {
 			// not ASCII
 			r, w = utf8.DecodeRune(s.src[s.rdOffset:])
 			if r == utf8.RuneError && w == 1 {
-				s.errf(s.offset, "illegal UTF-8 encoding")
+				in := s.src[s.rdOffset:]
+				if s.offset == 0 &&
+					len(in) >= 2 &&
+					(in[0] == 0xFF && in[1] == 0xFE || in[0] == 0xFE && in[1] == 0xFF) {
+					// U+FEFF BOM at start of file, encoded as big- or little-endian
+					// UTF-16. Consume all input to avoid an error cascade.
+					s.errf(s.offset, "illegal UTF-8 encoding (got UTF-16)")
+					s.rdOffset += len(in)
+				} else {
+					s.errf(s.offset, "illegal UTF-8 encoding")
+				}
 			} else if r == bom && s.offset > 0 {
 				s.errf(s.offset, "illegal byte order mark")
 			}
@@ -131,17 +143,17 @@ func (s *Scanner) Init(file *token.File, src []byte, eh ErrorHandler, mode Mode)
 	if file.Size() != len(src) {
 		panic(fmt.Sprintf("file size (%d) does not match src len (%d)", file.Size(), len(src)))
 	}
-	s.file = file
-	s.dir, _ = filepath.Split(file.Name())
-	s.src = src
-	s.errh = eh
-	s.mode = mode
+	dir, _ := filepath.Split(file.Name())
 
-	s.ch = ' '
-	s.offset = 0
-	s.rdOffset = 0
-	s.insertEOL = false
-	s.ErrorCount = 0
+	*s = Scanner{
+		file: file,
+		dir:  dir,
+		src:  src,
+		errh: eh,
+		mode: mode,
+
+		ch: ' ',
+	}
 
 	s.next()
 	if s.ch == bom {
@@ -375,6 +387,13 @@ func (s *Scanner) scanEscape(quote quoteInfo) (ok, interpolation bool) {
 
 	offs := s.offset
 
+	// An escaped line terminator in a multiline string.
+	// Leave it for scanString, which tracks line starts.
+	if quote.numChar == 3 && (s.ch == '\n' ||
+		s.ch == '\r' && s.rdOffset < len(s.src) && s.src[s.rdOffset] == '\n') {
+		return true, false
+	}
+
 	var n int
 	var base, max uint32
 	switch s.ch {
@@ -520,7 +539,7 @@ func (s *Scanner) scanString(offs int, quote quoteInfo, continuation bool) (toke
 	if tok == token.STRING && quote.minLineWS != nil {
 		closingWS := s.src[lineStart : s.offset-int(quote.numChar)-quote.numHash]
 		if !bytes.HasPrefix(quote.minLineWS, closingWS) {
-			s.errf(quote.startOffset, "non-matching whitespace for multiline strings")
+			s.errf(quote.startOffset, "non-matching whitespace for multiline string (expected %q, got %q)", closingWS, quote.minLineWS)
 		}
 	}
 	return tok, string(lit)
@@ -690,6 +709,19 @@ func (s *Scanner) ResumeInterpolation() string {
 // Offset returns the current position offset.
 func (s *Scanner) Offset() int {
 	return s.offset
+}
+
+// hiddenScanner allows defining methods in Scanner that are hidden from
+// public documentation.
+type hiddenScanner = Scanner
+
+// NOTE: this is an internal API and may change at any time without notice.
+//
+// SetExperiments sets the active per-file experiments that affect scanning.
+// The parser calls this after parsing the file's leading experiment
+// attributes. Until then, no experiments are active.
+func (s *hiddenScanner) SetExperiments(experiments *cueexperiment.File) {
+	s.experiments = experiments
 }
 
 // Scan scans the next token and returns the token position, the token,
@@ -959,7 +991,12 @@ scanAgain:
 		case '+':
 			tok = token.ADD // Consider ++ for list concatenate.
 		case '-':
-			tok = token.SUB
+			if s.ch == '>' && s.experiments != nil && s.experiments.Functions {
+				s.next()
+				tok = token.RARROW
+			} else {
+				tok = token.SUB
+			}
 		case '*':
 			tok = token.MUL
 		case '/':
@@ -1026,8 +1063,16 @@ scanAgain:
 				tok = token.OR
 			}
 		default:
-			// next reports unexpected BOMs - don't repeat
-			if ch != bom {
+			switch ch {
+			case bom:
+				// next reports unexpected BOMs - don't repeat
+			case '“', '”':
+				// Report an informative error for curly quotation marks,
+				// which are easily introduced via copy and paste.
+				s.errf(s.file.Offset(pos), "curly quotation mark %q (use neutral %q)", ch, '"')
+			case '‘', '’':
+				s.errf(s.file.Offset(pos), "curly quotation mark %q (use neutral %q)", ch, '\'')
+			default:
 				s.errf(s.file.Offset(pos), "illegal character %#U", ch)
 			}
 			insertEOL = s.insertEOL // preserve insertSemi info

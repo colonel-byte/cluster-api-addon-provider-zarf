@@ -93,26 +93,6 @@ type envDisjunct struct {
 	disjuncts []disjunct
 }
 
-func (n *nodeContext) makeError() {
-	code := IncompleteError
-
-	if len(n.disjunctErrs) > 0 {
-		code = EvalError
-		for _, c := range n.disjunctErrs {
-			if c.Code > code {
-				code = c.Code
-			}
-		}
-	}
-
-	b := &Bottom{
-		Code: code,
-		Err:  n.disjunctError(),
-		Node: n.node,
-	}
-	n.node.SetValue(n.ctx, b)
-}
-
 func mode(hasDefault, marked bool) defaultMode {
 	var mode defaultMode
 	switch {
@@ -177,6 +157,10 @@ func combineDefault(a, b defaultMode) defaultMode {
 func (n *nodeContext) disjunctError() errors.Error {
 	ctx := n.ctx
 
+	// TODO: a disjunct with erroneous fields fails with its child error,
+	// which only holds the error of the first one. Report all of them, kept
+	// apart for selectErrors, without slowing down disjunctions which succeed.
+	// See structFields and the tests after it in disjunctions/errors.txtar.
 	disjuncts := selectErrors(n.disjunctErrs)
 	var pos errors.Error
 
@@ -191,22 +175,29 @@ func (n *nodeContext) disjunctError() errors.Error {
 	disjuncts = errors.Sanitize(disjuncts)
 	k := len(errors.Errors(disjuncts))
 	if k == 1 {
-		if pos != nil {
-			addDisjunctPositions(disjuncts.(*ValueError), pos)
-		}
+		addDisjunctPositions(disjuncts, pos)
 		return disjuncts
 	}
 	// prefix '-' to sort to top
+	//
+	// TODO: the error has no position of its own, so an enclosing
+	// disjunction's selectErrors never keeps it. Giving it the node's
+	// position would report the nested failures too, once errors.Append
+	// stops flattening the list into them.
 	err := ctx.Newf("%d errors in empty disjunction:", k)
-	if pos != nil {
-		addDisjunctPositions(err, pos)
-	}
+	addDisjunctPositions(err, pos)
 	return errors.Append(err, disjuncts)
 }
 
-func addDisjunctPositions(dst *ValueError, src errors.Error) {
+// addDisjunctPositions adds the positions of src to dst, if any. dst may wrap
+// the ValueError holding the positions, as a builtin wraps what it propagates.
+func addDisjunctPositions(dst, src errors.Error) {
+	var v *ValueError
+	if src == nil || !errors.As(dst, &v) {
+		return
+	}
 	for _, p := range src.InputPositions() {
-		dst.AddPos(p)
+		v.AddPos(p)
 	}
 }
 
@@ -233,25 +224,58 @@ func selectErrors(a []*Bottom) (errs errors.Error) {
 	}
 	a = a[:k]
 
-	// filter errors
-	positions := map[token.Pos]bool{}
-
-	add := func(b *Bottom, p token.Pos) bool {
-		if positions[p] {
-			return false
+	// Keep an error only where it contributes something new: a position
+	// no kept error has, or, for a single error, a message no error kept at
+	// that position has. Disjuncts which fail the same way at one place
+	// are thus reported once, while those which fail differently, even
+	// sharing every position, are all reported. A list of errors, as a
+	// failed nested disjunction reports, has no message of its own and is
+	// selected by position alone; built without a position of its own,
+	// such a list is not kept, so the errors of a disjunction are reported
+	// without the cascade of nested failures behind one of its disjuncts.
+	// Messages are rendered only where positions collide, as rendering is
+	// costly and the result is often discarded.
+	type kept struct {
+		err   errors.Error
+		msg   string // rendered on demand; empty for a list of errors
+		known bool
+	}
+	message := func(k *kept) string {
+		if !k.known {
+			k.known = true
+			if len(errors.Errors(k.err)) == 1 {
+				k.msg = k.err.Error()
+			}
 		}
-		positions[p] = true
-		errs = errors.Append(errs, b.Err)
+		return k.msg
+	}
+	seen := map[token.Pos][]*kept{}
+
+	add := func(k *kept, p token.Pos) bool {
+		others := seen[p]
+		if len(others) > 0 || !p.IsValid() {
+			msg := message(k)
+			if msg == "" {
+				return false
+			}
+			for _, o := range others {
+				if message(o) == msg {
+					return false
+				}
+			}
+		}
+		seen[p] = append(others, k)
+		errs = errors.Append(errs, k.err)
 		return true
 	}
 
 	for _, b := range a {
-		// TODO: Should we also distinguish by message type?
-		if add(b, b.Err.Position()) {
+		k := &kept{err: b.Err}
+		if add(k, b.Err.Position()) {
 			continue
 		}
 		for _, p := range b.Err.InputPositions() {
-			if add(b, p) {
+			if add(k, p) {
 				break
 			}
 		}

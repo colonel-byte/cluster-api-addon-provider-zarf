@@ -17,7 +17,7 @@ package adt
 import (
 	"bytes"
 	"fmt"
-	"html/template"
+	"html"
 	"io"
 	"log"
 	"os"
@@ -27,28 +27,13 @@ import (
 	"strings"
 )
 
-// RecordDebugGraph records debug output in ctx if there was an anomaly
-// discovered.
-func RecordDebugGraph(ctx *OpContext, v *Vertex, name string) {
-	graph, hasError := CreateMermaidGraph(ctx, v, true)
-	if hasError {
-		if ctx.ErrorGraphs == nil {
-			ctx.ErrorGraphs = map[string]string{}
-		}
-		path := ctx.PathToString(v.Path())
-		ctx.ErrorGraphs[path] = graph
-	}
-}
-
 var (
-	// DebugDeps enables dependency tracking for debugging purposes.
-	// It is off by default, as it adds a significant overhead.
-	//
-	// TODO: hook this init CUE_DEBUG, once we have set this up as a single
-	// environment variable. For instance, CUE_DEBUG=matchdeps=1.
-	DebugDeps = false
-
 	OpenGraphs = false
+
+	// GraphDir is the directory under which the debug graphs are written.
+	// Tests set it to [testing.TB.ArtifactDir]; pass "go test -artifacts -v"
+	// to keep the graphs once the test ends and to log where they went.
+	GraphDir = ".debug"
 
 	// MaxGraphs is the maximum number of debug graphs to be opened. To avoid
 	// confusion, a panic will be raised if this number is exceeded.
@@ -80,23 +65,11 @@ func OpenNodeGraph(title, path, code, out, graph string) {
 	}
 	defer w.Close()
 
-	data := struct {
-		Title string
-		Code  string
-		Out   string
-		Graph string
-	}{
-		Title: title,
-		Code:  code,
-		Out:   out,
-		Graph: graph,
-	}
-
-	tmpl := template.Must(template.New("").Parse(`
+	_, err = fmt.Fprintf(w, `
 	<!DOCTYPE html>
 	<html>
 	<head>
-		<title>{{.Title}}</title>
+		<title>%s</title>
 		<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 		<script>mermaid.initialize({startOnLoad:true});</script>
 		<style>
@@ -109,26 +82,25 @@ func OpenNodeGraph(title, path, code, out, graph string) {
 				display: flex;
 				flex-direction: row;
 			}
-			// ...
 		</style>
 	</head>
 	<body>
-		<div class="mermaid">{{.Graph}}</div>
+		<div class="mermaid">%s</div>
 		<div class="row">
 			<div class="column">
 				<h1><b>Input</b></h1>
-				<pre>{{.Code}}</pre>
+				<pre>%s</pre>
 			</div>
 			<div class="column">
 				<h1><b>Output</b></h1>
-				<pre>{{.Out}}</pre>
+				<pre>%s</pre>
 			</div>
 		</div>
 	</body>
 	</html>
-`))
-
-	err = tmpl.Execute(w, data)
+`,
+		html.EscapeString(title), html.EscapeString(graph),
+		html.EscapeString(code), html.EscapeString(out))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -144,8 +116,8 @@ func openDebugGraph(ctx *OpContext, v *Vertex, name string) {
 	if !OpenGraphs {
 		return
 	}
-	graph, _ := CreateMermaidGraph(ctx, v, true)
-	path := filepath.Join(".debug", "TestX", name, fmt.Sprintf("%v", v.Path()))
+	graph := CreateMermaidGraph(ctx, v)
+	path := filepath.Join(GraphDir, name, fmt.Sprintf("%v", v.Path()))
 	OpenNodeGraph(name, path, "in", "out", graph)
 }
 
@@ -153,10 +125,6 @@ func openDebugGraph(ctx *OpContext, v *Vertex, name string) {
 type mermaidContext struct {
 	ctx *OpContext
 	v   *Vertex
-
-	all bool
-
-	hasError bool
 
 	// roots maps a Vertex to the analysis data for that Vertex.
 	roots map[*Vertex]*mermaidVertex
@@ -179,7 +147,7 @@ type mermaidVertex struct {
 
 // CreateMermaidGraph creates an analysis of relations and values involved in
 // nodes with unbalanced increments. The graph is in Mermaid format.
-func CreateMermaidGraph(ctx *OpContext, v *Vertex, all bool) (graph string, hasError bool) {
+func CreateMermaidGraph(ctx *OpContext, v *Vertex) string {
 	buf := &strings.Builder{}
 
 	m := &mermaidContext{
@@ -187,7 +155,6 @@ func CreateMermaidGraph(ctx *OpContext, v *Vertex, all bool) (graph string, hasE
 		v:     v,
 		roots: map[*Vertex]*mermaidVertex{},
 		w:     buf,
-		all:   all,
 	}
 
 	io.WriteString(m.w, "graph TD\n")
@@ -221,9 +188,7 @@ func CreateMermaidGraph(ctx *OpContext, v *Vertex, all bool) (graph string, hasE
 		m.w.Write(v.w.Bytes())
 	}
 
-	s := buf.String()
-
-	return s, m.hasError
+	return buf.String()
 }
 
 // vertex creates a blob of Mermaid graph representing one vertex. It has
@@ -282,10 +247,10 @@ func (m *mermaidContext) vertex(v *Vertex, recursive bool) *mermaidVertex {
 	switch {
 	case v.Status() == finalized:
 		status = "finalized"
-	case v.state == nil:
+	case v.state == nil || !v.state.running:
 		status = "ready"
 	default:
-		status = v.state.scheduler.state.String()
+		status = "running"
 	}
 	path := m.vertexPath(v)
 	if v.ArcType != ArcMember {

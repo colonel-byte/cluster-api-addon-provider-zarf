@@ -53,8 +53,7 @@ type Cursor interface {
 
 	// Replace replaces the current Node with n.
 	// The replacement node is not walked by Apply. Comments of the old node
-	// are copied to the new node if it has not yet an comments associated
-	// with it.
+	// are moved to the new node if it has no comments of its own.
 	Replace(n ast.Node)
 
 	// Delete deletes the current Node from its containing struct.
@@ -105,7 +104,6 @@ type cursor struct {
 	node     ast.Node
 	typ      interface{} // the type of the node
 	index    int         // position of any of the sub types.
-	replaced bool
 	modified bool
 }
 
@@ -166,14 +164,15 @@ func (c *cursor) Import(importPath string) *ast.Ident {
 func (c *cursor) Replace(n ast.Node) {
 	// panic if the value cannot convert to the original type.
 	reflect.ValueOf(n).Convert(reflect.TypeOf(c.typ).Elem())
-	if ast.Comments(n) != nil {
-		CopyComments(n, c.node)
-	}
 	c.modified = true
 	if r, ok := n.(recursive); ok {
 		n = r.Node
-	} else {
-		c.replaced = true
+	}
+	if old := c.node; len(ast.Comments(n)) == 0 {
+		// The old node may stay in the tree, as when n wraps it;
+		// the comments must not be attached to both.
+		CopyComments(n, old)
+		ast.SetComments(old, nil)
 	}
 	c.node = n
 }
@@ -222,13 +221,11 @@ func Apply(node ast.Node, before, after func(Cursor) bool) ast.Node {
 // A applyVisitor's Before method is invoked for each node encountered by Walk.
 // If the result applyVisitor w is true, Walk visits each of the children
 // of node with the applyVisitor w, followed by a call of w.After.
-// The Mapping method is used to record changes to values that affect
-// Ident.Node and Ident.Scope fields.
-// TODO: currently, Mapping is only used to record Field.Value changes. Track
-// more changes in the future.
+// The Mapping method records a node which was replaced by another, so that
+// identifiers bound to the old node are bound to the new one.
 type applyVisitor interface {
 	Before(Cursor) applyVisitor
-	After(Cursor) bool
+	After(Cursor)
 	Mapping(before, after ast.Node)
 }
 
@@ -276,6 +273,9 @@ func applyDeclList(v applyVisitor, parent Cursor, list []ast.Decl) []ast.Decl {
 		c.typ = &list[i]
 		applyCursor(v, c)
 		if !c.delete {
+			if ast.Node(x) != c.node {
+				v.Mapping(x, c.node)
+			}
 			c.decls = append(c.decls, c.node.(ast.Decl))
 		}
 		c.delete = false
@@ -317,19 +317,14 @@ func applyDeclList(v applyVisitor, parent Cursor, list []ast.Decl) []ast.Decl {
 	return c.decls
 }
 
-type nilableNode interface {
-	ast.Node
-	comparable // pointer nodes, which can be compared to nil
-}
-
-func applyIfNotNil[N nilableNode](v applyVisitor, parent Cursor, nodePtr *N) {
+func applyIfNotNil[N ast.NilableNode](v applyVisitor, parent Cursor, nodePtr *N) {
 	var zero N // nil
 	if *nodePtr != zero {
 		apply(v, parent, nodePtr)
 	}
 }
 
-func apply[N nilableNode](v applyVisitor, parent Cursor, nodePtr *N) {
+func apply[N ast.NilableNode](v applyVisitor, parent Cursor, nodePtr *N) {
 	node := *nodePtr
 	var zero N // nil
 	if node == zero {
@@ -341,22 +336,28 @@ func apply[N nilableNode](v applyVisitor, parent Cursor, nodePtr *N) {
 		parent.self().modified = true
 	}
 	if ast.Node(node) != c.node {
+		v.Mapping(node, c.node)
 		*nodePtr = c.node.(N)
 	}
 }
 
-func applyList[N ast.Node](v applyVisitor, parent Cursor, list []N) {
+func applyList[N ast.NilableNode](v applyVisitor, parent Cursor, list []N) {
 	c := newCursor(parent, nil, nil)
+	var zero N // nil
 	for i, node := range list {
+		if node == zero {
+			continue
+		}
 		c.index = i
 		c.node = node
+		c.typ = &list[i]
+		applyCursor(v, c)
 		if c.modified {
 			parent.self().modified = true
 			c.modified = false
 		}
-		c.typ = &list[i]
-		applyCursor(v, c)
 		if ast.Node(node) != c.node {
+			v.Mapping(node, c.node)
 			list[i] = c.node.(N)
 		}
 	}
@@ -399,6 +400,14 @@ func applyCursor(v applyVisitor, c Cursor) {
 		apply(v, c, &n.Label)
 		applyIfNotNil(v, c, &n.Alias)
 		applyIfNotNil(v, c, &n.Value)
+		applyIfNotNil(v, c, &n.Default)
+		applyList(v, c, n.Attrs)
+
+	case *ast.FuncParam:
+		applyIfNotNil(v, c, &n.Label)
+		applyIfNotNil(v, c, &n.Alias)
+		applyIfNotNil(v, c, &n.Value)
+		applyIfNotNil(v, c, &n.Default)
 		applyList(v, c, n.Attrs)
 
 	case *ast.StructLit:
@@ -416,6 +425,20 @@ func applyCursor(v applyVisitor, c Cursor) {
 
 	case *ast.Ellipsis:
 		applyIfNotNil(v, c, &n.Type)
+
+	case *ast.Func:
+		// Rewrite the nodes actually present in the AST rather than the
+		// synthesized view of [ast.Func.Parameters], whose discriminator
+		// between the two signature styles this condition mirrors.
+		//lint:ignore SA1019 still walk ASTs that only set the legacy Args
+		args := n.Args
+		if len(n.Params) > 0 || len(args) == 0 {
+			applyList(v, c, n.Params)
+		} else {
+			applyList(v, c, args)
+		}
+		applyIfNotNil(v, c, &n.Ret)
+		applyIfNotNil(v, c, &n.Body)
 
 	case *ast.ParenExpr:
 		apply(v, c, &n.X)
@@ -435,6 +458,7 @@ func applyCursor(v applyVisitor, c Cursor) {
 
 	case *ast.CallExpr:
 		apply(v, c, &n.Fun)
+		applyList(v, c, n.ArgLabels)
 		applyList(v, c, n.Args)
 
 	case *ast.UnaryExpr:
@@ -507,6 +531,7 @@ func applyCursor(v applyVisitor, c Cursor) {
 	}
 
 	v.After(c)
+	// The value of a field may also be changed in place.
 	if f, ok := node.(*ast.Field); ok && beforeValue != f.Value {
 		v.Mapping(beforeValue, f.Value)
 	}
@@ -516,8 +541,8 @@ type applier struct {
 	before func(Cursor) bool
 	after  func(Cursor) bool
 
-	commentStack []commentFrame
-	current      commentFrame
+	// stopped is set once after returns false; no more nodes are visited.
+	stopped bool
 
 	fieldValueMap map[ast.Node]ast.Node
 }
@@ -529,55 +554,19 @@ func (f *applier) Mapping(before, after ast.Node) {
 	f.fieldValueMap[before] = after
 }
 
-type commentFrame struct {
-	cg  []*ast.CommentGroup
-	pos int8
-}
-
 func (f *applier) Before(c Cursor) applyVisitor {
+	if f.stopped {
+		return nil
+	}
 	node := c.Node()
 	if f.before == nil || (f.before(c) && node == c.Node()) {
-		f.commentStack = append(f.commentStack, f.current)
-		f.current = commentFrame{cg: ast.Comments(node)}
-		f.visitComments(c, f.current.pos)
 		return f
 	}
 	return nil
 }
 
-func (f *applier) After(c Cursor) bool {
-	f.visitComments(c, 127)
-	p := len(f.commentStack) - 1
-	f.current = f.commentStack[p]
-	f.commentStack = f.commentStack[:p]
-	f.current.pos++
-	if f.after != nil {
-		f.after(c)
-	}
-	return true
-}
-
-func (f *applier) visitComments(p Cursor, pos int8) {
-	c := &f.current
-	for i, cg := range c.cg {
-		if cg.Position == pos {
-			continue
-		}
-		cursor := newCursor(p, cg, cg)
-		if f.before == nil || (f.before(cursor) && !cursor.replaced) {
-			for j, c := range cg.List {
-				cursor := newCursor(p, c, &c)
-				if f.before == nil || (f.before(cursor) && !cursor.replaced) {
-					if f.after != nil {
-						f.after(cursor)
-					}
-				}
-				cg.List[j] = cursor.node.(*ast.Comment)
-			}
-			if f.after != nil {
-				f.after(cursor)
-			}
-		}
-		c.cg[i] = cursor.node.(*ast.CommentGroup)
+func (f *applier) After(c Cursor) {
+	if !f.stopped && f.after != nil {
+		f.stopped = !f.after(c)
 	}
 }

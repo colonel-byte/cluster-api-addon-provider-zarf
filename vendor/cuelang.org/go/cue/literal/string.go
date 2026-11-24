@@ -305,7 +305,7 @@ func isSimple(s string, quote rune) bool {
 	// faster than converting to code points. At the very least there should
 	// be an ASCII fast path.
 	for _, r := range s {
-		if r == quote || r == '\\' || r == 0 || r == utf8.RuneError {
+		if r == quote || r == '\\' || r == '\r' || r == 0 || r == utf8.RuneError {
 			return false
 		}
 		if surHigh <= r && r < surEnd {
@@ -342,6 +342,10 @@ const (
 // is not permitted in the output.
 func unquoteChar(s string, info QuoteInfo) (value rune, multibyte bool, tail string, err error) {
 	// easy cases
+	if len(s) == 0 {
+		err = errSyntax
+		return
+	}
 	switch c := s[0]; {
 	case c == info.char && info.char != 0:
 		for i := 1; byte(i) < info.numChar; i++ {

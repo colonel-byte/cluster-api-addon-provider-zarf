@@ -16,10 +16,10 @@ package adt
 
 import (
 	"fmt"
-	"iter"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unicode/utf8"
 
@@ -60,29 +60,26 @@ type Runtime interface {
 	// ConfigureOpCtx configures the [*OpContext] with details such as
 	// evaluator version, debug options etc.
 	ConfigureOpCtx(ctx *OpContext)
-}
 
-type Config struct {
-	Runtime
-	Format func(Runtime, Node) string
+	// FormatNode prints n for use in errors or debugging.
+	FormatNode(n Node) string
 }
 
 var contextGeneration atomic.Uint64
 
-// New creates an operation context.
-func New(v *Vertex, cfg *Config) *OpContext {
-	if cfg.Runtime == nil {
+// NewContext creates an operation context.
+func NewContext(r Runtime, v *Vertex) *OpContext {
+	if r == nil {
 		panic("nil Runtime")
 	}
 
 	ctx := &OpContext{
 		opID:        contextGeneration.Add(1),
-		Runtime:     cfg.Runtime,
-		Format:      cfg.Format,
+		Runtime:     r,
 		vertex:      v,
 		taskContext: schedConfig,
 	}
-	cfg.Runtime.ConfigureOpCtx(ctx)
+	r.ConfigureOpCtx(ctx)
 	ctx.stats.EvalVersion = ctx.Version
 	if v != nil {
 		ctx.e = &Environment{Up: nil, Vertex: v}
@@ -93,8 +90,10 @@ func New(v *Vertex, cfg *Config) *OpContext {
 	return ctx
 }
 
-func (c *OpContext) isDevVersion() bool {
-	return c.Version == internal.DevVersion
+// IsValidator reports whether the context is being evaluated
+// as part of a validator function call.
+func (c *OpContext) IsValidator() bool {
+	return c.isValidator
 }
 
 // An OpContext holds context associated with an on-going CUE
@@ -129,7 +128,6 @@ func (c *OpContext) isDevVersion() bool {
 // errors and vertex to be restored.
 type OpContext struct {
 	Runtime
-	Format func(Runtime, Node) string
 
 	cuedebug.Config
 	Version internal.EvaluatorVersion // Copied from Runtime
@@ -142,6 +140,18 @@ type OpContext struct {
 	nextDefID          defID           // next available defID
 	containments       []containment   // parent relations
 	containsDefIDCache map[uint64]bool // cache for containsDefID results
+
+	// containsDefIDVisited is scratch space for [nodeContext.containsDefIDRec]:
+	// the replacement sources it has already explored within a single
+	// [nodeContext.containsDefID] call. The buffer is reused across calls.
+	//
+	// It holds at most one entry per replaceID of the node, and that count
+	// stays small: the largest seen across the test corpus is single digits,
+	// and [nodeContext.containsDefID] treats more than 15 as unusual enough
+	// to memoize. A linear search is therefore cheaper than hashing. If
+	// the lengths ever grow, the slice can be kept sorted and searched with
+	// binary search instead.
+	containsDefIDVisited []defID
 
 	// [token.Pos] interning for containments to reduce memory usage,
 	// given that millions of elements in [OpContext.containments]
@@ -158,6 +168,81 @@ type OpContext struct {
 
 	e  *Environment
 	ci CloseInfo
+
+	// funcAnchors caches the stable anchor vertex for each native CUE
+	// function literal, keyed by literal and closure environment (see
+	// [envKey] for what identifies an environment). Reusing it across
+	// (recursive) calls lets the regular structural cycle detector observe
+	// recursion. See [OpContext.funcAnchor].
+	funcAnchors map[funcAnchorKey]*Vertex
+
+	// funcCallRefs caches the stable reference to an anchor vertex for each
+	// call site, keyed by call expression and anchor vertex. A
+	// per-call-site reference keeps the (vertex, source-reference) distinction
+	// the structural cycle detector relies on, so that recursion (same call
+	// site) is a cycle while nesting (distinct call sites) is not. Each entry
+	// holds one reference per set of signature constraints of the called
+	// value. See [OpContext.funcCallRef].
+	funcCallRefs map[funcCallRefKey][]*FuncCallRef
+
+	// funcCallResults memoizes the finalized, error-free result vertices of
+	// native CUE function calls, keyed by call site and the caller
+	// environment in which its arguments resolve. A call's result is fully
+	// determined by that pair and the callee, so a parameter used N times in
+	// a body — or a call nested as an argument and consumed once per use of
+	// the enclosing parameter — re-dispatches the same call instead of
+	// rebuilding the activation and re-finalizing the body each time.
+	// Without this the work of deeply nested calls (e.g. twice(twice(...)))
+	// grows exponentially in the nesting depth.
+	//
+	// Only finalized, error-free results are stored: a call still in progress
+	// (in particular one re-entered through recursion, which the structural
+	// cycle detector must observe on the shared anchor) has no entry, so
+	// memoization never short-circuits cycle detection. See
+	// [funcCallResultKey], [funcCallResult] and [FuncValue.call].
+	funcCallResults map[funcCallResultKey][]funcCallResult
+
+	// anonParamLabels caches the labels of the synthetic activation arcs
+	// that bind the arguments of anonymous positional function parameters,
+	// indexed by parameter position. See [anonParamLabel].
+	anonParamLabels []Feature
+
+	// admission holds what one outermost declared-compatibility comparison
+	// has established about the structs and lists it reached. See
+	// [OpContext.admits].
+	admission *admissionMemo
+
+	// capturesCompared records the comparisons of the values that two
+	// closures of one literal capture that are in progress, and dataPairs the
+	// outcome of comparing each pair of captured vertices as data. See
+	// [OpContext.sameCaptures].
+	capturesCompared map[captureKey]bool
+	dataPairs        map[[2]*Vertex]bool
+
+	// funcTypeDepth counts the function types being compared as parameters
+	// or results of other function types, which bounds that recursion. See
+	// [OpContext.funcTypeAdmits].
+	funcTypeDepth int
+
+	// funcTypePairs records the outcome of each pair of function types
+	// compared during one outermost comparison, and funcTypeActive the pairs
+	// of literals being compared, which a nested comparison of the same
+	// literals takes to admit. See [OpContext.funcTypeAdmits].
+	funcTypePairs  map[[2]FuncType]bool
+	funcTypeActive map[[2]*Function]bool
+
+	// checkingDefaults tracks the function literals, per closure, whose
+	// declared parameter defaults are being checked against their constraints
+	// (see [Function.checkDefaults]). The check runs outside any call, so a
+	// default that calls the function itself would re-enter it; re-entry for
+	// a closure already on this set leaves the check undone, and the call
+	// that omits the parameter reports the cycle.
+	checkingDefaults map[funcAnchorKey]bool
+
+	// funcDefaultsChecked records the closures whose parameter defaults have
+	// been checked (see [Function.checkDefaults]), so that the check runs
+	// once per closure.
+	funcDefaultsChecked map[funcAnchorKey]bool
 
 	// Source node associated with the CUE operation, if any.
 	// When nil, created nodes like [Bool] may use sentinels to avoid allocations.
@@ -189,6 +274,7 @@ type OpContext struct {
 	// allocating new inlined vertices. Only nodes within the current scope can
 	// refer to any values allocated within an inline node, which means it is
 	// safe to reuse the nodeContext when all values have been processed.
+	// Values yielded by comprehensions are an exception; see [Vertex.escapes].
 	//
 	// TODO(mem): we can mark Vertex nodes as being used in sharing and then
 	// free them too if they are not used.
@@ -232,16 +318,12 @@ type OpContext struct {
 	// is wrapped in an internal.ValidationError, it will only be interpreted
 	// as an error if this is true.
 	// TODO: strictly separate validators and functions.
-	IsValidator bool
+	isValidator bool
 
 	overlays []overlayFrame
 
 	// ==== Debugging ====
 	logID int // sequence number for log messages
-
-	// ErrorGraphs contains an analysis, represented as a Mermaid graph, for
-	// each node that has an error.
-	ErrorGraphs map[string]string
 
 	currentDisjunctionID int // sequence number for call to processDisjunctions
 
@@ -259,8 +341,7 @@ type OpContext struct {
 	importInstances map[*Vertex]*Vertex
 }
 
-func (c *OpContext) CloseInfo() CloseInfo         { return c.ci }
-func (c *OpContext) UpdateCloseInfo(ci CloseInfo) { c.ci = ci }
+func (c *OpContext) CloseInfo() CloseInfo { return c.ci }
 
 func (c *OpContext) Pos() token.Pos {
 	if c.src == nil {
@@ -271,11 +352,6 @@ func (c *OpContext) Pos() token.Pos {
 
 func (c *OpContext) Source() ast.Node {
 	return c.src
-}
-
-// NewContext creates an operation context.
-func NewContext(r Runtime, v *Vertex) *OpContext {
-	return New(v, &Config{Runtime: r})
 }
 
 func (c *OpContext) pos() token.Pos {
@@ -301,7 +377,12 @@ func (c *OpContext) Env(upCount int32) *Environment {
 }
 
 func (c *OpContext) relNode(upCount int32) *Vertex {
-	e := c.e.up(c, upCount)
+	return c.derefNode(c.e.up(c, upCount))
+}
+
+// derefNode returns the dereferenced vertex of e, ensuring it is at least
+// partially evaluated.
+func (c *OpContext) derefNode(e *Environment) *Vertex {
 	v := e.DerefVertex(c)
 	c.unify(v, Flags{
 		status:    partial,
@@ -427,7 +508,16 @@ func (c *OpContext) PushState(env *Environment, src ast.Node) (saved frame) {
 	return saved
 }
 
-func (c *OpContext) PushConjunct(x Conjunct) (saved frame) {
+func (c *OpContext) PopState(s frame) *Bottom {
+	err := c.errs
+	c.e = s.env
+	c.errs = s.err
+	c.src = s.src
+	c.ci = s.ci
+	return err
+}
+
+func (c *OpContext) pushConjunct(x Conjunct) (saved frame) {
 	src := x.Expr().Source()
 
 	saved.env = c.e
@@ -445,14 +535,8 @@ func (c *OpContext) PushConjunct(x Conjunct) (saved frame) {
 	return saved
 }
 
-// PopState restores a state pushed by [OpContext.PushState].
-func (c *OpContext) PopState(s frame) *Bottom {
-	err := c.errs
-	c.e = s.env
-	c.errs = s.err
-	c.src = s.src
-	c.ci = s.ci
-	return err
+func (c *OpContext) popConjunct(s frame) *Bottom {
+	return c.PopState(s)
 }
 
 // PushArc signals c that arc v is currently being processed for the purpose
@@ -502,7 +586,7 @@ func (c *OpContext) Resolve(x Conjunct, r Resolver) (v *Vertex, b *Bottom) {
 }
 
 func (c *OpContext) resolveState(x Conjunct, r Resolver, state Flags) (*Vertex, *Bottom) {
-	s := c.PushConjunct(x)
+	s := c.pushConjunct(x)
 
 	arc := r.resolve(c, state)
 
@@ -600,10 +684,25 @@ func (c *OpContext) concrete(env *Environment, x Expr, msg interface{}) (result 
 // error and return false. In all other cases it will return true, even if
 // v is already an error. v may be nil, in which case it will also return nil.
 func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
+	w, d := resolveDefault(v)
+	if d != nil {
+		c.addErrf(IncompleteError, c.pos(),
+			"unresolved disjunction %v (type %s)", d, d.Kind())
+		return nil, false
+	}
+	return w, true
+}
+
+// resolveDefault resolves a disjunction to a single value, following default
+// values through nested disjunctions and vertices. If v does not resolve to a
+// single value, it returns the unresolved disjunction instead. It implements
+// both [OpContext.getDefault] and [unresolvedDisjunction], which must agree
+// on this traversal.
+func resolveDefault(v Value) (result Value, unresolved *Disjunction) {
 	var d *Disjunction
 	switch x := v.(type) {
 	default:
-		return v, true
+		return v, nil
 
 	case *Vertex:
 		// TODO: return vertex if not disjunction.
@@ -612,10 +711,10 @@ func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
 			d = t
 
 		case *Vertex:
-			return c.getDefault(t)
+			return resolveDefault(t)
 
 		default:
-			return x, true
+			return x, nil
 		}
 
 	case *Disjunction:
@@ -623,11 +722,9 @@ func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
 	}
 
 	if d.NumDefaults != 1 {
-		c.addErrf(IncompleteError, c.pos(),
-			"unresolved disjunction %v (type %s)", d, d.Kind())
-		return nil, false
+		return nil, d
 	}
-	return c.getDefault(d.Values[0])
+	return resolveDefault(d.Values[0])
 }
 
 // Evaluate evaluates an expression within the given environment and indicates
@@ -694,6 +791,64 @@ func (c *OpContext) value(x Expr, state Flags) (result Value) {
 	v, _ = c.getDefault(v)
 	v = Unwrap(v)
 	return v
+}
+
+// valueOrDisjunction is like [OpContext.value], except that a value which
+// holds a disjunction is returned as that [Disjunction], defaults and all,
+// instead of being resolved to its default or reported as ambiguous. It
+// evaluates the arguments of builtins marked [Builtin.PerDisjunct].
+func (c *OpContext) valueOrDisjunction(x Expr, state Flags) Value {
+	state.concrete = true
+	return c.disjunctionOrDefault(c.evalState(x, state))
+}
+
+// closedArg evaluates an argument of a builtin marked [Builtin.Closes]. It
+// is like [OpContext.valueOrDisjunction], except that a reference to a
+// vertex whose evaluation is incomplete is returned as that vertex rather
+// than as its error: the vertex's conjuncts are evaluated again where the
+// result of the call is unified, as they are for a plain reference there.
+func (c *OpContext) closedArg(x Expr, state Flags) Value {
+	state.concrete = true
+	_, isRef := x.(Resolver)
+	state.keepIncomplete = isRef
+	v := c.evalState(x, state)
+	if isRef && isIncompleteVertex(v) {
+		return v
+	}
+	return c.disjunctionOrDefault(v)
+}
+
+// disjunctionOrDefault returns the disjunction v holds, defaults and all,
+// or otherwise its default, unwrapped.
+func (c *OpContext) disjunctionOrDefault(v Value) Value {
+	if d := disjunctionOf(v); d != nil {
+		return d
+	}
+	v, _ = c.getDefault(v)
+	return Unwrap(v)
+}
+
+// isIncompleteVertex reports whether v is a vertex whose evaluation is
+// incomplete, such as a struct with a comprehension that reads a field
+// which is not yet concrete.
+func isIncompleteVertex(v Value) bool {
+	x, ok := v.(*Vertex)
+	if !ok {
+		return false
+	}
+	b := x.Bottom()
+	return b != nil && b.IsIncomplete()
+}
+
+// disjunctionOf returns the disjunction v holds, looking through vertices
+// whose value is another vertex, or nil if v is not a disjunction.
+func disjunctionOf(v Value) *Disjunction {
+	if x, ok := v.(*Vertex); ok {
+		d, _ := x.DerefValue().BaseValue.(*Disjunction)
+		return d
+	}
+	d, _ := v.(*Disjunction)
+	return d
 }
 
 func (c *OpContext) evalState(v Expr, state Flags) (result Value) {
@@ -765,13 +920,6 @@ func (c *OpContext) evalStateCI(v Expr, state Flags) (result Value, ci CloseInfo
 		if arc == nil {
 			return nil, c.ci
 		}
-		// TODO(3977): register internal nodes for later verifications. The
-		// following limits the possibility of some common and useful cycles.
-		//
-		// if arc.Internal() {
-		//  mode := state.conditions()
-		//  state = final(partial, mode|allTasksCompleted)
-		// }
 		orig := arc
 		// TODO(deref): what is the right level of dereferencing here?
 		// DerefValue seems to work too.
@@ -791,7 +939,7 @@ func (c *OpContext) evalStateCI(v Expr, state Flags) (result Value, ci CloseInfo
 			switch runMode {
 			case finalize:
 				arc.unify(c, Flags{condition: needs, mode: attemptOnly, checkTypos: true}) // to set scalar
-				s.freeze(needs)
+				s.freeze(needs, x)
 			case attemptOnly:
 				arc.unify(c, Flags{condition: needs, mode: attemptOnly, checkTypos: true}) // to set scalar
 
@@ -846,9 +994,11 @@ func (c *OpContext) evalStateCI(v Expr, state Flags) (result Value, ci CloseInfo
 
 				v := c.evaluate(arc, x, state)
 
-				if arc.nonRooted && !allTasksFinished(s) {
-					if t := c.current(); t != nil {
-						t.node.deferred = append(t.node.deferred, s)
+				// A dynamic vertex itself is completed by whatever
+				// created it.
+				if arc.Internal() && !arc.IsDynamic && !allTasksFinished(s) {
+					if n := c.rootedTaskNode(); n != nil {
+						n.scheduleTask(handleDeferred, nil, arc, CloseInfo{})
 					}
 				}
 
@@ -893,6 +1043,10 @@ func (c *OpContext) unifyNode(expr Expr, state Flags) (result Value) {
 
 		if v, ok := result.(*Vertex); ok {
 			if b := v.Bottom(); b != nil && !b.IsIncomplete() {
+				// TODO: a child error only holds the error of the first
+				// erroneous child of v. Report all of them, without
+				// validating v again for every reference to it.
+				// See erroneousFields in references/errors.txtar.
 				result = b
 			}
 		}
@@ -938,32 +1092,44 @@ func (c *OpContext) unifyNode(expr Expr, state Flags) (result Value) {
 	if v == nil {
 		return nil
 	}
+	// Processing v may make it share a vertex not processed yet, which the
+	// lookup then reads in its place. Process that vertex too, rather than
+	// unifying v to reach it: the lookup must count as non-cyclic structure
+	// on the vertex it reads.
 	v = v.DerefValue()
-
-	// TODO: is this indirect necessary?
-	// v = v.Indirect()
-
-	if n := v.getState(c); n != nil {
-		defer n.retainProcess().releaseProcess()
-
-		// A lookup counts as new structure. See the commend in Section
-		// "Lookups in inline cycles" in cycle.go.
-		if !c.ci.IsCyclic() {
-			n.hasNonCycle = true
+	for {
+		c.processRef(v)
+		w := v.DerefValue()
+		if w == v {
+			return v
 		}
+		v = w
+	}
+}
 
-		// Always yield to not get spurious errors.
-		n.process(arcTypeKnown|fieldSetKnown, yield)
-		// It is possible that the node is only midway through
-		// evaluating a disjunction. In this case, we want to ensure
-		// that disjunctions are finalized, so that disjunction shows
-		// up in BaseValue.
-		if len(n.disjuncts) > 0 {
-			n.node.unify(c, Flags{condition: arcTypeKnown | fieldSetKnown, mode: yield, checkTypos: false})
-		}
+// processRef evaluates v far enough for a reference to it to be resolved.
+func (c *OpContext) processRef(v *Vertex) {
+	n := v.getState(c)
+	if n == nil {
+		return
+	}
+	defer n.retainProcess().releaseProcess()
+
+	// A lookup counts as new structure. See the comment in Section
+	// "Lookups in inline cycles" in cycle.go.
+	if !c.ci.IsCyclic() {
+		n.hasNonCycle = true
 	}
 
-	return v
+	// Always yield to not get spurious errors.
+	n.process(arcTypeKnown|fieldSetKnown, yield)
+	// It is possible that the node is only midway through
+	// evaluating a disjunction. In this case, we want to ensure
+	// that disjunctions are finalized, so that disjunction shows
+	// up in BaseValue.
+	if len(n.disjuncts) > 0 {
+		n.node.unify(c, Flags{condition: arcTypeKnown | fieldSetKnown, mode: yield, checkTypos: false})
+	}
 }
 
 func (c *OpContext) lookup(x *Vertex, pos token.Pos, l Feature, flags Flags) *Vertex {
@@ -1081,7 +1247,7 @@ func (c *OpContext) node(orig Node, x Expr, scalar bool, state Flags) *Vertex {
 		// to a lookup in an unevaluated node, resulting in erroneously failing
 		// lookups.
 		if nv.nonRooted {
-			nv.CompleteArcsOnly(c)
+			nv.CompleteArcsShallow(c)
 		}
 	default:
 		if kind := v.Kind(); kind&StructKind != 0 {
@@ -1100,20 +1266,19 @@ func (c *OpContext) node(orig Node, x Expr, scalar bool, state Flags) *Vertex {
 	return node
 }
 
-// Elems returns the evaluated elements of a list.
-func (c *OpContext) Elems(v Value) iter.Seq[*Vertex] {
-	list := c.list(v)
+// List returns the list value v with its elements evaluated.
+//
+// Iterate over the elements with [Vertex.Elems] rather than returning an
+// iterator from here: only a method small enough to inline lets the compiler
+// keep the loop's closures on the stack.
+func (c *OpContext) List(v Value) *Vertex {
+	list := c.RawList(v)
 	list.Finalize(c)
-	return list.Elems()
+	return list
 }
 
-// RawElems returns the elements of the list without evaluating them.
-func (c *OpContext) RawElems(v Value) iter.Seq[*Vertex] {
-	list := c.list(v)
-	return list.Elems()
-}
-
-func (c *OpContext) list(v Value) *Vertex {
+// RawList is like [OpContext.List] but does not evaluate the elements.
+func (c *OpContext) RawList(v Value) *Vertex {
 	if v != nil {
 		if a, ok := c.getDefault(v); ok {
 			v = a
@@ -1142,31 +1307,13 @@ func (c *OpContext) Num(v Value, as interface{}) *Num {
 	return x
 }
 
-func (c *OpContext) Int64(v Value) int64 {
-	v = Unwrap(v)
-	if isError(v) {
-		return 0
-	}
-	x, ok := v.(*Num)
-	if !ok {
-		c.typeError(v, IntKind)
-		return 0
-	}
-	i, err := x.X.Int64()
-	if err != nil {
-		c.AddErrf("number is not an int64: %v", err)
-		return 0
-	}
-	return i
-}
-
 func (c *OpContext) uint64(v Value, as string) uint64 {
 	v = Unwrap(v)
 	if isError(v) {
 		return 0
 	}
 	x, ok := v.(*Num)
-	if !ok {
+	if !ok || x.K != IntKind {
 		c.typeErrorAs(v, IntKind, as)
 		return 0
 	}
@@ -1175,12 +1322,13 @@ func (c *OpContext) uint64(v Value, as string) uint64 {
 		c.AddErrf("cannot convert negative number to uint64")
 		return 0
 	}
-	if !x.X.Coeff.IsUint64() {
+	i, ok := x.Uint64()
+	if !ok {
 		// TODO: improve message
 		c.AddErrf("cannot convert number %s to uint64", &x.X)
 		return 0
 	}
-	return x.X.Coeff.Uint64()
+	return i
 }
 
 func (c *OpContext) BoolValue(v Value) bool {
@@ -1275,7 +1423,9 @@ func (c *OpContext) bytesValue(v Value, as interface{}) []byte {
 	return x.B
 }
 
-var matchNone = regexp.MustCompile("^$")
+var matchNone = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile("^$")
+})
 
 // regexpCache caches compiled regular expressions by pattern string.
 // Uses weak references so unused patterns can be garbage collected.
@@ -1289,7 +1439,7 @@ var regexpCache = newMemoizer(func(pattern string) (*regexp.Regexp, error) {
 func (c *OpContext) regexp(v Value) *regexp.Regexp {
 	v = Unwrap(v)
 	if isError(v) {
-		return matchNone
+		return matchNone()
 	}
 	var pattern string
 	switch x := v.(type) {
@@ -1299,23 +1449,14 @@ func (c *OpContext) regexp(v Value) *regexp.Regexp {
 		pattern = string(x.B)
 	default:
 		c.typeError(v, StringKind|BytesKind)
-		return matchNone
+		return matchNone()
 	}
 	re, err := regexpCache.get(pattern)
 	if err != nil {
 		c.AddErrf("invalid regexp: %s", err)
-		return matchNone
+		return matchNone()
 	}
 	return re
-}
-
-// newNum creates a new number of the given kind. It reports an error value
-// instead if any error occurred.
-func (c *OpContext) newNum(d *apd.Decimal, k Kind, sources ...Node) Value {
-	if c.HasErr() {
-		return c.Err()
-	}
-	return &Num{Src: c.src, X: *d, K: k}
 }
 
 func (c *OpContext) NewInt64(n int64, sources ...Node) Value {
@@ -1363,17 +1504,15 @@ func (c *OpContext) NewBool(b bool) Value {
 	return &Bool{Src: c.src, B: b}
 }
 
-func (c *OpContext) newList(src ast.Node, parent *Vertex) *Vertex {
-	return c.newInlineVertex(parent, &ListMarker{})
-}
-
 // String reports a string of x, for use in errors or debugging.
 // Use [OpContext.Str] instead for %s format arguments, as it delays the work.
 func (c *OpContext) String(x Node) string {
-	if c.Format == nil {
-		return fmt.Sprintf("%T", x)
-	}
-	return c.Format(c.Runtime, x)
+	return c.FormatNode(x)
+}
+
+// Str reports a string of x via a [fmt.Stringer], for use in errors or debugging.
+func (c *OpContext) Str(x Node) fmt.Stringer {
+	return Formatter{X: x, R: c.Runtime}
 }
 
 // Formatter wraps an adt.Node with the necessary information to print it.
@@ -1387,21 +1526,11 @@ func (c *OpContext) String(x Node) string {
 type Formatter struct {
 	X Node
 
-	// F formats Node, resolving references as needed.using Runtime.
-	// TODO: only used for cases where the debug printer is somehow
-	// circumvented. Verify this no longer happens.
-	F func(Runtime, Node) string
-
 	// TODO: is runtime needed? Probably not if we have a global string index.
 	R Runtime
 }
 
-func (f Formatter) String() string { return f.F(f.R, f.X) }
-
-// Str reports a string of x via a [fmt.Stringer], for use in errors or debugging.
-func (c *OpContext) Str(x Node) fmt.Stringer {
-	return Formatter{X: x, F: c.Format, R: c.Runtime}
-}
+func (f Formatter) String() string { return f.R.FormatNode(f.X) }
 
 // NewList returns a new list for the given values.
 func (c *OpContext) NewList(values ...Value) *Vertex {

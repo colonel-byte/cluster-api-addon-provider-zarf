@@ -7,7 +7,7 @@
 //	// Run executes a program with the given arguments.
 //	Run: {
 //		$id: _id
-//		_id: *"tool/exec.Run" | "exec" // exec for backwards compatibility
+//		_id: "tool/exec.Run"
 //
 //		// cmd is a non-empty list holding the program name to run
 //		// and the arguments to be passed to it.
@@ -46,6 +46,7 @@
 //
 //		// mustSucceed indicates whether a command must succeed, in which case success==false results in a fatal error.
 //		// This option is enabled by default, but may be disabled to control what is done when a command execution fails.
+//		// The fatal error includes any captured stderr.
 //		mustSucceed: bool | *true
 //	}
 package exec
@@ -63,18 +64,17 @@ var _ = adt.TopKind // in case the adt package isn't used
 
 var p = &pkg.Package{
 	Native: []*pkg.Builtin{},
-	CUE: `{
-	Run: {
-		$id: _id
-		_id: *"tool/exec.Run" | "exec"
-		cmd: string | [string, ...string]
-		dir?: string
-		env: *{[string]: string} | [...=~"="]
-		stdout:      *null | string | bytes
-		stderr:      *null | string | bytes
-		stdin:       *null | string | bytes
-		success:     bool
-		mustSucceed: bool | *true
-	}
+	CUE: `
+Run: {
+	$id:         _id
+	_id:         "tool/exec.Run"
+	cmd:         string | [string, ...string]
+	dir?:        string
+	env:         *{[string]: string} | [...=~"="]
+	stdout:      *null | string | bytes
+	stderr:      *null | string | bytes
+	stdin:       *null | string | bytes
+	success:     bool
+	mustSucceed: bool | *true
 }`,
 }

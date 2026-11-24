@@ -95,7 +95,7 @@ func (l *loader) importPkg(pos token.Pos, p *build.Instance) []*build.Instance {
 	var dirs [][2]string
 	genDir := genPath(cfg.ModuleRoot, cfg.pathOS)
 	pDir := fsDir(cfg, p)
-	if strings.HasPrefix(pDir, genDir) {
+	if hasFilepathPrefix(pDir, genDir, cfg.pathOS) {
 		dirs = append(dirs, [2]string{genDir, pDir})
 		// && p.PkgName != "_"
 		for _, sub := range []string{"pkg", "usr"} {
@@ -172,6 +172,8 @@ func (l *loader) importPkg(pos token.Pos, p *build.Instance) []*build.Instance {
 					added = true
 				}
 			}
+			// isModRoot stops a dependency's walk at its own module root,
+			// which is not below d[0], the main module's root.
 			if p.PkgName == "" || !inModule || l.cfg.isModRoot(dir) || dir == d[0] || (firstDir && !added) {
 				break
 			}
@@ -182,7 +184,7 @@ func (l *loader) importPkg(pos token.Pos, p *build.Instance) []*build.Instance {
 
 			parent := pkgpath.Dir(dir, cfg.pathOS)
 
-			if parent == dir || len(parent) < len(d[0]) {
+			if parent == dir {
 				break
 			}
 			dir = parent
@@ -210,11 +212,16 @@ func (l *loader) importPkg(pos token.Pos, p *build.Instance) []*build.Instance {
 			continue
 		}
 		all = append(all, p)
-		rewriteFiles(p, cfg.ModuleRoot, false, cfg.pathOS)
+		// Instances for packages in dependency modules already have their
+		// own module root; the rest belong to the main module.
+		if p.Root == "" {
+			p.Root = cfg.ModuleRoot
+		}
+		rewriteFiles(p, cfg.pathOS)
 		setFSLoc(cfg, p)
 		if errs := fp.finalize(p); errs != nil {
 			p.ReportError(errs)
-			return all
+			continue
 		}
 
 		l.addFiles(p)
@@ -329,7 +336,7 @@ func (l *loader) newRelInstance(pos token.Pos, path, pkgName string) *build.Inst
 			"non-canonical import path: %q should be %q", path, pathpkg.Clean(path)))
 	}
 
-	dir := pkgpath.Join([]string{l.cfg.Dir, pkgpath.FromSlash(path, l.cfg.pathOS)}, l.cfg.pathOS)
+	dir := l.cfg.absPath(path)
 	if pkgPath, e := importPathFromAbsDir(l.cfg, dir, path); e != nil {
 		// Detect later to keep error messages consistent.
 	} else {
@@ -367,10 +374,11 @@ func importPathFromAbsDir(c *Config, absDir string, origPath string) (importPath
 	}
 
 	absDir = pkgpath.Clean(absDir, c.pathOS)
-	subdir, ok := strings.CutPrefix(absDir, c.ModuleRoot)
-	if !ok {
+	root := pkgpath.Clean(c.ModuleRoot, c.pathOS)
+	if !hasFilepathPrefix(absDir, root, c.pathOS) {
 		return "", fmt.Errorf("cannot determine import path for %q (dir outside of root)", origPath)
 	}
+	subdir := absDir[len(root):]
 
 	pkg := pkgpath.ToSlash(subdir, c.pathOS)
 	if pkg != "" && !strings.HasPrefix(pkg, "/") {
@@ -391,7 +399,6 @@ func importPathFromAbsDir(c *Config, absDir string, origPath string) (importPath
 		// Reject directories that are inside a nested module (a subdirectory
 		// containing its own cue.mod/module.cue). Such a directory belongs to
 		// a different module and is not part of c.Module.
-		root := pkgpath.Clean(c.ModuleRoot, c.pathOS)
 		for dir := absDir; dir != root; dir = pkgpath.Dir(dir, c.pathOS) {
 			modCue := pkgpath.Join([]string{dir, modDir, moduleFile}, c.pathOS)
 			if _, err := c.fileSystem.stat(modCue); err == nil {
@@ -427,7 +434,7 @@ func (l *loader) newInstance(pos token.Pos, p importPath) *build.Instance {
 	if err1 != nil {
 		i.Err = errors.Append(i.Err, errors.Promote(err1, ""))
 	}
-	root, err1 := l.absPathForSourceLoc(modRoot, l.cfg.pathOS, mv)
+	root, err1 := l.absPathForSourceLoc(modRoot)
 	if err1 != nil {
 		i.Err = errors.Append(i.Err, errors.Promote(err1, ""))
 	} else {
@@ -494,12 +501,12 @@ func (l *loader) absDirFromImportPath1(pos token.Pos, p importPath) (absDir stri
 	// should we not be using either the original path or the canonical path?
 	// The unqualified import path should only be used for filepath.FromSlash further below.
 	if pkg == nil {
-		return failf("no dependency found for package %q", unqualified)
+		return failf("no dependency found for package %q%s", unqualified, l.cfg.localModuleHint(string(p)))
 	}
 	if err := pkg.Error(); err != nil {
-		return failf("cannot find package %q: %v", unqualified, err)
+		return failf("cannot find package %q: %v%s", unqualified, err, l.cfg.localModuleHint(string(p)))
 	}
-	if mv := pkg.Mod(); mv.IsLocal() {
+	if pkg.Mod().IsLocal() {
 		// It's a local package that's present inside one or both of the gen, usr or pkg
 		// directories. Even though modpkgload tells us exactly what those directories
 		// are, the rest of the cue/load logic expects only a single directory for now,
@@ -514,7 +521,7 @@ func (l *loader) absDirFromImportPath1(pos token.Pos, p importPath) (absDir stri
 			return failf("no location found for package %q", unqualified)
 		}
 		var err error
-		absDir, err = l.absPathForSourceLoc(locs[0], l.cfg.pathOS, mv)
+		absDir, err = l.absPathForSourceLoc(locs[0])
 		if err != nil {
 			return failf("cannot determine source directory for package %q: %v", unqualified, err)
 		}
@@ -522,20 +529,13 @@ func (l *loader) absDirFromImportPath1(pos token.Pos, p importPath) (absDir stri
 	return absDir, pkg.Mod(), pkg.ModRoot(), nil
 }
 
-func (l *loader) absPathForSourceLoc(loc module.SourceLoc, os pkgpath.OS, fromModule module.Version) (string, error) {
-	if l.cfg.FS != nil {
-		if l.cfg.modFile != nil && fromModule.Path() == l.cfg.modFile.QualifiedModule() {
-			// It's a path in the main module and files are coming from [Config.FS].
-			// Join with ModuleRoot to make the path absolute within the FS namespace.
-			// Note: FromFSPath is not applied here because this path is used for
-			// FS lookups, not for display purposes.
-			return pkgpath.Join([]string{l.cfg.ModuleRoot, loc.Dir}, os), nil
-		}
-		if repl, ok := l.cfg.replacements.Lookup(fromModule.Path()); ok && repl.Dir != "" {
-			// It's a directory replacement within [Config.FS].
-			// The replacement directory path is absolute within the FS namespace.
-			return pkgpath.Join([]string{repl.Dir, loc.Dir}, os), nil
-		}
+func (l *loader) absPathForSourceLoc(loc module.SourceLoc) (string, error) {
+	os := l.cfg.pathOS
+	if fsys, ok := loc.FS.(*fsIOFS); ok {
+		// Files from [Config.FS]; the root is absolute within its namespace.
+		// Note: FromFSPath is not applied here because this path is used for
+		// FS lookups, not for display purposes.
+		return pkgpath.Join([]string{fsys.root, loc.Dir}, os), nil
 	}
 	osfs, ok := loc.FS.(module.OSRootFS)
 	if !ok {
@@ -548,36 +548,49 @@ func (l *loader) absPathForSourceLoc(loc module.SourceLoc, os pkgpath.OS, fromMo
 	return pkgpath.Join([]string{osPath, loc.Dir}, os), nil
 }
 
+// canonicalImportPath returns the canonical form of an import path found in
+// the main module. Beyond dropping a redundant package qualifier, it adds the
+// major version of the dependency module that provides the package, as
+// selected by the main module's default major versions, when the path omits
+// it. This is the same form that [modpkgload.Package.CanonicalImportPath]
+// produces for imports in dependency modules, so that a package shares one
+// build instance regardless of how each importer spells its path.
+func (l *loader) canonicalImportPath(importPath string) string {
+	ip := ast.ParseImportPath(importPath).Canonical()
+	if ip.Version != "" {
+		return ip.String()
+	}
+	pkg := l.pkgs.Pkg(ip.String())
+	if pkg == nil || pkg.Error() != nil {
+		return ip.String()
+	}
+	// Packages in the main module and in the local cue.mod directories have
+	// no version to add; neither do packages that could not be resolved.
+	ip.Version = semver.Major(pkg.Mod().Version())
+	return ip.String()
+}
+
 // setCanonicalImportPath sets a CanonicalImportPath function on the build instance.
 // This handles two kinds of canonicalization:
-//   - For external module packages, rewriting unversioned imports to include
-//     the correct major version based on the importing module's defaults.
+//   - Rewriting unversioned imports to include the correct major version:
+//     for external module packages, based on the importing module's own
+//     defaults; for main module packages, based on the main module's.
 //   - For all packages, rewriting imports that reference a replacement module's
 //     namespace back to the original module's namespace.
 func (l *loader) setCanonicalImportPath(p *build.Instance) {
 	if l.pkgs == nil {
 		return
 	}
-	parts := ast.ParseImportPath(p.ImportPath)
-	mpkg := l.pkgs.Pkg(parts.Canonical().String())
-
-	var externalCanonical func(string) string
-	if mpkg != nil && mpkg.FromExternalModule() {
-		externalCanonical = mpkg.CanonicalImportPath
+	canonical := l.canonicalImportPath
+	if mpkg := l.pkgs.Pkg(ast.ParseImportPath(p.ImportPath).Canonical().String()); mpkg != nil && mpkg.FromExternalModule() {
+		canonical = mpkg.CanonicalImportPath
 	}
 	repls := l.cfg.replacements
-
-	if externalCanonical == nil && repls == nil {
-		return
-	}
 	p.CanonicalImportPath = func(importPath string) string {
 		if repls != nil {
 			importPath = repls.CanonicalImportPath(importPath)
 		}
-		if externalCanonical != nil {
-			importPath = externalCanonical(importPath)
-		}
-		return importPath
+		return canonical(importPath)
 	}
 }
 

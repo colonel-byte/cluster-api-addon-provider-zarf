@@ -31,6 +31,7 @@ import (
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/errors"
+	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/parser"
 	"cuelang.org/go/cue/token"
@@ -76,12 +77,8 @@ func (s *Extractor) parse(filename string, src interface{}) (p *protoConverter, 
 	defer func() {
 		switch x := recover().(type) {
 		case nil:
-		case protoError:
-			err = &protobufError{
-				path: p.path,
-				pos:  p.toCUEPos(x.pos),
-				err:  x.error,
-			}
+		case *protobufError:
+			err = x
 		default:
 			panic(x)
 		}
@@ -100,7 +97,7 @@ func (s *Extractor) parse(filename string, src interface{}) (p *protoConverter, 
 			if x.Name == "go_package" {
 				str, err := strconv.Unquote(x.Constant.SourceRepresentation())
 				if err != nil {
-					failf(x.Position, "unquoting package filed: %v", err)
+					p.failf(x.Position, "unquoting package filed: %v", err)
 				}
 				split := strings.Split(str, ";")
 				switch {
@@ -112,14 +109,14 @@ func (s *Extractor) parse(filename string, src interface{}) (p *protoConverter, 
 					case 2:
 						p.shortPkgName = split[1]
 					default:
-						failf(x.Position, "unexpected ';' in %q", str)
+						p.failf(x.Position, "unexpected ';' in %q", str)
 					}
 
 				case len(split) == 1:
 					p.shortPkgName = split[0]
 
 				default:
-					failf(x.Position, "malformed go_package clause %s", str)
+					p.failf(x.Position, "malformed go_package clause %s", str)
 				}
 				// name.AddComment(comment(x.Comment, true))
 				// name.AddComment(comment(x.InlineComment, false))
@@ -146,7 +143,59 @@ func (s *Extractor) parse(filename string, src interface{}) (p *protoConverter, 
 
 	err = astutil.Sanitize(p.file)
 
+	// Some labels, like enum values, are generated quoted;
+	// the rewrites of format.Simplify unquote those which can be identifiers.
+	format.ASTStyle{Labels: true, InlineStructs: true, Ellipsis: true}.Apply(p.file)
+
+	dropLeadingStructSection(p.file)
+
 	return p, err
+}
+
+// dropLeadingStructSection removes the leading NewSection that the
+// message and enum converters attach (via addComments / a label
+// position) to separate a decl from its predecessor, when that decl
+// is the first element of its struct body. With no predecessor the
+// separation would render as a blank line right after the opening
+// brace. The proto element index that normally drives the separation
+// does not always line up with the CUE element index - a leading
+// proto comment or option shifts it - so the correction is done
+// structurally here over the finished AST. Struct bodies only: a
+// file's first top-level message legitimately keeps its blank line
+// after the imports.
+func dropLeadingStructSection(f *ast.File) {
+	ast.Walk(f, func(n ast.Node) bool {
+		s, ok := n.(*ast.StructLit)
+		if !ok {
+			return true
+		}
+		for _, d := range s.Elts {
+			if _, isComment := d.(*ast.CommentGroup); isComment {
+				continue
+			}
+			clampLeadingNewSection(d)
+			break
+		}
+		return true
+	}, nil)
+}
+
+// clampLeadingNewSection lowers d's leading NewSection - on its first
+// doc comment if it has one, otherwise on its own position - to a
+// plain Newline, leaving weaker positions untouched.
+func clampLeadingNewSection(d ast.Decl) {
+	for _, cg := range ast.Comments(d) {
+		if cg.Position != 0 {
+			continue
+		}
+		if len(cg.List) > 0 && cg.List[0].Slash.RelPos() == token.NewSection {
+			cg.List[0].Slash = token.Newline.Pos()
+		}
+		return
+	}
+	if d.Pos().RelPos() == token.NewSection {
+		ast.SetRelPos(d, token.Newline)
+	}
 }
 
 // A protoConverter converts a proto definition to CUE. Proto files map to
@@ -211,7 +260,7 @@ func (p *protoConverter) toCUEPos(pos scanner.Position) token.Pos {
 func (p *protoConverter) addRef(pos scanner.Position, name string, cue func() ast.Expr) {
 	top := p.scope[len(p.scope)-1]
 	if _, ok := top[name]; ok {
-		failf(pos, "entity %q already defined", name)
+		p.failf(pos, "entity %q already defined", name)
 	}
 	top[name] = mapping{cue: cue}
 }
@@ -309,7 +358,7 @@ func (p *protoConverter) resolveUsingScopes(pos scanner.Position, name string, s
 			return expr
 		}
 	}
-	failf(pos, "name %q not found", name)
+	p.failf(pos, "name %q not found", name)
 	return nil
 }
 
@@ -337,11 +386,16 @@ func (p *protoConverter) doImport(v *proto.Import) error {
 
 	imp, err := p.state.parse(filename, nil)
 	if err != nil {
-		fail(v.Position, err)
+		p.fail(v.Position, err)
 	}
 
-	pkgNamespace := strings.Split(imp.protoPkg, ".")
-	curNamespace := strings.Split(p.protoPkg, ".")
+	var pkgNamespace, curNamespace []string
+	if imp.protoPkg != "" {
+		pkgNamespace = strings.Split(imp.protoPkg, ".")
+	}
+	if p.protoPkg != "" {
+		curNamespace = strings.Split(p.protoPkg, ".")
+	}
 	for {
 		for k := range imp.symbols {
 			ref := k
@@ -448,7 +502,7 @@ func (p *protoConverter) topElement(v proto.Visitee) {
 		// no need to handle
 
 	default:
-		failf(scanner.Position{}, "unsupported type %T", x)
+		p.failf(scanner.Position{}, "unsupported type %T", x)
 	}
 }
 
@@ -531,7 +585,7 @@ func (p *protoConverter) messageField(s *ast.StructLit, i int, v proto.Visitee) 
 		}
 		addComments(f, i, x.Comment, x.InlineComment)
 
-		o := optionParser{message: s, field: f}
+		o := optionParser{conv: p, message: s, field: f}
 		o.tags = fmt.Sprintf(`%d,map[%s]%s`, x.Sequence, x.KeyType, x.Type)
 		if x.Name != name.Name {
 			o.tags += "," + x.Name
@@ -566,7 +620,7 @@ func (p *protoConverter) messageField(s *ast.StructLit, i int, v proto.Visitee) 
 		s.Elts = append(s.Elts, attr)
 
 	default:
-		failf(scanner.Position{}, "unsupported field type %T", v)
+		p.failf(scanner.Position{}, "unsupported field type %T", v)
 	}
 }
 
@@ -590,8 +644,14 @@ func (p *protoConverter) messageField(s *ast.StructLit, i int, v proto.Visitee) 
 // will be prefixed with the name of its parent and an underscore.
 func (p *protoConverter) enum(x *proto.Enum) {
 
-	if len(x.Elements) == 0 {
-		failf(x.Position, "empty enum")
+	numEnums := 0
+	for _, v := range x.Elements {
+		if _, ok := v.(*proto.EnumField); ok {
+			numEnums++
+		}
+	}
+	if numEnums == 0 {
+		p.failf(x.Position, "empty enum")
 	}
 
 	name := p.subref(x.Position, x.Name)
@@ -624,13 +684,6 @@ func (p *protoConverter) enum(x *proto.Enum) {
 		panic(name.Name)
 	}
 	p.addDecl(enum)
-
-	numEnums := 0
-	for _, v := range x.Elements {
-		if _, ok := v.(*proto.EnumField); ok {
-			numEnums++
-		}
-	}
 
 	lastSingle := false
 
@@ -762,7 +815,7 @@ func (p *protoConverter) parseField(s *ast.StructLit, i int, x *proto.Field) *as
 	f.Value = typ
 	s.Elts = append(s.Elts, f)
 
-	o := optionParser{message: s, field: f}
+	o := optionParser{conv: p, message: s, field: f}
 
 	// body of @protobuf tag: sequence,type[,name=<name>][,...]
 	o.tags += fmt.Sprintf("%v,%s", x.Sequence, x.Type)
@@ -779,6 +832,7 @@ func (p *protoConverter) parseField(s *ast.StructLit, i int, x *proto.Field) *as
 }
 
 type optionParser struct {
+	conv     *protoConverter
 	message  *ast.StructLit
 	field    *ast.Field
 	required bool
@@ -800,7 +854,7 @@ func (p *optionParser) parse(options []*proto.Option) {
 			// TODO: set filename and base offset.
 			expr, err := parser.ParseExpr("", o.Constant.Source)
 			if err != nil {
-				failf(o.Position, "invalid cue.val value: %v", err)
+				p.conv.failf(o.Position, "invalid cue.val value: %v", err)
 			}
 			// Any further checks will be done at the end.
 			constraint := &ast.Field{Label: p.field.Label, Value: expr}

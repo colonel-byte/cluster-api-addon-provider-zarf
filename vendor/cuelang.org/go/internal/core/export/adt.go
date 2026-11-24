@@ -61,14 +61,14 @@ func (e *exporter) adt(env *adt.Environment, expr adt.Elem) ast.Expr {
 		env := &adt.Environment{Up: env, Vertex: e.node()}
 
 		for _, d := range x.Decls {
-			var a *ast.Alias
+			var aliasName string
 			if orig, ok := d.Source().(*ast.Field); ok {
 				if alias, ok := orig.Value.(*ast.Alias); ok {
 					if e.valueAlias == nil {
-						e.valueAlias = map[*ast.Alias]*ast.Alias{}
+						e.valueAlias = map[*ast.Alias]string{}
 					}
-					a = &ast.Alias{Ident: ast.NewIdent(alias.Ident.Name)}
-					e.valueAlias[alias] = a
+					aliasName = alias.Ident.Name
+					e.valueAlias[alias] = aliasName
 				}
 			}
 			decl := e.decl(env, d)
@@ -80,15 +80,14 @@ func (e *exporter) adt(env *adt.Environment, expr adt.Elem) ast.Expr {
 			}
 
 			if e.cfg.ShowDocs {
-				ast.SetComments(decl, filterDocs(ast.Comments(d.Source())))
+				ast.SetComments(decl, leadingDocComments(ast.Comments(d.Source())))
 			}
 			// TODO: use e.copyMeta for positions, but only when the original
 			// source is available.
 
-			if a != nil {
+			if aliasName != "" {
 				if f, ok := decl.(*ast.Field); ok {
-					a.Expr = f.Value
-					f.Value = a
+					f.Value = e.bindValueAlias(aliasName, f.Value)
 				}
 			}
 
@@ -113,22 +112,13 @@ func (e *exporter) adt(env *adt.Environment, expr adt.Elem) ast.Expr {
 			// additional constraint is evaluated by itself.
 			return ast.NewIdent("string")
 		}
-		list, ok := f.field.Label.(*ast.ListLit)
-		if !ok || len(list.Elts) != 1 {
-			panic("label reference to non-pattern constraint field or invalid list")
-		}
-		name := ""
-		if a, ok := list.Elts[0].(*ast.Alias); ok {
-			name = a.Ident.Name
-		} else {
+		name, ok := labelAliasName(f.field)
+		if !ok {
 			if x.Src != nil {
 				name = x.Src.Name
 			}
 			name = e.uniqueAlias(name)
-			list.Elts[0] = &ast.Alias{
-				Ident: ast.NewIdent(name),
-				Expr:  list.Elts[0],
-			}
+			e.setLabelAlias(f.field, name)
 		}
 		ident := ast.NewIdent(name)
 		ident.Scope = f.field
@@ -237,6 +227,9 @@ func (e *exporter) adt(env *adt.Environment, expr adt.Elem) ast.Expr {
 			Op: token.ELLIPSIS,
 		}
 
+	case *adt.Function:
+		return e.funcSrc(x.Src)
+
 	case *adt.BinaryExpr:
 		if x.Op == adt.AndOp || x.Op == adt.OrOp {
 			return e.sortBinaryTree(env, x)
@@ -249,16 +242,31 @@ func (e *exporter) adt(env *adt.Environment, expr adt.Elem) ast.Expr {
 
 	case *adt.CallExpr:
 		a := []ast.Expr{}
+		labels := []ast.Label(nil)
 		for _, arg := range x.Args {
 			v := e.innerExpr(env, arg)
 			if v == nil {
-				e.innerExpr(env, arg)
-				panic("")
+				panic(fmt.Sprintf("cannot export call argument %T", arg))
 			}
 			a = append(a, v)
 		}
+		if x.ArgLabels != nil {
+			labels = make([]ast.Label, len(x.ArgLabels))
+			for i, label := range x.ArgLabels {
+				if label != adt.InvalidLabel {
+					labels[i] = ast.NewIdent(label.IdentString(e.ctx))
+				}
+			}
+		}
 		fun := e.innerExpr(env, x.Fun)
-		return &ast.CallExpr{Fun: fun, Args: a}
+		call := &ast.CallExpr{Fun: fun, Args: a, ArgLabels: labels}
+		if x.Partial {
+			// The position is synthetic, but must be set for the
+			// formatter to render the "..." marking the partial
+			// application.
+			call.Ellipsis = token.Blank.Pos()
+		}
+		return call
 
 	case *adt.DisjunctionExpr:
 		a := []ast.Expr{}
@@ -388,11 +396,19 @@ func (e *exporter) resolve(env *adt.Environment, r adt.Resolver) ast.Expr {
 		// Special case when the original CUE already had an alias.
 		if x.Src != nil {
 			if f, ok := x.Src.Node.(*ast.Field); ok {
-				if entry, ok := e.fieldAlias[f]; ok {
-					ident := ast.NewIdent(aliasFromLabel(f))
-					ident.Node = entry.field
-					ident.Scope = entry.scope
+				if field, scope := e.lookupFieldAlias(f); field != nil {
+					name, _ := valueAliasName(field)
+					ident := ast.NewIdent(name)
+					ident.Node = field
+					ident.Scope = scope
 					return wrapIfOptional(ident, x.Optional)
+				}
+				// The field is not exported with its alias, such as when
+				// exporting the arcs of a value. Its label may be shadowed
+				// at the reference, so keep the alias, which fails to
+				// resolve rather than silently binding to another field.
+				if name, ok := valueAliasName(f); ok {
+					return wrapIfOptional(ast.NewIdent(name), x.Optional)
 				}
 			}
 		}
@@ -425,35 +441,25 @@ func (e *exporter) resolve(env *adt.Environment, r adt.Resolver) ast.Expr {
 		name := x.Label.IdentString(e.ctx)
 		if a, ok := x.Src.Node.(*ast.Alias); ok { // Should always pass
 			if b, ok := e.valueAlias[a]; ok {
-				name = b.Ident.Name
+				name = b
 			}
 		}
 		ident := ast.NewIdent(name)
 		return ident
 
 	case *adt.DynamicReference:
-		// TODO(unshadow): ensure we correctly unshadow newly visible fields.
-		//   before uncommenting this.
-		// if v := x.EvaluateLabel(e.ctx, env); v != 0 {
-		// 	str := v.StringValue(e.ctx)
-		// 	if ast.IsValidIdent(str) {
-		// 		label := e.ctx.StringLabel(str)
-		// 		ident, ok := e.newIdentForField(x.Src, label, x.UpCount)
-		// 		if ok {
-		// 			return ident
-		// 		}
-		// 	}
-		// }
-
 		name := "X"
 		if x.Src != nil {
 			name = x.Src.Name
 		}
+		// The innermost dynamic field with the alias is the one referenced.
 		var f *ast.Field
+	stack:
 		for i := len(e.stack) - 1; i >= 0; i-- {
 			for _, entry := range e.stack[i].dynamicFields {
 				if entry.alias == name {
 					f = entry.field
+					break stack
 				}
 			}
 		}
@@ -485,6 +491,18 @@ func (e *exporter) resolve(env *adt.Environment, r adt.Resolver) ast.Expr {
 
 	case *adt.LetReference:
 		return e.resolveLet(env, x)
+
+	case *adt.FuncCallRef:
+		// A call reference is a pure resolver to the called function's
+		// anchor vertex; the call it schedules is described by its source,
+		// the original call expression. Note that the generic adt.Resolver
+		// case dispatches here before the type switch in adt reaches any
+		// more specific case. The source is cloned, as finalize edits the
+		// output in place.
+		if src, ok := x.Source().(ast.Expr); ok {
+			return ast.Clone(src)
+		}
+		return ast.NewIdent("_")
 
 	case *adt.SelectorExpr:
 		sel := &ast.SelectorExpr{
@@ -546,32 +564,27 @@ func (e *exporter) decl(env *adt.Environment, d adt.Decl) ast.Decl {
 		f.Constraint = x.ArcType.Token()
 		e.setField(x.Label, f)
 
-		f.Attrs = extractFieldAttrs(nil, x)
+		f.Attrs = e.exportAttrs(extractFieldAttrs(nil, x))
 
-		st, ok := x.Value.(*adt.StructLit)
-		if !ok {
-			f.Value = e.expr(env, x.Value)
-			return f
-
-		}
-
-		top := e.frame(0, false)
+		// Fields spliced into the enclosing struct are referenced from its
+		// scope, so Sanitize must know of them to detect shadowing.
+		st, isStruct := x.Value.(*adt.StructLit)
 		var src *adt.Vertex
-		if top.node != nil {
-			src = top.node.Lookup(x.Label)
-		}
-
-		// Instead of calling e.expr directly, we inline the case for
-		// *adt.StructLit, so that we can pass src.
-		c := adt.MakeRootConjunct(env, st)
-		f.Value = e.mergeValues(adt.InvalidLabel, src, []conjunct{{c: c, up: 0}}, c)
-
-		if top.node != nil {
-			if v := top.node.Lookup(x.Label); v != nil {
-				e.linkField(v, f)
+		if isStruct || e.top().spliced {
+			if top := e.frame(0, false); top.node != nil {
+				src = top.node.Lookup(x.Label)
 			}
 		}
 
+		if isStruct {
+			// Instead of calling e.expr directly, we inline the case for
+			// *adt.StructLit, so that we can pass src.
+			c := adt.MakeRootConjunct(env, st)
+			f.Value = e.mergeValues(adt.InvalidLabel, src, []conjunct{{c: c, up: 0}}, c)
+		} else {
+			f.Value = e.expr(env, x.Value)
+		}
+		e.linkField(src, f)
 		return f
 
 	case *adt.LetField:
@@ -586,21 +599,20 @@ func (e *exporter) decl(env *adt.Environment, d adt.Decl) ast.Decl {
 		expr := e.innerExpr(env, x.Filter)
 		frame.labelExpr = expr // see astutil.Resolve.
 
+		f := &ast.Field{
+			Label: ast.NewList(expr),
+		}
 		if x.Label != 0 {
 			// Mark features used in the value expression so that
 			// uniqueAlias can avoid generating a conflicting name
 			// when the alias has the same name as a field in the value.
 			e.markUsedFeatures(x.Value)
-			name := e.uniqueAlias(e.identString(x.Label))
-			expr = &ast.Alias{Ident: ast.NewIdent(name), Expr: expr}
-		}
-		f := &ast.Field{
-			Label: ast.NewList(expr),
+			e.setLabelAlias(f, e.uniqueAlias(e.identString(x.Label)))
 		}
 
 		frame.field = f
 
-		if alias := aliasFromLabel(x.Src); alias != "" {
+		if alias, ok := valueAliasName(x.Src); ok {
 			frame.dynamicFields = append(frame.dynamicFields, &entry{
 				alias: alias,
 				field: f,
@@ -608,7 +620,7 @@ func (e *exporter) decl(env *adt.Environment, d adt.Decl) ast.Decl {
 		}
 
 		f.Value = e.expr(env, x.Value)
-		f.Attrs = extractFieldAttrs(nil, x)
+		f.Attrs = e.exportAttrs(extractFieldAttrs(nil, x))
 
 		return f
 
@@ -642,7 +654,7 @@ func (e *exporter) decl(env *adt.Environment, d adt.Decl) ast.Decl {
 			f.Label = key.(ast.Label)
 		}
 
-		alias := aliasFromLabel(x.Src)
+		alias, _ := valueAliasName(x.Src)
 
 		frame := e.frame(0, false)
 		frame.dynamicFields = append(frame.dynamicFields, &entry{
@@ -651,7 +663,7 @@ func (e *exporter) decl(env *adt.Environment, d adt.Decl) ast.Decl {
 		})
 
 		f.Value = e.expr(env, x.Value)
-		f.Attrs = extractFieldAttrs(nil, x)
+		f.Attrs = e.exportAttrs(extractFieldAttrs(nil, x))
 
 		return f
 
@@ -662,16 +674,9 @@ func (e *exporter) decl(env *adt.Environment, d adt.Decl) ast.Decl {
 
 func (e *exporter) copyMeta(dst, src ast.Node) {
 	if e.cfg.ShowDocs {
-		ast.SetComments(dst, filterDocs(ast.Comments(src)))
+		ast.SetComments(dst, leadingDocComments(ast.Comments(src)))
 	}
 	astutil.CopyPosition(dst, src)
-}
-
-func filterDocs(a []*ast.CommentGroup) (out []*ast.CommentGroup) {
-	out = append(out, a...)
-	return slices.DeleteFunc(out, func(c *ast.CommentGroup) bool {
-		return !c.Doc
-	})
 }
 
 func (e *exporter) setField(label adt.Feature, f *ast.Field) {
@@ -683,15 +688,6 @@ func (e *exporter) setField(label adt.Feature, f *ast.Field) {
 	if frame.fields != nil {
 		frame.fields[label] = entry
 	}
-}
-
-func aliasFromLabel(src *ast.Field) string {
-	if src != nil {
-		if a, ok := src.Label.(*ast.Alias); ok {
-			return a.Ident.Name
-		}
-	}
-	return ""
 }
 
 func (e *exporter) elem(env *adt.Environment, d adt.Elem) ast.Expr {
@@ -780,10 +776,6 @@ func (e *exporter) comprehension(env *adt.Environment, comp *adt.Comprehension) 
 			// Struct form has no Ident/Expr - body is in Comprehension.Value
 			e.copyMeta(clause, x.Src)
 			c.Clauses = append(c.Clauses, clause)
-
-		case *adt.ValueClause:
-			// Can occur in nested comprehenions.
-			env = &adt.Environment{Up: env, Vertex: empty}
 
 		default:
 			panic(fmt.Sprintf("unknown field %T", x))

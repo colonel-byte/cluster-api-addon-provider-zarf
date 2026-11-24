@@ -50,18 +50,13 @@ func WriteFile(filename string, data []byte, perm os.FileMode) error {
 	return writeFile(filename, data, perm)
 }
 
-// IsEphemeralError reports whether err is one of the errors that the functions
-// in this package attempt to mitigate.
-//
-// Errors considered ephemeral include:
-//   - syscall.ERROR_ACCESS_DENIED
-//   - syscall.ERROR_FILE_NOT_FOUND
-//   - internal/syscall/windows.ERROR_SHARING_VIOLATION
-//
-// This set may be expanded in the future; programs must not rely on the
-// non-ephemerality of any given error.
-func IsEphemeralError(err error) bool {
-	return isEphemeralError(err)
+// Stat is like os.Stat, but on Windows retries errors that may occur if the
+// file is briefly inaccessible, such as a recently removed file lingering in
+// a delete-pending state while an antivirus scanner holds it open.
+// NotExist errors are never retried, since Stat is routinely used to probe
+// for files that are expected to be absent.
+func Stat(name string) (os.FileInfo, error) {
+	return stat(name)
 }
 
 // A FileID uniquely identifies a file in the file system.

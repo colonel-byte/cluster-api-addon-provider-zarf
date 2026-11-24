@@ -23,6 +23,7 @@ package path
 
 import (
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -56,6 +57,11 @@ func (b *lazybuf) append(c byte) {
 	}
 	b.buf[b.w] = c
 	b.w++
+}
+
+func (b *lazybuf) prepend(prefix ...byte) {
+	b.buf = slices.Insert(b.buf, 0, prefix...)
+	b.w += len(prefix)
 }
 
 func (b *lazybuf) string() string {
@@ -98,8 +104,8 @@ func clean(path string, os os) string {
 	volLen := os.volumeNameLen(path)
 	path = path[volLen:]
 	if path == "" {
-		if volLen > 1 && originalPath[1] != ':' {
-			// should be UNC
+		if volLen > 1 && os.IsPathSeparator(originalPath[0]) {
+			// should be UNC or a device path
 			return fromSlash(originalPath, os)
 		}
 		return originalPath + "."
@@ -164,6 +170,7 @@ func clean(path string, os os) string {
 		out.append('.')
 	}
 
+	os.postClean(&out) // avoid creating absolute paths on Windows
 	return fromSlash(out.string(), os)
 }
 
@@ -224,7 +231,7 @@ func Split(path string, os OS) []string {
 // list is empty or all its elements are empty, Join returns
 // an empty string.
 // On Windows, the result will only be a UNC path if the first
-// non-empty element is a UNC path.
+// non-empty element starts with two separators, as UNC paths do.
 // The default value for os is Unix.
 func Join(elem []string, os OS) string {
 	return getOS(os).join(elem)
@@ -277,7 +284,15 @@ func Rel(basepath, targpath string, os OS) (string, error) {
 	targ = targ[len(targVol):]
 	if base == "." {
 		base = ""
+	} else if base == "" && x.volumeNameLen(baseVol) > 2 /* isUNC */ {
+		// Treat a bare UNC volume like `\\host\share` as its root directory.
+		base = string(x.Separator)
 	}
+	if targ == "" && x.volumeNameLen(targVol) > 2 /* isUNC */ {
+		// Treat a bare UNC volume like `\\host\share` as its root directory.
+		targ = string(x.Separator)
+	}
+
 	// Can't use IsAbs - `\a` and `a` are both relative in Windows.
 	baseSlashed := len(base) > 0 && base[0] == x.Separator
 	targSlashed := len(targ) > 0 && targ[0] == x.Separator
@@ -304,6 +319,11 @@ func Rel(basepath, targpath string, os OS) (string, error) {
 		if ti < tl {
 			ti++
 		}
+		// If the last elements matched and both paths are now exhausted,
+		// the paths are equivalent. Without this check, Rel can loop forever.
+		if bi == bl && ti == tl {
+			return ".", nil
+		}
 		b0 = bi
 		t0 = ti
 	}
@@ -328,9 +348,14 @@ func Rel(basepath, targpath string, os OS) (string, error) {
 			buf[n] = x.Separator
 			copy(buf[n+1:], targ[t0:])
 		}
-		return string(buf), nil
+		return clean(string(buf), x), nil
 	}
-	return targ[t0:], nil
+	rel := targ[t0:]
+	if x.volumeNameLen(rel) > 0 {
+		// Avoid a result like c:x, which would be read as a path on drive c:.
+		rel = "." + string(x.Separator) + rel
+	}
+	return rel, nil
 }
 
 // Base returns the last element of path.
@@ -403,5 +428,5 @@ func VolumeName(path string, os OS) string {
 }
 
 func volumeName(path string, os os) string {
-	return path[:os.volumeNameLen(path)]
+	return fromSlash(path[:os.volumeNameLen(path)], os)
 }

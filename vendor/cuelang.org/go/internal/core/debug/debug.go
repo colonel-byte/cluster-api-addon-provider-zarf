@@ -61,6 +61,11 @@ type Config struct {
 	// inline after the reference. Note that this may result in large outputs;
 	// use with care. Only applies if Compact is false.
 	ExpandLetExpr bool
+
+	// ShowConjuncts causes conjuncts to be printed even when there is a
+	// concrete BaseValue. This is useful for debugging wire format round-trips
+	// where conjuncts should be preserved.
+	ShowConjuncts bool
 }
 
 // AppendNode writes a string representation of the node to w.
@@ -99,6 +104,9 @@ type printer struct {
 	// keep track of vertices to avoid cycles.
 	stack []*adt.Vertex
 
+	// cyclic is set when a vertex is not printed as it is already on stack.
+	cyclic bool
+
 	// modes:
 	// - show vertex
 	// - show original conjuncts
@@ -106,7 +114,7 @@ type printer struct {
 	// - auto
 }
 
-// ReplaceArg implements the format.Printer interface. It wraps Vertex arguments
+// ReplaceArg implements [errors.Config.Printer]. It wraps Vertex arguments
 // with a formatter value, that holds a pointer to w. This allows the stack
 // of processed vertices to be passed down, which in turn is used for cycle
 // detection.
@@ -151,6 +159,9 @@ func (f formatter) String() string {
 		stack:           f.p.stack,
 	}
 	p.node(f.x)
+	if p.cyclic {
+		f.p.cyclic = true
+	}
 	return string(p.dst)
 }
 
@@ -247,6 +258,7 @@ func (w *printer) printShared(v0 *adt.Vertex) (x *adt.Vertex, ok bool) {
 
 func (w *printer) pushVertex(v *adt.Vertex) bool {
 	if slices.Contains(w.stack, v) {
+		w.cyclic = true
 		w.string("value at path '")
 		w.path(v)
 		w.string("'")
@@ -299,6 +311,72 @@ func (w *printer) interpolation(x *adt.Interpolation) {
 		}
 	}
 	w.string(quote)
+}
+
+// fn prints a function literal: its signature and, for a function value,
+// its body.
+func (w *printer) fn(x *adt.Function) {
+	if x == nil {
+		w.string("func")
+		return
+	}
+	w.string("func(")
+	for i, p := range x.Params {
+		if i > 0 {
+			w.string(", ")
+		}
+		if p.Label != adt.InvalidLabel {
+			w.label(p.Label)
+			switch p.ArcType {
+			case adt.ArcRequired:
+				w.string("!")
+			case adt.ArcOptional:
+				w.string("?")
+			}
+			w.string(": ")
+		}
+		if p.Value != nil {
+			w.node(p.Value)
+		} else {
+			w.string("_")
+		}
+		if p.Default != nil {
+			w.string(" = ")
+			w.node(p.Default)
+		}
+	}
+	if x.Open {
+		if len(x.Params) > 0 {
+			w.string(", ")
+		}
+		w.string("...")
+	}
+	w.string(")")
+	if x.Ret != nil {
+		w.string(" -> ")
+		w.node(x.Ret)
+	}
+	if x.Body != nil {
+		// In compact mode — used, among others, for rendering error message
+		// arguments — the body is elided: it can be arbitrarily large and
+		// the signature identifies the function.
+		if w.compact {
+			w.string(": ...")
+		} else {
+			w.string(": ")
+			w.node(x.Body)
+		}
+	}
+}
+
+// funcValue prints a function value or type together with the function
+// types it was unified with, as a conjunction of all recorded signatures.
+func (w *printer) funcValue(x *adt.FuncValue) {
+	w.fn(x.Fn)
+	for _, t := range x.Types {
+		w.string(" & ")
+		w.fn(t.Fn)
+	}
 }
 
 func (w *printer) arg(n adt.Node) {
@@ -382,7 +460,7 @@ func (w *printer) node(n adt.Node) {
 			// }
 
 		case adt.Value:
-			if len(x.Arcs) == 0 {
+			if len(x.Arcs) == 0 && !(w.cfg.ShowConjuncts && len(x.Conjuncts) > 0) {
 				w.string(" ")
 				w.node(v)
 				w.string(" }")
@@ -418,9 +496,12 @@ func (w *printer) node(n adt.Node) {
 			}
 		}
 
-		if x.BaseValue == nil {
+		if x.BaseValue == nil || (w.cfg.ShowConjuncts && len(x.Conjuncts) > 0) {
 			w.indent += "// "
 			w.string("// ")
+			if x.BaseValue != nil {
+				w.string("Conjuncts: ")
+			}
 			for i, c := range x.Conjuncts {
 				if c.CloseInfo.FromDef || c.CloseInfo.FromEmbed {
 					w.string("[")
@@ -529,7 +610,7 @@ func (w *printer) node(n adt.Node) {
 		w.dst = strconv.AppendBool(w.dst, x.B)
 
 	case *adt.Num:
-		w.string(x.X.String())
+		w.string(numString(x))
 
 	case *adt.String:
 		w.dst = literal.String.Append(w.dst, x.Str)
@@ -659,12 +740,25 @@ func (w *printer) node(n adt.Node) {
 		w.node(x.X)
 		w.string("...")
 
+	case *adt.Function:
+		w.fn(x)
+
+	case *adt.FuncValue:
+		w.funcValue(x)
+
+	case *adt.FuncCallRef:
+		w.string("call")
+
 	case *adt.CallExpr:
 		w.node(x.Fun)
 		w.string("(")
 		for i, a := range x.Args {
 			if i > 0 {
 				w.string(", ")
+			}
+			if i < len(x.ArgLabels) && x.ArgLabels[i] != adt.InvalidLabel {
+				w.string(x.ArgLabels[i].SelectorString(w.index))
+				w.string(": ")
 			}
 			w.arg(a)
 		}
@@ -775,8 +869,6 @@ func (w *printer) node(n adt.Node) {
 			w.node(x.Expr)
 			w.string(" ")
 		}
-
-	case *adt.ValueClause:
 
 	default:
 		panic(fmt.Sprintf("unknown type %T", x))

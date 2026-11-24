@@ -85,43 +85,54 @@ type ErrFunc func(pos token.Pos, msg string, args ...interface{})
 // Resolve resolves all identifiers in a file, populating [ast.Ident.Node] fields.
 // Unresolved identifiers are recorded in [ast.File.Unresolved].
 // It will not overwrite already resolved identifiers.
+// Resolving a file again replaces the list of unresolved identifiers
+// rather than appending to it.
 func Resolve(f *ast.File, errFn ErrFunc) {
-	stack := make([]*scope, 0, 8)
-	visitor := &scope{
-		errFn:      errFn,
-		identFn:    resolveIdent,
-		scopeStack: &stack,
-	}
-	ast.Walk(f, visitor.Before, nil)
+	f.Unresolved = resolve(f, errFn)
 }
 
 // ResolveExpr resolves all identifiers in an expression.
 // It will not overwrite already resolved values.
 func ResolveExpr(e ast.Expr, errFn ErrFunc) {
-	f := &ast.File{}
+	resolve(e, errFn)
+}
+
+// resolve resolves all identifiers in n, returning those it could not resolve.
+func resolve(n ast.Node, errFn ErrFunc) (unresolved []*ast.Ident) {
 	stack := make([]*scope, 0, 8)
 	visitor := &scope{
-		file:       f,
+		index:      make(map[string]entry),
 		errFn:      errFn,
 		identFn:    resolveIdent,
+		unresolved: &unresolved,
 		scopeStack: &stack,
 	}
-	ast.Walk(e, visitor.Before, nil)
+	ast.Walk(n, visitor.Before, nil)
+	return unresolved
 }
 
 // A scope maintains the set of named language entities declared
 // in the scope and a link to the immediately surrounding (outer)
 // scope.
 type scope struct {
-	file    *ast.File
 	outer   *scope
 	node    ast.Node
 	index   map[string]entry
 	inField bool
 
+	// signature is the scope holding the parameters of the function whose
+	// signature is being resolved, set on that scope and inherited by those
+	// within it, and nil elsewhere. See [scope.reservedParam].
+	signature *scope
+
 	identFn func(s *scope, n *ast.Ident) bool
-	nameFn  func(name string)
+	nameFn  func(name string, e entry)
 	errFn   func(p token.Pos, msg string, args ...interface{})
+
+	// unresolved collects the identifiers which [resolveIdent] cannot
+	// resolve. The pointer is shared between the root scope and all its
+	// children.
+	unresolved *[]*ast.Ident
 
 	// scopeStack is used to reuse scope allocations.
 	// The pointer is shared between the root scope and all its children.
@@ -166,15 +177,16 @@ func (s *scope) freeScopesUntil(ancestor *scope) {
 	}
 }
 
-func newScope(f *ast.File, outer *scope, node ast.Node, decls []ast.Decl) *scope {
+func newScope(outer *scope, node ast.Node, decls []ast.Decl) *scope {
 	s := outer.allocScope()
-	s.file = f
 	s.outer = outer
 	s.node = node
 	s.inField = false
+	s.signature = outer.signature
 	s.identFn = outer.identFn
 	s.nameFn = outer.nameFn
 	s.errFn = outer.errFn
+	s.unresolved = outer.unresolved
 
 	for _, d := range decls {
 		switch x := d.(type) {
@@ -230,6 +242,45 @@ func newScope(f *ast.File, outer *scope, node ast.Node, decls []ast.Decl) *scope
 	return s
 }
 
+func newFuncScope(outer *scope, fn *ast.Func) *scope {
+	s := outer.allocScope()
+	s.outer = outer
+	s.node = fn
+	s.inField = false
+	s.signature = outer.signature
+	s.identFn = outer.identFn
+	s.nameFn = outer.nameFn
+	s.errFn = outer.errFn
+	s.unresolved = outer.unresolved
+
+	insertParam := func(name string, p *ast.FuncParam) {
+		if name == "" || name == "_" {
+			return
+		}
+		if e := s.index[name]; e.node != nil {
+			s.errFn(p.Pos(), "parameter %q redeclared in same scope", name)
+			return
+		}
+		s.insert(name, p, p, nil)
+	}
+	for _, p := range fn.Params {
+		if p == nil {
+			continue
+		}
+		if a := p.Alias; a != nil && a.Field != nil && a.Field.Name != "_" {
+			insertParam(a.Field.Name, p)
+			continue
+		}
+		if p.Label != nil {
+			name, isIdent, _ := ast.LabelName(p.Label)
+			if isIdent {
+				insertParam(name, p)
+			}
+		}
+	}
+	return s
+}
+
 func (s *scope) isLet(n, link ast.Node) bool {
 	if _, ok := s.node.(*ast.Field); ok {
 		return true
@@ -248,7 +299,8 @@ func (s *scope) mustBeUnique(n, link ast.Node) bool {
 	if _, ok := s.node.(*ast.Field); ok {
 		return true
 	}
-	if _, ok := link.(*ast.PostfixAlias); ok {
+	switch link.(type) {
+	case *ast.PostfixAlias, *ast.ForClause:
 		return true
 	}
 	switch n.(type) {
@@ -264,8 +316,9 @@ func (s *scope) insert(name string, n, link ast.Node, f *ast.Field) {
 	if name == "" {
 		return
 	}
+	e := entry{node: n, link: link, field: f}
 	if s.nameFn != nil {
-		s.nameFn(name)
+		s.nameFn(name, e)
 	}
 	// TODO: record both positions.
 	if outer, _, existing := s.lookup(name); existing.node != nil {
@@ -291,26 +344,22 @@ func (s *scope) insert(name string, n, link ast.Node, f *ast.Field) {
 			// s.errFn(n.Pos(), "alias %q already declared in enclosing scope", name)
 		}
 	}
-	s.index[name] = entry{node: n, link: link, field: f}
+	s.index[name] = e
 }
 
+// resolveScope returns the node of the scope declaring name as node, and its
+// entry. The node is a File or StructLit, or the Field declaring a pattern
+// constraint's label alias or a value alias.
 func (s *scope) resolveScope(name string, node ast.Node) (scope ast.Node, e entry, ok bool) {
-	last := s
-	for s != nil {
-		if n, ok := s.index[name]; ok && node == n.node {
-			if last.node == n.node {
-				return nil, n, true
-			}
-			return s.node, n, true
+	for ; s != nil; s = s.outer {
+		if e, ok := s.index[name]; ok && e.node == node {
+			return s.node, e, true
 		}
-		s, last = s.outer, s
 	}
 	return nil, entry{}, false
 }
 
 func (s *scope) lookup(name string) (p *scope, obj ast.Node, node entry) {
-	// TODO(#152): consider returning nil for obj if it is a reference to root.
-	// last := s
 	if name == "_" {
 		return nil, nil, entry{}
 	}
@@ -368,7 +417,7 @@ func insertPostfixAliases(s *scope, x *ast.Field, expr ast.Node) {
 func (s *scope) Before(n ast.Node) bool {
 	switch x := n.(type) {
 	case *ast.File:
-		s = newScope(x, s, x, x.Decls)
+		s = newScope(s, x, x.Decls)
 		defer s.freeScope()
 		// Support imports.
 		for _, d := range x.Decls {
@@ -377,10 +426,45 @@ func (s *scope) Before(n ast.Node) bool {
 		return false
 
 	case *ast.StructLit:
-		s = newScope(s.file, s, x, x.Elts)
+		s = newScope(s, x, x.Elts)
 		defer s.freeScope()
 		for _, elt := range x.Elts {
 			ast.Walk(elt, s.Before, nil)
+		}
+		return false
+
+	case *ast.Func:
+		// Parameter constraints, parameter defaults, and the return type
+		// resolve in the enclosing scope; only the body gets a
+		// function-parameter scope. A reference to another parameter is
+		// reserved for a possible future dependent-parameter feature and is
+		// reported as an error rather than silently binding to a like-named
+		// field of an enclosing scope.
+		if params := x.Parameters(); len(params) > 0 {
+			cs := newFuncScope(s, x)
+			cs.signature = cs
+			for _, p := range params {
+				if p == nil {
+					continue
+				}
+				if p.Value != nil {
+					ast.Walk(p.Value, cs.Before, nil)
+				}
+				if p.Default != nil {
+					ast.Walk(p.Default, cs.Before, nil)
+				}
+			}
+			if x.Ret != nil {
+				ast.Walk(x.Ret, cs.Before, nil)
+			}
+			cs.freeScope()
+		} else if x.Ret != nil {
+			ast.Walk(x.Ret, s.Before, nil)
+		}
+		if x.Body != nil {
+			s = newFuncScope(s, x)
+			defer s.freeScope()
+			ast.Walk(x.Body, s.Before, nil)
 		}
 		return false
 
@@ -414,7 +498,7 @@ func (s *scope) Before(n ast.Node) bool {
 			if len(label.Elts) != 1 {
 				break
 			}
-			s = newScope(s.file, s, x, nil)
+			s = newScope(s, x, nil)
 			defer s.freeScope()
 			if alias != nil {
 				if name, _, _ := ast.LabelName(alias.Ident); name != "" {
@@ -462,7 +546,7 @@ func (s *scope) Before(n ast.Node) bool {
 			if alias, ok := x.Value.(*ast.Alias); ok {
 				// TODO: this should move into Before once decl attributes
 				// have been fully deprecated and embed attributes are introduced.
-				s = newScope(s.file, s, x, nil)
+				s = newScope(s, x, nil)
 				defer s.freeScope()
 				s.insert(alias.Ident.Name, alias, x, nil)
 				n = alias.Expr
@@ -511,11 +595,32 @@ func (s *scope) Before(n ast.Node) bool {
 		return false
 
 	case *ast.Ident:
+		if s.signature != nil && s.reservedParam(x) {
+			return false
+		}
 		if s.identFn(s, x) {
 			return false
 		}
 	}
 	return true
+}
+
+// reservedParam reports whether x, inside a function signature, refers to a
+// parameter of that or an enclosing function's signature, reporting the
+// reference as an error. A closer binding shadows the parameter as usual.
+// The check precedes identFn so as to compose with those of Sanitize.
+func (s *scope) reservedParam(x *ast.Ident) bool {
+	name, ok, _ := ast.LabelName(x)
+	if !ok {
+		return false
+	}
+	p, _, node := s.lookup(name)
+	if _, isParam := node.node.(*ast.FuncParam); isParam && p.signature == p {
+		s.errFn(x.Pos(),
+			"cannot refer to parameter %q in a parameter constraint or return type", name)
+		return true
+	}
+	return false
 }
 
 func resolveIdent(s *scope, x *ast.Ident) bool {
@@ -536,12 +641,12 @@ func resolveIdent(s *scope, x *ast.Ident) bool {
 		default: // x.Node != node
 			scope, _, ok := s.resolveScope(name, x.Node)
 			if !ok {
-				s.file.Unresolved = append(s.file.Unresolved, x)
+				*s.unresolved = append(*s.unresolved, x)
 			}
 			x.Scope = scope
 		}
 	} else {
-		s.file.Unresolved = append(s.file.Unresolved, x)
+		*s.unresolved = append(*s.unresolved, x)
 	}
 	return true
 }
@@ -551,7 +656,7 @@ func scopeClauses(s *scope, clauses []ast.Clause) *scope {
 		switch x := c.(type) {
 		case *ast.ForClause:
 			ast.Walk(x.Source, s.Before, nil)
-			s = newScope(s.file, s, x, nil)
+			s = newScope(s, x, nil)
 			if x.Key != nil {
 				s.insert(x.Key.Name, x.Key, x, nil)
 			}
@@ -559,14 +664,14 @@ func scopeClauses(s *scope, clauses []ast.Clause) *scope {
 
 		case *ast.LetClause:
 			ast.Walk(x.Expr, s.Before, nil)
-			s = newScope(s.file, s, x, nil)
+			s = newScope(s, x, nil)
 			s.insert(x.Ident.Name, x.Ident, x, nil)
 
 		case *ast.TryClause:
 			// For the assignment form (try x = expr), handle scope like LetClause.
 			if x.Ident != nil {
 				ast.Walk(x.Expr, s.Before, nil)
-				s = newScope(s.file, s, x, nil)
+				s = newScope(s, x, nil)
 				s.insert(x.Ident.Name, x.Ident, x, nil)
 			} else {
 				// For the struct form (try { ... }), just walk normally.

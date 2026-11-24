@@ -16,11 +16,16 @@
 //
 // In CUE time values are represented as a string of the format
 // time.RFC3339Nano.
+//
+//cue:pure
 package time
 
 import (
 	"fmt"
+	"math/big"
 	"time"
+
+	"cuelang.org/go/internal/pkg"
 )
 
 // These are predefined layouts for use in Time.Format and time.Parse.
@@ -135,7 +140,7 @@ const (
 //
 // Caveat: this implementation uses the Go implementation, which does not
 // accept leap seconds.
-func Time(s string) (bool, error) {
+func Time(s string) (pkg.Validator, error) {
 	return timeFormat(s, time.RFC3339Nano)
 }
 
@@ -152,7 +157,7 @@ func timeFormat(value, layout string) (bool, error) {
 // Format defines a type string that must adhere to a certain layout.
 //
 // See Parse for a description on layout strings.
-func Format(value, layout string) (bool, error) {
+func Format(value, layout string) (pkg.Validator, error) {
 	return timeFormat(value, layout)
 }
 
@@ -193,22 +198,23 @@ func FormatString(layout, value string) (string, error) {
 //
 // In the absence of a time zone indicator, Parse returns a time in UTC.
 //
-// When parsing a time with a zone offset like -0700, if the offset corresponds
-// to a time zone used by the current location (Local), then Parse uses that
-// location and zone in the returned time. Otherwise it records the time as
-// being in a fabricated location with time fixed at the given zone offset.
+// A zone offset like -0700 is applied, and the result is converted to UTC.
 //
 // Parse currently does not support zone abbreviations like MST. All are
 // interpreted as UTC.
 func Parse(layout, value string) (string, error) {
-	// TODO: should we support locations? The result will be non-hermetic.
-	// See comments on github.com/cue-lang/cue/issues/1522.
+	// Parse in UTC rather than the local time zone so that the result is
+	// hermetic; see https://cuelang.org/issue/1522.
 	t, err := time.ParseInLocation(layout, value, time.UTC)
 	if err != nil {
 		return "", err
 	}
 	return t.UTC().Format(time.RFC3339Nano), nil
 }
+
+// TODO: nsec is an int64, so a [ToUnixNano] result for a year before 1678 or
+// after 2262 cannot be passed back as nsec alone, and must first be split into
+// seconds and nanoseconds. Consider accepting an arbitrary-precision nsec.
 
 // Unix returns the Time, in UTC, corresponding to the given Unix time,
 // sec seconds and nsec nanoseconds since January 1, 1970 UTC.
@@ -232,12 +238,14 @@ func ToUnix(value string) (int64, error) {
 
 // ToUnixNano returns the given time value as a Unix time in nanoseconds
 // elapsed since January 1, 1970 UTC.
-func ToUnixNano(value string) (int64, error) {
+func ToUnixNano(value string) (*big.Int, error) {
 	t, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return t.UnixNano(), nil
+	// [time.Time.UnixNano] overflows for years outside 1678 to 2262.
+	n := new(big.Int).Mul(big.NewInt(t.Unix()), big.NewInt(1e9))
+	return n.Add(n, big.NewInt(int64(t.Nanosecond()))), nil
 }
 
 // Parts holds individual parts of a parsed time stamp.

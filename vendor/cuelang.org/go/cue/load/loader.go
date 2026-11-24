@@ -20,12 +20,13 @@ package load
 //    - go/build
 
 import (
+	"cmp"
+
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/errors"
-	"cuelang.org/go/cue/parser"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/mod/modpkgload"
-	pkgpath "cuelang.org/go/pkg/path"
+	"cuelang.org/go/mod/module"
 )
 
 type loader struct {
@@ -58,13 +59,6 @@ func newLoader(c *Config, tg *tagger, pkgs *modpkgload.Packages) *loader {
 	}
 }
 
-func (l *loader) abs(filename string) string {
-	if !isLocalImport(filename) {
-		return filename
-	}
-	return pkgpath.Join([]string{l.cfg.Dir, filename}, l.cfg.pathOS)
-}
-
 func (l *loader) errPkgf(importPos []token.Pos, format string, args ...interface{}) *PackageError {
 	err := &PackageError{
 		ImportStack: l.stk.Copy(),
@@ -91,7 +85,18 @@ func (l *loader) cueFilesPackage(files []*build.File) *build.Instance {
 
 	// TODO: ModImportFromFiles(files)
 	pkg.Dir = l.cfg.Dir
-	rewriteFiles(pkg, l.cfg.Dir, true, l.cfg.pathOS)
+	// Files named explicitly on the command line still belong to the enclosing
+	// module, so record its identity just as a directory load does. This lets
+	// capabilities like @embed know they are within a module. Root is the
+	// module root when in a module (matching a directory load), so it can be
+	// used to tell whether a named file lies within the module.
+	pkg.Module = l.cfg.Module
+	if l.cfg.Module != "" {
+		pkg.ModuleVersion, _ = module.NewVersion(l.cfg.Module, "")
+	}
+	pkg.ModuleFile = l.cfg.modFile
+	pkg.Root = cmp.Or(l.cfg.ModuleRoot, l.cfg.Dir)
+	rewriteFiles(pkg, l.cfg.pathOS)
 	setFSLoc(l.cfg, pkg)
 	for _, err := range errors.Errors(fp.finalize(pkg)) { // ImportDir(&ctxt, dir, 0)
 		var x *NoFilesError
@@ -108,6 +113,7 @@ func (l *loader) cueFilesPackage(files []*build.File) *build.Instance {
 
 	pkg.User = true
 	l.addFiles(pkg)
+	l.setCanonicalImportPath(pkg)
 
 	_ = pkg.Complete()
 	pkg.DisplayPath = "command-line-arguments"
@@ -118,11 +124,7 @@ func (l *loader) cueFilesPackage(files []*build.File) *build.Instance {
 // addFiles populates p.Files by reading CUE syntax from p.BuildFiles.
 func (l *loader) addFiles(p *build.Instance) {
 	for _, bf := range p.BuildFiles {
-		cfg := l.cfg.parserConfig
-		if p.ModuleFile != nil {
-			cfg = cfg.Apply(parser.Version(p.ModuleFile.Language.Version))
-		}
-		f, err := l.cfg.fileSystem.getCUESyntax(bf, cfg)
+		f, err := l.cfg.fileSystem.getCUESyntax(bf, l.cfg.parserConfigForFile(p, bf, bf.Filename))
 		if err != nil {
 			p.ReportError(errors.Promote(err, "load"))
 		}

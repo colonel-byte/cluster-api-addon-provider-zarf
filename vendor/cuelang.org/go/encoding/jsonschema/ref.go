@@ -60,6 +60,31 @@ func parseRootRef(str string) (cue.Path, error) {
 	return cue.MakePath(selectors...), nil
 }
 
+// lookupRoot returns the value at the location identified by the JSON reference
+// str within v, for use by [Config.Roots]. Unlike [parseRootRef] it resolves
+// the pointer with kind-aware lookup, so a numeric token (e.g. an HTTP status
+// code like "200") is treated as a struct field rather than a list index. It
+// returns a non-existent value if the location does not exist.
+func lookupRoot(v cue.Value, str string) (cue.Value, error) {
+	u, err := url.Parse(str)
+	if err != nil {
+		return cue.Value{}, fmt.Errorf("invalid JSON reference: %v", err)
+	}
+	if u.Host != "" || u.Path != "" || u.Opaque != "" {
+		return cue.Value{}, fmt.Errorf("external references (%s) not supported in Roots", str)
+	}
+	// As for parseRootRef, trim a final slash for backward compatibility.
+	frag := strings.TrimSuffix(u.Fragment, "/")
+	n, err := lookupJSONPointer(v, frag)
+	if err != nil {
+		if err == errRefNotFound {
+			return cue.Value{}, nil
+		}
+		return cue.Value{}, err
+	}
+	return n, nil
+}
+
 var errRefNotFound = errors.New("JSON Pointer reference not found")
 
 func lookupJSONPointer(v cue.Value, p string) (cue.Value, error) {
@@ -88,6 +113,123 @@ func lookupJSONPointer(v cue.Value, p string) (cue.Value, error) {
 		}
 	}
 	return v, nil
+}
+
+// localRefTarget returns the schema referred to by the "$ref" value n,
+// as long as it is a JSON Pointer into the schema resource rooted at s.
+// Unlike [state.resolveURI], it reports no errors. Such a pointer is
+// resolved like in [cueLocationForRef], except that a target inside
+// a nested resource with an ID of its own is not returned.
+func (s *state) localRefTarget(n cue.Value) (cue.Value, bool) {
+	str, err := n.String()
+	if err != nil {
+		return cue.Value{}, false
+	}
+	u, err := url.Parse(str)
+	if err != nil {
+		return cue.Value{}, false
+	}
+	u = s.id.ResolveReference(u)
+	if !sameSchemaRoot(u, s.id) || (u.Fragment != "" && !strings.HasPrefix(u.Fragment, "/")) {
+		return cue.Value{}, false
+	}
+	target, err := lookupJSONPointer(s.pos, u.Fragment)
+	if err != nil {
+		return cue.Value{}, false
+	}
+	// A schema with its own ID on the way to the target means that the
+	// target is part of another resource.
+	v := s.pos
+	sels := relPath(target, s.pos).Selectors()
+	for _, sel := range sels[:max(len(sels)-1, 0)] {
+		v = v.LookupPath(cue.MakePath(sel))
+		if s.hasOwnID(v) {
+			return cue.Value{}, false
+		}
+	}
+	return target, true
+}
+
+// hasOwnID reports whether the schema v has an ID of its own, starting a new
+// schema resource: "$id", or "id" in the versions which define it. The ID must
+// be a string, unlike a schema for a property which happens to be named "$id".
+func (s *state) hasOwnID(v cue.Value) bool {
+	isID := func(key string) bool {
+		return v.LookupPath(cue.MakePath(cue.Str(key))).Kind() == cue.StringKind
+	}
+	return isID("$id") || s.schemaVersion.is(constraintMap["id"].versions) && isID("id")
+}
+
+// refTypes returns the types allowed by the schema referred to by the
+// "$ref" value n, as resolved by [state.localRefTarget], following any
+// chain of references. Only the "type" keyword is inspected, so the
+// result may allow more types than the schema does. It is [allTypes]
+// when nothing can be determined.
+func (s *state) refTypes(n cue.Value) cue.Kind {
+	var seen map[string]bool // Only needed for chains of references.
+	for {
+		target, ok := s.localRefTarget(n)
+		if !ok || target.Kind() != cue.StructKind {
+			return allTypes
+		}
+		path := target.Path().String()
+		if seen[path] {
+			return allTypes
+		}
+		lookup := func(key string) cue.Value {
+			return target.LookupPath(cue.MakePath(cue.Str(key)))
+		}
+		if ref := lookup("$ref"); ref.Exists() {
+			// Before 2019-09, the keywords alongside "$ref" are ignored,
+			// so follow the reference alone. A reference next to an ID
+			// is resolved against that ID instead.
+			if s.hasOwnID(target) {
+				return allTypes
+			}
+			if seen == nil {
+				seen = make(map[string]bool)
+			}
+			seen[path] = true
+			n = ref
+			continue
+		}
+		typ := lookup("type")
+		if !typ.Exists() {
+			return allTypes
+		}
+		types := typeKinds(typ)
+		if nullable := lookup("nullable"); nullable.Kind() == cue.BoolKind && s.boolValue(nullable) {
+			// OpenAPI's "nullable" also allows null.
+			types |= cue.NullKind
+		}
+		return types
+	}
+}
+
+// typeKinds returns the types allowed by the "type" keyword value typ,
+// a type or a list of types, or [allTypes] if it is neither.
+func typeKinds(typ cue.Value) cue.Kind {
+	switch typ.Kind() {
+	case cue.StringKind:
+		return typeKind(typ)
+	case cue.ListKind:
+		var types cue.Kind
+		for i, _ := typ.List(); i.Next(); {
+			types |= typeKind(i.Value())
+		}
+		return types
+	}
+	return allTypes
+}
+
+// typeKind returns the types allowed by the type name n,
+// or [allTypes] if n is not a known type.
+func typeKind(n cue.Value) cue.Kind {
+	str, _ := n.String()
+	if kind, ok := jsonSchemaTypeKinds[str]; ok {
+		return kind
+	}
+	return allTypes
 }
 
 func sameSchemaRoot(u1, u2 *url.URL) bool {
@@ -163,7 +305,7 @@ func defaultMapRef(
 		fragment = mustCUEPathToJSONPointer(loc.Path)
 	} else {
 		// It's external: use mapURLFn.
-		u := ref(*loc.ID)
+		u := new(*loc.ID)
 		fragment = loc.ID.Fragment
 		u.Fragment = ""
 		var err error

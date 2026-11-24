@@ -108,12 +108,21 @@ func getImportFromBuild(x *runtime.Runtime, p *build.Instance, v *adt.Vertex) *I
 }
 
 func getImportFromNode(x *runtime.Runtime, v *adt.Vertex) *Instance {
-	p := x.GetInstanceFromNode(v)
-	if p == nil {
-		return nil
+	// Only a package's root vertex is registered as an instance, so walk up to
+	// find it; a sub-value would otherwise report no enclosing package.
+	var p *build.Instance
+	root := v
+	for {
+		if p = x.GetInstanceFromNode(root); p != nil {
+			break
+		}
+		if root.Parent == nil {
+			return nil
+		}
+		root = root.Parent
 	}
 
-	return getImportFromBuild(x, p, v)
+	return getImportFromBuild(x, p, root)
 }
 
 // newInstance creates a new instance. Use Insert to populate the instance.
@@ -151,6 +160,14 @@ func (inst *Instance) ID() string {
 		return ""
 	}
 	return inst.inst.ID()
+}
+
+// languageVersion reports the target language version for exported CUE.
+func (inst *Instance) languageVersion() string {
+	if inst == nil {
+		return ""
+	}
+	return inst.inst.TargetLanguageVersion()
 }
 
 // Value returns the root value of the configuration. If the configuration

@@ -17,10 +17,13 @@ package cueexperiment
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
+	"cuelang.org/go/internal/cueversion"
 	"cuelang.org/go/internal/mod/semver"
 )
 
@@ -54,7 +57,7 @@ func parseEnvExperiments(x ...string) (m map[string]bool, err error) {
 		} else if val, err := strconv.ParseBool(valueStr); err == nil {
 			m[name] = val
 		} else {
-			return nil, fmt.Errorf("cannot parse CUE_EXPERIMENT: invalid value %q for experiment %q", valueStr, name)
+			return nil, fmt.Errorf("invalid value %q for experiment %q", valueStr, name)
 		}
 	}
 	return m, nil
@@ -64,8 +67,8 @@ func parseEnvExperiments(x ...string) (m map[string]bool, err error) {
 // tags as well as a set of experiment names.
 //
 // version is the language version associated with the module of a file. An
-// empty version string indicates the latest language version supported by the
-// compiler.
+// empty version string defaults to the current language version of this
+// binary, as that is the newest version it knows how to handle.
 //
 // experiments is a map of experiment names.
 //
@@ -75,9 +78,13 @@ func parseEnvExperiments(x ...string) (m map[string]bool, err error) {
 //
 // Experiments are all lowercase. Field names are converted to lower case.
 func parseConfig[T any](flags *T, version string, experiments map[string]bool) error {
+	if version == "" {
+		version = cueversion.LanguageVersion()
+	}
+
 	var errs []error
 
-	// Collect the field indices and set the default values.
+	// Set each field from its experiment's lifecycle and the given experiments.
 	fv := reflect.ValueOf(flags).Elem()
 	ft := fv.Type()
 	for i := range ft.NumField() {
@@ -93,7 +100,7 @@ func parseConfig[T any](flags *T, version string, experiments map[string]bool) e
 					switch {
 					case !explicitlyEnabled:
 						// Experiment not explicitly enabled, skip
-					case version != "" && semver.Compare(version, rest) < 0:
+					case semver.Compare(version, rest) < 0:
 						const msg = "cannot set experiment %q before version %s"
 						errs = append(errs, fmt.Errorf(msg, name, rest))
 					default:
@@ -102,26 +109,22 @@ func parseConfig[T any](flags *T, version string, experiments map[string]bool) e
 					}
 
 				case "default":
-					if version == "" || semver.Compare(version, rest) >= 0 {
+					if semver.Compare(version, rest) >= 0 {
 						if !explicitlyDisabled {
 							fv.Field(i).Set(reflect.ValueOf(true))
 						}
 					}
 
 				case "stable":
-					if version == "" || semver.Compare(version, rest) >= 0 {
+					if semver.Compare(version, rest) >= 0 {
 						fv.Field(i).Set(reflect.ValueOf(true))
 					}
 					if explicitlyDisabled {
-						// We allow setting deprecated flags to their default
-						// value so that bold explorers will not be penalized
-						// for their experimentation.
 						errs = append(errs, fmt.Errorf("cannot disable stable experiment %q", name))
-						continue
 					}
 
 				case "withdrawn":
-					expired := (version == "" || semver.Compare(version, rest) >= 0)
+					expired := semver.Compare(version, rest) >= 0
 					if expired && explicitlyEnabled {
 						const msg = "cannot set rejected experiment %q"
 						errs = append(errs, fmt.Errorf(msg, name))
@@ -135,7 +138,8 @@ func parseConfig[T any](flags *T, version string, experiments map[string]bool) e
 		}
 	}
 
-	for name := range experiments {
+	// Report the remaining experiments in a stable order.
+	for _, name := range slices.Sorted(maps.Keys(experiments)) {
 		errs = append(errs, fmt.Errorf("unknown experiment %q", name))
 	}
 

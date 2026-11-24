@@ -61,19 +61,28 @@ func (c BuiltinCallContext) AddPositions(err *ValueError) {
 // This method of getting an argument should be used when the argument is used
 // as a schema and may contain cycles.
 func (c BuiltinCallContext) Arg(i int) Value {
+	rawIndex := i
 	// If the call context represents a validator call, the argument will be
 	// offset by 1.
 	if c.isValidator {
 		if i == 0 {
-			c.Errf("Expr may not be called for 0th argument of validator")
-			return nil
+			return c.Errf("Arg may not be called for 0th argument of validator")
 		}
 		i--
 	}
 	x := c.call.Args[i]
 
-	// Evaluated while keeping any cycle information in the context.
-	return c.ctx.EvaluateKeepState(x)
+	// Evaluate the source expression to keep its cycle information in the
+	// context. For an ordinary call, rawCall may already have narrowed the
+	// corresponding value with constraints from an attached function type;
+	// return that value so schema-aware builtins observe the same argument as
+	// other builtin accessors. RawFunc calls do not populate args and retain
+	// the legacy source-expression result.
+	v := c.ctx.EvaluateKeepState(x)
+	if rawIndex < len(c.args) && c.args[rawIndex] != nil {
+		return c.args[rawIndex]
+	}
+	return v
 }
 
 // Expr returns the nth argument expression without evaluating it.
@@ -82,8 +91,7 @@ func (c BuiltinCallContext) Expr(i int) Expr {
 	// offset by 1.
 	if c.isValidator {
 		if i == 0 {
-			c.Errf("Expr may not be called for 0th argument of validator")
-			return nil
+			return c.Errf("Expr may not be called for 0th argument of validator")
 		}
 		i--
 	}

@@ -18,6 +18,9 @@ import (
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/cueexperiment"
+	"cuelang.org/go/internal/encoding/yaml/goccy"
+	"cuelang.org/go/internal/encoding/yaml/yamlbase"
 )
 
 // TODO(mvdan): we should sanity check that the decoder always produces valid CUE,
@@ -55,14 +58,12 @@ type decoder struct {
 	// but we need to extract these comments first since they have earlier positions.
 	pendingHeadComments []*ast.Comment
 
-	// extractingAliases ensures we don't loop forever when expanding YAML anchors.
+	// extractingAliases holds the aliases being expanded, so that we
+	// don't loop forever when expanding YAML anchors, and so that we only
+	// count the nodes they produce towards [decoder.aliasNodes].
 	extractingAliases map[*yaml.Node]bool
 
-	// aliasDepth is positive while we are expanding an alias, so that we
-	// only count the nodes it produces towards [decoder.aliasNodes].
-	aliasDepth int
-
-	// aliasNodes counts the nodes produced by alias expansion. See [maxAliasNodes].
+	// aliasNodes counts the nodes produced by alias expansion. See [yamlbase.MaxAliasNodes].
 	aliasNodes int
 
 	// lastOffset is byte offset from the last yaml.Node position that
@@ -74,6 +75,13 @@ type decoder struct {
 
 	// forceNewline ensures that the next position will be on a new line.
 	forceNewline bool
+
+	// forceInline ensures that the next position will be on the same
+	// line, overriding both forceNewline and the line-delta
+	// heuristic. Set for the first field of a single-line flow-style
+	// mapping `{a: 1, b: 2}`, whose first field sits on a different
+	// source line than the preceding sibling but must render inline.
+	forceInline bool
 
 	// scopeEnd is the byte offset (exclusive) bounding the current
 	// node's extent in the source. Used to compute Rbrace positions
@@ -92,7 +100,15 @@ type decoder struct {
 //
 // The filename is used for position information in CUE syntax tree nodes
 // as well as any errors encountered while decoding YAML.
-func NewDecoder(filename string, b []byte) *decoder {
+func NewDecoder(filename string, b []byte) Decoder {
+	if cueexperiment.Flags.YAMLGoccy {
+		return goccy.NewDecoder(filename, b)
+	}
+	return newDecoder(filename, b)
+}
+
+// newDecoder creates a decoder for YAML values to extract CUE syntax tree nodes.
+func newDecoder(filename string, b []byte) *decoder {
 	// Note that yaml.v3 can insert a null node just past the end of the input
 	// in some edge cases, so we pretend that there's an extra newline
 	// so that we don't panic when handling such a position.
@@ -197,14 +213,22 @@ func Unmarshal(filename string, data []byte) (ast.Expr, error) {
 	return n, nil
 }
 
-func (d *decoder) extract(yn *yaml.Node) (ast.Expr, error) {
-	// Reject documents whose aliases expand into too large a tree; nodes
-	// outside an alias map one-to-one to the input, so are not counted.
-	if d.aliasDepth > 0 {
+// countAliasNode rejects documents whose aliases expand into too large a
+// tree; nodes outside an alias map one-to-one to the input, so are not
+// counted.
+func (d *decoder) countAliasNode(yn *yaml.Node) error {
+	if len(d.extractingAliases) > 0 {
 		d.aliasNodes++
-		if d.aliasNodes > maxAliasNodes {
-			return nil, d.posErrorf(yn, "aliases expand to more than %d nodes", maxAliasNodes)
+		if d.aliasNodes > yamlbase.MaxAliasNodes {
+			return d.posErrorf(yn, "aliases expand to more than %d nodes", yamlbase.MaxAliasNodes)
 		}
+	}
+	return nil
+}
+
+func (d *decoder) extract(yn *yaml.Node) (ast.Expr, error) {
+	if err := d.countAliasNode(yn); err != nil {
+		return nil, err
 	}
 	d.addHeadCommentsToPending(yn)
 	var expr ast.Expr
@@ -371,7 +395,11 @@ func (d *decoder) contentOffset(yn *yaml.Node, open byte) int {
 func (d *decoder) pos(offset int) token.Pos {
 	pos := d.tokFile.Pos(offset, token.NoRelPos)
 
-	if d.forceNewline {
+	if d.forceInline {
+		d.forceInline = false
+		d.forceNewline = false
+		pos = pos.WithRel(token.Blank)
+	} else if d.forceNewline {
 		d.forceNewline = false
 		pos = pos.WithRel(token.Newline)
 	} else if d.lastOffset >= 0 {
@@ -583,6 +611,19 @@ func (d *decoder) mapping(yn *yaml.Node) (ast.Expr, error) {
 		multiline = yn.Line < yn.Content[len(yn.Content)-1].Line
 	}
 
+	// A single-line flow-style mapping `{a: 1, b: 2}` is inline: its
+	// braces are Blank and its fields stay on one line. Force the
+	// first field inline so neither a pending forceNewline (set by an
+	// enclosing block sequence per element) nor the line-delta
+	// heuristic (the map sits on a different source line than the
+	// preceding sibling) leaks onto it and forces the map open; the
+	// remaining fields are already on the same line. A multiline flow
+	// mapping still breaks its fields: insertMap re-arms forceNewline
+	// per field below.
+	if yn.Style&yaml.FlowStyle != 0 && !multiline {
+		d.forceInline = true
+	}
+
 	if err := d.insertMap(yn, strct, multiline, false); err != nil {
 		return nil, err
 	}
@@ -651,7 +692,7 @@ outer:
 		}
 
 		if mergeValues {
-			key := labelStr(label)
+			key := yamlbase.LabelStr(label)
 			for _, decl := range m.Elts {
 				f := decl.(*ast.Field)
 				name, _, err := ast.LabelName(f.Label)
@@ -677,11 +718,19 @@ outer:
 }
 
 func (d *decoder) merge(yn *yaml.Node, m *ast.StructLit, multiline bool) error {
+	// Merging maps without fields extracts no nodes, so count merges too.
+	if err := d.countAliasNode(yn); err != nil {
+		return err
+	}
 	switch yn.Kind {
 	case yaml.MappingNode:
 		return d.insertMap(yn, m, multiline, true)
 	case yaml.AliasNode:
-		return d.insertMap(yn.Alias, m, multiline, true)
+		if err := d.enterAlias(yn); err != nil {
+			return err
+		}
+		defer delete(d.extractingAliases, yn)
+		return d.merge(yn.Alias, m, multiline)
 	case yaml.SequenceNode:
 		// Step backwards as earlier nodes take precedence.
 		for _, c := range slices.Backward(yn.Content) {
@@ -752,13 +801,47 @@ var rxAnyOctalYaml11 = sync.OnceValue(func() *regexp.Regexp {
 	return regexp.MustCompile(`^[-+]?0[0-9_]+$`)
 })
 
+// isBigInt reports whether yaml.v3 would resolve the plain scalar s as
+// an integer if it had no 64-bit limit: s starts with a sign or a digit,
+// and without underscores, it is an integer as [strconv.ParseInt] with
+// base 0 accepts.
+func isBigInt(s string) bool {
+	if s == "" || strings.IndexByte("+-0123456789", s[0]) < 0 {
+		return false
+	}
+	s = strings.ReplaceAll(s, "_", "")
+	if s[0] == '+' || s[0] == '-' {
+		s = s[1:]
+	}
+	digits := "0123456789"
+	if len(s) > 1 && s[0] == '0' {
+		switch s[1] {
+		case 'x', 'X':
+			digits, s = "0123456789abcdefABCDEF", s[2:]
+		case 'b', 'B':
+			digits, s = "01", s[2:]
+		case 'o', 'O':
+			digits, s = "01234567", s[2:]
+		default:
+			digits = "01234567"
+		}
+	}
+	return s != "" && strings.Trim(s, digits) == ""
+}
+
 func (d *decoder) scalar(yn *yaml.Node) (ast.Expr, error) {
 	tag := yn.ShortTag()
-	// If the YAML scalar has no explicit tag, yaml.v3 infers a float tag,
-	// and the value looks like a YAML 1.1 octal literal,
-	// that means the input value was like `01289` and not a valid octal integer.
-	// The safest thing to do, and what most YAML decoders do, is to interpret as a string.
-	if yn.Style&yaml.TaggedStyle == 0 && tag == floatTag && rxAnyOctalYaml11().MatchString(yn.Value) {
+	tagged := yn.Style&yaml.TaggedStyle != 0
+	// A zero style means an untagged plain scalar.
+	if yn.Style == 0 && (tag == floatTag || tag == strTag) && isBigInt(yn.Value) {
+		// yaml.v3 resolves integers which do not fit in 64 bits as floats
+		// or strings, but YAML and CUE integers have no size limit.
+		tag = intTag
+	} else if !tagged && tag == floatTag && rxAnyOctalYaml11().MatchString(yn.Value) {
+		// If the value looks like a YAML 1.1 octal literal, the input
+		// was like `01289` and not a valid octal integer. The safest
+		// thing to do, and what most YAML decoders do, is to interpret
+		// it as a string.
 		tag = strTag
 	}
 	pos := d.pos(d.yamlOffset(yn))
@@ -774,7 +857,7 @@ func (d *decoder) scalar(yn *yaml.Node) (ast.Expr, error) {
 		return &ast.BasicLit{
 			ValuePos: pos,
 			Kind:     token.STRING,
-			Value:    literal.String.WithOptionalTabIndent(1).Quote(yn.Value),
+			Value:    literal.String.WithOptionalTabIndent(1).WithOptionalHashes().Quote(yn.Value),
 		}, nil
 
 	case binaryTag:
@@ -800,62 +883,21 @@ func (d *decoder) scalar(yn *yaml.Node) (ast.Expr, error) {
 		return lit, nil
 
 	case intTag:
-		// Convert YAML octal to CUE octal. If YAML accepted an invalid
-		// integer, just convert it as well to ensure CUE will fail.
-		value := yn.Value
-		if len(value) > 1 && value[0] == '0' && value[1] <= '9' {
-			value = "0o" + value[1:]
+		expr, err := yamlbase.IntExpr(pos, yn.Value)
+		if err != nil {
+			return nil, d.posErrorf(yn, "%v", err)
 		}
-		var info literal.NumInfo
-		// We make the assumption that any valid YAML integer literal will be a valid
-		// CUE integer literal as well, with the only exception of octal numbers above.
-		// Note that `!!int 123.456` is not allowed.
-		if err := literal.ParseNum(value, &info); err != nil {
-			return nil, d.posErrorf(yn, "cannot decode %q as %s: %v", value, tag, err)
-		} else if !info.IsInt() {
-			return nil, d.posErrorf(yn, "cannot decode %q as %s: not a literal number", value, tag)
-		}
-		return d.makeNum(pos, value, token.INT), nil
+		return expr, nil
 
 	case floatTag:
-		value := yn.Value
-		// TODO(mvdan): The strings below are from yaml.v3; should we be relying on upstream somehow?
-		switch value {
-		case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF":
-			value = "+Inf"
-		case "-.inf", "-.Inf", "-.INF":
-			value = "-Inf"
-		case ".nan", ".NaN", ".NAN":
-			value = "NaN"
-		default:
-			// Convert YAML 1.1 octal to CUE octal, like with !!int above.
-			if len(value) > 1 && value[0] == '0' && value[1] >= '0' && value[1] <= '9' {
-				value = "0o" + value[1:]
-			}
-			var info literal.NumInfo
-			// We make the assumption that any valid YAML float literal will be a valid
-			// CUE float literal as well, with the only exception of Inf/NaN and octal above.
-			// Note that `!!float 123` is allowed.
-			if err := literal.ParseNum(value, &info); err != nil {
-				return nil, d.posErrorf(yn, "cannot decode %q as %s: %v", value, tag, err)
-			}
-			// If the decoded YAML scalar was explicitly or implicitly a float,
-			// and the scalar literal looks like an integer,
-			// unify it with "number" to record the fact that it was represented as a float.
-			// Don't unify with float, as `float & 123` is invalid, and there's no need
-			// to forbid representing the number as an integer either.
-			if yn.Tag != "" {
-				if p := strings.IndexAny(value, ".eEiInN"); p == -1 {
-					// TODO: number(v) when we have conversions
-					// TODO(mvdan): don't shove the unification inside a BasicLit.Value string
-					//
-					// TODO(mvdan): would it be better to do turn `!!float 123` into `123.0`
-					// rather than `number & 123`? Note that `float & 123` is an error.
-					value = fmt.Sprintf("number & %s", value)
-				}
-			}
+		if num, ok := yamlbase.SpecialFloats[yn.Value]; ok {
+			return yamlbase.MakeNum(pos, num, token.FLOAT), nil
 		}
-		return d.makeNum(pos, value, token.FLOAT), nil
+		expr, err := yamlbase.FloatExpr(pos, yn.Value, tagged)
+		if err != nil {
+			return nil, d.posErrorf(yn, "%v", err)
+		}
+		return expr, nil
 
 	case nullTag:
 		return &ast.BasicLit{
@@ -868,38 +910,26 @@ func (d *decoder) scalar(yn *yaml.Node) (ast.Expr, error) {
 	}
 }
 
-func (d *decoder) makeNum(pos token.Pos, val string, kind token.Token) (expr ast.Expr) {
-	val, negative := strings.CutPrefix(val, "-")
-	expr = &ast.BasicLit{
-		ValuePos: pos,
-		Kind:     kind,
-		Value:    val,
-	}
-	if negative {
-		expr = &ast.UnaryExpr{
-			OpPos: pos,
-			Op:    token.SUB,
-			X:     expr,
-		}
-	}
-	return expr
-}
-
-// maxAliasNodes bounds the nodes produced by alias expansion. Each alias
-// reference expands into a fresh subtree, so wide fan-out can produce a
-// tree far larger than the input. Realistic documents use little or no
-// aliasing, so this limit is generous.
-const maxAliasNodes = 50_000
-
-func (d *decoder) alias(yn *yaml.Node) (ast.Expr, error) {
+// enterAlias marks the alias yn, which may be a value or a merge key, as
+// being expanded, rejecting an alias which is already being expanded.
+// The caller deletes yn from [decoder.extractingAliases] once expanded.
+func (d *decoder) enterAlias(yn *yaml.Node) error {
 	if d.extractingAliases[yn] {
 		// TODO this could actually be allowed in some circumstances.
-		return nil, d.posErrorf(yn, "anchor %q value contains itself", yn.Value)
+		return d.posErrorf(yn, "anchor %q value contains itself", yn.Value)
 	}
 	if d.extractingAliases == nil {
 		d.extractingAliases = make(map[*yaml.Node]bool)
 	}
 	d.extractingAliases[yn] = true
+	return nil
+}
+
+func (d *decoder) alias(yn *yaml.Node) (ast.Expr, error) {
+	if err := d.enterAlias(yn); err != nil {
+		return nil, err
+	}
+	defer delete(d.extractingAliases, yn)
 
 	// Save and reset decoder state so the alias extraction doesn't
 	// interfere with the outer position tracking. The aliased node
@@ -912,14 +942,11 @@ func (d *decoder) alias(yn *yaml.Node) (ast.Expr, error) {
 	d.lastOffset = -1 // no position yet, so pos() produces valid positions for the alias's children
 	d.forceNewline = false
 
-	d.aliasDepth++
 	node, err := d.extract(yn.Alias)
-	d.aliasDepth--
 
 	d.lastOffset = savedLastOffset
 	d.forceNewline = savedForceNewline
 	d.scopeEnd = savedScopeEnd
-	delete(d.extractingAliases, yn)
 	if err != nil {
 		return nil, err
 	}
@@ -938,17 +965,6 @@ func (d *decoder) alias(yn *yaml.Node) (ast.Expr, error) {
 		n.Rbrack = d.tokFile.Pos(aliasEnd, token.Blank)
 	}
 	return node, nil
-}
-
-func labelStr(l ast.Label) string {
-	switch l := l.(type) {
-	case *ast.Ident:
-		return l.Name
-	case *ast.BasicLit:
-		s, _ := literal.Unquote(l.Value)
-		return s
-	}
-	return ""
 }
 
 func isMerge(yn *yaml.Node) bool {

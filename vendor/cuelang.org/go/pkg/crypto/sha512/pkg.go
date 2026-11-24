@@ -34,7 +34,7 @@ var p = &pkg.Package{
 		Params: []pkg.Param{
 			{Kind: adt.BytesKind | adt.StringKind},
 		},
-		Result: adt.BytesKind | adt.StringKind,
+		Result: adt.BytesKind,
 		Func: func(c *pkg.CallCtxt) {
 			data := c.Bytes(0)
 			if c.Do() {
@@ -46,7 +46,7 @@ var p = &pkg.Package{
 		Params: []pkg.Param{
 			{Kind: adt.BytesKind | adt.StringKind},
 		},
-		Result: adt.BytesKind | adt.StringKind,
+		Result: adt.BytesKind,
 		Func: func(c *pkg.CallCtxt) {
 			data := c.Bytes(0)
 			if c.Do() {
@@ -58,7 +58,7 @@ var p = &pkg.Package{
 		Params: []pkg.Param{
 			{Kind: adt.BytesKind | adt.StringKind},
 		},
-		Result: adt.BytesKind | adt.StringKind,
+		Result: adt.BytesKind,
 		Func: func(c *pkg.CallCtxt) {
 			data := c.Bytes(0)
 			if c.Do() {
@@ -70,7 +70,7 @@ var p = &pkg.Package{
 		Params: []pkg.Param{
 			{Kind: adt.BytesKind | adt.StringKind},
 		},
-		Result: adt.BytesKind | adt.StringKind,
+		Result: adt.BytesKind,
 		Func: func(c *pkg.CallCtxt) {
 			data := c.Bytes(0)
 			if c.Do() {
@@ -78,4 +78,11 @@ var p = &pkg.Package{
 			}
 		},
 	}},
+	CUE: `
+@experiment(functions)
+@pure()
+Sum512:     func(data: bytes | string) -> bytes
+Sum384:     func(data: bytes | string) -> bytes
+Sum512_224: func(data: bytes | string) -> bytes
+Sum512_256: func(data: bytes | string) -> bytes`,
 }

@@ -91,23 +91,40 @@ func (p *Package) MustCompile(ctx *adt.OpContext, importPath string) *adt.Vertex
 		})
 	}
 
-	// Parse builtin CUE
+	// Parse builtin CUE. The blob is parsed as a file rather than as an
+	// expression so that it can carry file-level attributes: an experiment
+	// such as @experiment(functions) has no other place to be declared, and
+	// without it the syntax it enables is rejected. Its declarations unify
+	// with the natives above.
 	if p.CUE != "" {
-		expr, err := parser.ParseExpr(importPath, p.CUE)
+		f, err := parser.ParseFile(importPath, p.CUE)
 		if err != nil {
 			panic(fmt.Errorf("could not parse %v: %v", p.CUE, err))
 		}
-		c, err := compile.Expr(nil, ctx.Runtime, importPath, expr)
+		v, err := compile.Files(nil, ctx.Runtime, importPath, f)
 		if err != nil {
-			panic(fmt.Errorf("could compile parse %v: %v", p.CUE, err))
+			panic(fmt.Errorf("could not compile %v: %v", p.CUE, err))
 		}
-		obj.AddConjunct(c)
+		for _, c := range v.Conjuncts {
+			obj.AddConjunct(c)
+		}
 	}
 
 	// We could compile lazily, but this is easier for debugging.
 	obj.Finalize(ctx)
 	if err := obj.Err(ctx); err != nil {
 		panic(err.Err)
+	}
+
+	// A builtin's declared signature is part of the builtin itself: replace
+	// the conjuncts of each builtin field, the raw builtin and its signature,
+	// by their unification, so that any use of the field sees the builtin
+	// together with its parameter labels and defaults, whatever it is
+	// unified with.
+	for _, a := range obj.Arcs {
+		if b, ok := a.BaseValue.(*adt.Builtin); ok && len(b.Types) > 0 {
+			a.Conjuncts = []adt.Conjunct{adt.MakeRootConjunct(nil, b)}
+		}
 	}
 
 	return obj
@@ -167,7 +184,7 @@ func ToBuiltin(b *Builtin) *adt.Builtin {
 			return nil
 		}
 		if c.Err != nil {
-			if _, ok := c.Err.(ValidationError); !ok || c.ctx.IsValidator {
+			if _, ok := c.Err.(ValidationError); !ok || c.ctx.IsValidator() {
 				return nil
 			}
 		}
@@ -192,10 +209,14 @@ func mustParseConstBuiltin(ctx adt.Runtime, name, val string) adt.Expr {
 }
 
 func processErr(call *CallCtxt, errVal interface{}, ret adt.Expr) adt.Expr {
+	// A Bottomer holding no Bottom is handled like any other error below.
+	if b, ok := errVal.(Bottomer); ok && b.Bottom() != nil {
+		errVal = b.Bottom()
+	}
 	switch err := errVal.(type) {
 	case nil:
 	case ValidationError:
-		if call.ctx.IsValidator {
+		if call.ctx.IsValidator() {
 			ret = err.B
 		}
 	case *adt.Bottom:
@@ -203,14 +224,11 @@ func processErr(call *CallCtxt, errVal interface{}, ret adt.Expr) adt.Expr {
 	case *callError:
 		ret = err.b
 	case *json.MarshalerError:
-		if err, ok := err.Err.(Bottomer); ok {
-			if b := err.Bottom(); b != nil {
-				ret = b
-			}
+		// A failed marshal is an error even when what it wraps is not,
+		// such as a validation error outside a validator.
+		if ret = processErr(call, err.Err, nil); ret == nil {
+			ret = &adt.Bottom{Err: errors.Promote(err, "")}
 		}
-	case Bottomer:
-		ret = err.Bottom()
-
 	case errors.Error:
 		// Convert lists of errors to a combined Bottom error.
 		if list := errors.Errors(err); len(list) != 0 && list[0] != errVal {

@@ -36,7 +36,7 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 	}
 
 	if s.Defaults {
-		y = y.Default()
+		y = s.defaultOf(y)
 	}
 
 	if b := y.Bottom(); b != nil {
@@ -58,7 +58,7 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 			s.errf("list does not subsume %v (type %s)", y, y.Kind())
 			return false
 		}
-		if !s.listVertices(x, y) {
+		if !s.listVertices(x, y, final) {
 			return false
 		}
 		// TODO: allow other arcs alongside list arc.
@@ -87,11 +87,11 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 		panic(fmt.Sprintf("unexpected type %T", v))
 	}
 
-	xClosed := x.IsClosedStruct() && !s.IgnoreClosedness
+	xClosed := !x.IsOpenStruct() && !s.IgnoreClosedness
 	// TODO: this should not close for taking defaults. Do a more principled
 	// makeover of this package before making it public, though.
 	yClosed := s.Final || s.Defaults ||
-		(y.IsClosedStruct() && !s.IgnoreClosedness)
+		(!y.IsOpenStruct() && !s.IgnoreClosedness)
 
 	if xClosed && !yClosed && !final {
 		return false
@@ -217,38 +217,50 @@ outer:
 		}
 	}
 
-	// Now compare pattern constraints.
+	return s.patterns(x, y, xClosed, final)
+}
+
+// patterns compares the pattern constraints of x and y, given whether x is
+// closed, meaning it allows no labels beyond its fields and patterns.
+func (s *subsumer) patterns(x, y *adt.Vertex, xClosed, final bool) bool {
 	apc := x.PatternConstraints
 	bpc := y.PatternConstraints
 	if bpc == nil {
 		if apc == nil {
 			return true
 		}
-		if y.IsClosedStruct() || y.IsClosedList() || final {
+		if !y.IsOpenStruct() || final {
 			// This is a special case where know that any allowed optional field
 			// in a must be bottom in y, which is strictly more specific.
 			return true
 		}
 		return false
 	}
-	if apc == nil {
-		return true
+	var apairs []adt.PatternConstraint
+	if apc != nil {
+		apairs = apc.Pairs
 	}
-	if len(apc.Pairs) > len(bpc.Pairs) {
+	switch {
+	case len(apairs) > len(bpc.Pairs):
 		// Theoretically it is still possible for a to subsume b, but it will
 		// somewhat tricky and expensive to compute and it is probably not worth
 		// it.
 		s.inexact = true
 		return false
+	case len(apairs) < len(bpc.Pairs) && xClosed && !final:
+		// A pattern of y without an equal one in x may admit labels that a
+		// closed x does not.
+		s.inexact = true
+		return false
 	}
 
 outerConstraint:
-	for _, p := range apc.Pairs {
+	for _, p := range apairs {
 		for _, q := range bpc.Pairs {
 			if adt.Equal(s.ctx, p.Pattern, q.Pattern, 0) {
 				p.Constraint.Finalize(s.ctx)
 				q.Constraint.Finalize(s.ctx)
-				if !s.values(p.Constraint, q.Constraint) {
+				if !s.constraints(x, y, p.Constraint, q.Constraint) {
 					return false
 				}
 				continue outerConstraint
@@ -261,50 +273,84 @@ outerConstraint:
 		s.inexact = true
 		return false
 	}
-
 	return true
 }
 
-func (s *subsumer) listVertices(x, y *adt.Vertex) bool {
-	ctx := s.ctx
-
-	if !y.IsData() && x.IsClosedList() && !y.IsClosedList() {
-		return false
-	}
+// listVertices reports whether the list x subsumes the list y. A list is
+// its listed elements followed by a tail: the constraint it places on any
+// further elements, which for a closed list admits none. x subsumes y when
+// x admits each element that y lists, by the element at the same position
+// or by its tail once y lists more, and when x's tail admits y's tail.
+func (s *subsumer) listVertices(x, y *adt.Vertex, final bool) bool {
+	// A list without an ellipsis is open under the OpenLists experiment,
+	// but as data, such as in Final mode, it admits no further elements.
+	yClosed := final || y.IsClosedList()
 
 	xElems := slices.Collect(x.Elems())
 	yElems := slices.Collect(y.Elems())
 
-	switch {
-	case len(xElems) == len(yElems):
-	case len(xElems) > len(yElems):
+	// Every element x lists must be matched by one that y lists.
+	if len(xElems) > len(yElems) {
 		return false
-	case x.IsClosedList():
-		return false
-	default:
-		a := &adt.Vertex{Label: adt.AnyIndex}
-		x.MatchAndInsert(ctx, a)
-		a.Finalize(ctx)
-
-		// x must be open
-		for _, b := range yElems[len(xElems):] {
-			if !s.vertices(a, b) {
-				return false
-			}
-		}
-
-		if !y.IsClosedList() {
-			b := &adt.Vertex{Label: adt.AnyIndex}
-			y.MatchAndInsert(ctx, b)
-			b.Finalize(ctx)
-		}
 	}
-
 	for i, a := range xElems {
 		if !s.vertices(a, yElems[i]) {
 			return false
 		}
 	}
 
-	return true
+	// Beyond the elements x lists, y has nothing when it is closed and
+	// lists no more, and x admits nothing when it is closed.
+	extra := yElems[len(xElems):]
+	if yClosed && len(extra) == 0 {
+		return true
+	}
+	if x.IsClosedList() {
+		return false
+	}
+
+	// x's tail must admit the further elements y lists, and then y's tail.
+	tail := s.ctx.ListTail(x)
+	for _, b := range extra {
+		if !s.values(tail, b) {
+			return false
+		}
+	}
+	return yClosed || s.constraints(x, y, tail, s.ctx.ListTail(y))
+}
+
+// constraints reports whether a, a constraint of x, subsumes b, the matching
+// constraint of y, such as two pattern constraints or list tails.
+//
+// The constraints of a recursive definition lead back to x and y, so they
+// are taken to hold when reached again while being compared. The pair is
+// that of x and y, as a list tail is a new vertex each time it is computed.
+func (s *subsumer) constraints(x, y *adt.Vertex, a, b adt.Value) bool {
+	pair := [2]*adt.Vertex{x.DerefValue(), y.DerefValue()}
+	if slices.Contains(s.active, pair) {
+		return true
+	}
+	s.active = append(s.active, pair)
+	defer func() { s.active = s.active[:len(s.active)-1] }()
+	return s.values(a, b)
+}
+
+// defaultOf returns the default of v.
+//
+// A default may be a new vertex, so each one is kept: a vertex reached
+// again, as a recursive definition is, must give the same default for
+// [subsumer.constraints] to recognize it.
+func (s *subsumer) defaultOf(v *adt.Vertex) *adt.Vertex {
+	v = v.DerefValue()
+	if d, ok := s.defaults[v]; ok {
+		return d
+	}
+	d := v.ConcreteDefault()
+	if d != v {
+		if s.defaults == nil {
+			s.defaults = make(map[*adt.Vertex]*adt.Vertex)
+		}
+		s.defaults[v] = d
+	}
+	return d
 }

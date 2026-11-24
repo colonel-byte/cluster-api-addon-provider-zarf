@@ -31,7 +31,7 @@ package adt
 // - ctx.evalState (in validation of comparison against bottom)
 //
 // - arc.Finalize (finalized)
-// - CompleteArcs (conjuncts)
+// - CompleteArcsRecursive (conjuncts)
 //
 
 // lookup in p1
@@ -152,9 +152,8 @@ const (
 	// subFieldsProcessed means that all tasks of a Vertex, including those of
 	// its arcs have been completed.
 	//
-	// This is a signal condition that is met if all arcs have reached the
-	// the state finalStateKnown.
-	//
+	// This is a signal condition that is met if all arcs have met all
+	// conditions.
 	subFieldsProcessed
 
 	// disjunctionTask indicates that this task is a disjunction. This is
@@ -162,12 +161,6 @@ const (
 	disjunctionTask
 
 	childConjunctsDone
-
-	leftOfMaxCoreCondition
-
-	finalStateKnown condition = leftOfMaxCoreCondition - 1
-
-	preValidation condition = finalStateKnown //&^ validationCompleted
 
 	conditionsUsingCounters = arcTypeKnown |
 		valueKnown |
@@ -198,13 +191,6 @@ const (
 	fieldConjunct = allTasksCompleted |
 		fieldConjunctsKnown | valueKnown
 
-	// a scalarConjunct is one that is guaranteed to result in a scalar or
-	// list value.
-	scalarConjunct = allTasksCompleted |
-		scalarKnown |
-		valueKnown |
-		disjunctionTask
-
 	// a scalarValue is one that is guaranteed to result in a scalar.
 	// TODO: use more widely instead of scalarKnown.
 	scalarValue = scalarKnown | disjunctionTask
@@ -224,9 +210,12 @@ const (
 	// At the moment this is equal to 'scalarKnown'.
 	concreteKnown = scalarKnown
 
+	// arcTypeKnownIdx is the bit-position index of arcTypeKnown, for use as
+	// a scheduler.counters index.
+	arcTypeKnownIdx = 1
+
 	// fieldConjunctsKnownIdx is the bit-position index of
 	// fieldConjunctsKnown, for use as a scheduler.counters index.
-	// It must equal bits.TrailingZeros16(uint16(fieldConjunctsKnown)).
 	fieldConjunctsKnownIdx = 4
 
 	// allTasksCompletedIdx is the bit index of allTasksCompleted in the
@@ -234,6 +223,15 @@ const (
 	// condition constants.
 	allTasksCompletedIdx = 6
 )
+
+// An "invalid array index" or "overflows" compiler error here means that a
+// counter index above no longer matches the bit position of its condition.
+func _() {
+	var x [1]struct{}
+	_ = x[arcTypeKnown-1<<arcTypeKnownIdx]
+	_ = x[fieldConjunctsKnown-1<<fieldConjunctsKnownIdx]
+	_ = x[allTasksCompleted-1<<allTasksCompletedIdx]
+}
 
 // schedConfig configures a taskContext with the states needed for the
 // CUE evaluator. It is used in OpContext.New as a template for creating
@@ -328,7 +326,10 @@ func stateCompletions(s *scheduler) condition {
 		//       a: b: 1
 		//   }
 		// it may still become not pending if 'b' becomes a regular arc.
-		if s.counters[arcTypeKnown] == 0 && x.meets(subFieldsProcessed) {
+		// A pending arc with no active parent task has nothing left that
+		// could declare it, such as when its comprehension yielded nothing.
+		if s.counters[arcTypeKnownIdx] == 0 && (x.meets(subFieldsProcessed) ||
+			v.ArcType == ArcPending && !s.hasActiveParentTask()) {
 			x |= arcTypeKnown
 		}
 	}

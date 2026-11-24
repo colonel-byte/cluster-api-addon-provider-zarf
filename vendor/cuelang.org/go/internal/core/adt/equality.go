@@ -21,7 +21,8 @@ const (
 	// applies when CheckStructural is given.
 	IgnoreOptional Flag = 1 << iota
 
-	// CheckStructural indicates that closedness information should be
+	// CheckStructural indicates that closedness information and pattern
+	// constraints, including the element constraints of lists, should be
 	// considered for equality. Equal may return false even when values are
 	// equal.
 	CheckStructural
@@ -29,12 +30,29 @@ const (
 	// RegularOnly indicates that only regular fields should be considered,
 	// thus excluding hidden and definition fields.
 	RegularOnly
+
+	// IgnoreClosedness disregards whether structs and lists were closed by
+	// close or by a definition. A list that cannot grow for lack of an
+	// ellipsis remains distinct from one that can. This only applies when
+	// CheckStructural is given.
+	IgnoreClosedness
+
+	// IgnoreVacuous disregards constraints that no field or element can
+	// ever satisfy: the element constraints of a list that cannot grow,
+	// and an optional field whose value is bottom where the other value
+	// does not allow the field at all. This only applies when
+	// CheckStructural is given.
+	IgnoreVacuous
+
+	// sharedByIdentity is set by [equalPatterns] to require that vertices
+	// reached via structure sharing are the same vertex.
+	sharedByIdentity
 )
 
 func Equal(ctx *OpContext, v, w Value, flags Flag) bool {
 	if flags&CheckStructural == 0 {
-		v = Default(v)
-		w = Default(w)
+		v = ConcreteDefault(v)
+		w = ConcreteDefault(w)
 	}
 	if x, ok := v.(*Vertex); ok {
 		return equalVertex(ctx, x, w, flags)
@@ -61,18 +79,28 @@ func equalVertex(ctx *OpContext, x *Vertex, v Value, flags Flag) bool {
 		return false
 	}
 
+	x0, y0 := x, y
 	x = x.DerefValue()
 	y = y.DerefValue()
 
 	if x == y {
 		return true
 	}
+	if flags&sharedByIdentity != 0 && (x != x0 || y != y0) {
+		return false
+	}
 
 	xk := x.Kind()
 	yk := y.Kind()
 
 	if xk != yk {
-		return false
+		// Numbers of a different kind may still be equal: when comparing an
+		// integer with a floating-point number, the integer is first converted
+		// to floating-point. Structural equality, by contrast, distinguishes
+		// int from float.
+		if flags&CheckStructural != 0 || xk&^NumberKind != 0 || yk&^NumberKind != 0 {
+			return false
+		}
 	}
 
 	maxArcType := ArcRequired
@@ -84,15 +112,21 @@ func equalVertex(ctx *OpContext, x *Vertex, v Value, flags Flag) bool {
 
 	// TODO: this really should be subsumption.
 	if flags&CheckStructural != 0 {
-		if x.IsClosedStruct() != y.IsClosedStruct() {
-			return false
-		}
-		if x.IsClosedList() != y.IsClosedList() {
+		switch {
+		case flags&IgnoreClosedness == 0:
+			if x.IsClosedStruct() != y.IsClosedStruct() {
+				return false
+			}
+			if x.IsClosedList() != y.IsClosedList() {
+				return false
+			}
+		case isFixedLengthList(x) != isFixedLengthList(y):
 			return false
 		}
 	}
 
 	skipRegular := flags&RegularOnly != 0
+	ignoreVacuous := flags&CheckStructural != 0 && flags&IgnoreVacuous != 0
 
 loop1:
 	for _, a := range x.Arcs {
@@ -106,6 +140,9 @@ loop1:
 				}
 				continue loop1
 			}
+		}
+		if ignoreVacuous && isVacuousArc(ctx, a, y) {
+			continue
 		}
 		return false
 	}
@@ -126,6 +163,13 @@ loop2:
 			}
 		}
 		// Arc with same label not found.
+		if ignoreVacuous && isVacuousArc(ctx, b, x) {
+			continue
+		}
+		return false
+	}
+
+	if flags&CheckStructural != 0 && !equalPatterns(ctx, x, y, flags) {
 		return false
 	}
 
@@ -136,6 +180,68 @@ loop2:
 	}
 
 	return equalTerminal(ctx, v, w, flags)
+}
+
+// equalPatterns reports whether x and y have equal pattern constraints,
+// in the same order.
+//
+// The constraints are compared recursively. Those of recursive values lead
+// back to the vertices being compared via structure sharing, so shared
+// vertices within a constraint must be the same vertex rather than equal
+// ones, which keeps the recursion finite.
+func equalPatterns(ctx *OpContext, x, y *Vertex, flags Flag) bool {
+	var px, py []PatternConstraint
+	if x.PatternConstraints != nil {
+		px = x.PatternConstraints.Pairs
+	}
+	if y.PatternConstraints != nil {
+		py = y.PatternConstraints.Pairs
+	}
+	if flags&IgnoreVacuous != 0 && isFixedLengthList(x) && isFixedLengthList(y) {
+		// Neither list can gain an element, so their element constraints
+		// are vacuous.
+		return true
+	}
+	if len(px) != len(py) {
+		return false
+	}
+	flags |= sharedByIdentity
+	for i, p := range px {
+		q := py[i]
+		if !Equal(ctx, p.Pattern, q.Pattern, flags) {
+			return false
+		}
+		p.Constraint.Finalize(ctx)
+		q.Constraint.Finalize(ctx)
+		if !Equal(ctx, p.Constraint, q.Constraint, flags) {
+			return false
+		}
+	}
+	return true
+}
+
+// isVacuousArc reports whether optional arc a, which has no counterpart in
+// other, forbids its field just as other does: its value is bottom, so the
+// field can never be present, and other does not allow the field at all.
+// An incomplete error does not count, as it may yet resolve, nor does a
+// structural cycle, as unifying a field with another value may yet give a
+// useful result.
+func isVacuousArc(ctx *OpContext, a, other *Vertex) bool {
+	if a.ArcType != ArcOptional {
+		return false
+	}
+	b := a.Bottom()
+	if b == nil || b.IsIncomplete() || b.Code == StructuralCycleError {
+		return false
+	}
+	return !other.Accept(ctx, a.Label)
+}
+
+// isFixedLengthList reports whether v is a list that cannot gain an element:
+// a closed list, or one whose literals had no ellipsis.
+func isFixedLengthList(v *Vertex) bool {
+	m, ok := v.BaseValue.(*ListMarker)
+	return ok && (!m.IsOpen || m.NoEllipsis)
 }
 
 func equalTerminal(ctx *OpContext, v, w Value, flags Flag) bool {
@@ -207,6 +313,24 @@ func equalTerminal(ctx *OpContext, v, w Value, flags Flag) bool {
 				}
 			}
 			return true
+		}
+
+	case *FuncValue:
+		if y, ok := w.(*FuncValue); ok {
+			return equalFuncValues(ctx, x, y)
+		}
+
+	case *Builtin:
+		// Identical builtins were already handled by the v == w comparison
+		// above; this identifies tightened clones of the same builtin
+		// carrying equal type constraints.
+		if y, ok := w.(*Builtin); ok {
+			return x.self() == y.self() && equalFuncTypes(x.Types, y.Types)
+		}
+
+	case *ExternalValidator:
+		if y, ok := w.(*ExternalValidator); ok {
+			return x == y
 		}
 	}
 

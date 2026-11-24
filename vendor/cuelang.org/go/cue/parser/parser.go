@@ -15,6 +15,7 @@
 package parser
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/cueexperiment"
+	"cuelang.org/go/internal/cueversion"
 	"cuelang.org/go/internal/mod/semver"
 )
 
@@ -38,6 +40,12 @@ type parser struct {
 
 	expList     []string // list of experiments to enable
 	experiments *cueexperiment.File
+
+	// versionAttr is the file's @version attribute, if it has one in the
+	// right place, and fileVersion the language version it declares.
+	versionAttr *ast.Attribute
+	fileVersion string
+	fileAttrs   int // number of file attributes read so far
 
 	// Tracing/debugging
 	cfg       Config
@@ -74,9 +82,29 @@ type parser struct {
 	// Non-syntactic parser control
 	exprLev int // < 0: in control clause, >= 0: in expression
 
+	// inLookahead is set while speculatively scanning ahead with a copy of
+	// the scanner. Scan errors are suppressed while it is set: the real
+	// parse re-scans the same tokens and reports any errors.
+	inLookahead bool
+
+	// noFuncSyntaxBefore is the offset of the ")" closing the last "func"
+	// call that [parser.disabledFuncSyntaxAhead] scanned without finding a
+	// ")" followed by "->" or ":", so no "func" before it starts function
+	// syntax either. It keeps nested calls from scanning the same tokens
+	// once per level.
+	noFuncSyntaxBefore int
+
 	// nestLevel tracks and limits the expression nesting depth during
 	// parsing. See [maxNestLevel].
 	nestLevel int
+
+	// chainLevel tracks and limits the nesting depth of syntax built
+	// iteratively during parsing. See [maxChainLevel].
+	chainLevel int
+
+	// closers holds the closing tokens of the enclosing constructs being
+	// parsed, innermost last, for error recovery. See [parser.pushCloser].
+	closers []token.Token
 }
 
 func (p *parser) init(filename string, src []byte, opts []Option) {
@@ -88,7 +116,10 @@ func (p *parser) init(filename string, src []byte, opts []Option) {
 		m = scanner.ScanComments
 	}
 	eh := func(pos token.Pos, msg string, args []interface{}) {
-		p.errors = errors.Append(p.errors, errors.Newf(pos, msg, args...))
+		if p.inLookahead {
+			return
+		}
+		p.errf(pos, msg, args...)
 	}
 	p.scanner.Init(p.file, src, eh, m)
 
@@ -292,6 +323,23 @@ func un(p *parser) {
 // nested more deeply is rejected rather than recursed into any further.
 const maxNestLevel = 10_000
 
+// pushCloser records that the construct being parsed ends with tok,
+// until the matching call to [parser.popCloser].
+func (p *parser) pushCloser(tok token.Token) {
+	p.closers = append(p.closers, tok)
+}
+
+func (p *parser) popCloser() {
+	p.closers = p.closers[:len(p.closers)-1]
+}
+
+// atCloser reports whether the current token closes the innermost
+// enclosing construct.
+func (p *parser) atCloser() bool {
+	n := len(p.closers)
+	return n > 0 && p.tok == p.closers[n-1]
+}
+
 // incNestLevel increments the parser's nesting depth, bailing out with an
 // error once it grows past [maxNestLevel]. It pairs with [decNestLevel] in the
 // same way as [trace] and [un]: defer decNestLevel(incNestLevel(p)).
@@ -308,6 +356,25 @@ func incNestLevel(p *parser) *parser {
 // decNestLevel decrements the parser's nesting depth. See [incNestLevel].
 func decNestLevel(p *parser) {
 	p.nestLevel--
+}
+
+// maxChainLevel is the deepest nesting the parser accepts from syntax which
+// it builds iteratively, such as chained fields like a: b: c: 1 or binary
+// expressions like 1+2+3. As these do not grow the parser's stack, they may
+// nest further than [maxNestLevel], but must still be bounded so that
+// recursive walks of the resulting syntax tree do not overflow the stack.
+const maxChainLevel = 100_000
+
+// incChainLevel increments the parser's chain depth, bailing out with an
+// error once it grows past [maxChainLevel]. Callers subtract the levels
+// they added from p.chainLevel once they are done.
+func incChainLevel(p *parser) {
+	p.chainLevel++
+	if p.chainLevel > maxChainLevel {
+		p.panicking = true
+		p.errf(p.pos, "expression exceeds maximum nesting depth of %d", maxChainLevel)
+		panic("expression too deeply nested")
+	}
 }
 
 // Advance to the next
@@ -420,9 +487,9 @@ func (p *parser) next() {
 			// The comment is on same line as the previous token; it
 			// cannot be a lead comment but may be a line comment.
 			comment, endline = p.consumeCommentGroup(prevLine, 0)
-			if p.file.Line(p.pos) != endline {
-				// The next token is on a different line, thus
-				// the last comment group is a line comment.
+			if p.file.Line(p.pos) != endline || p.tok == token.EOF {
+				// The next token is on a different line, or there is
+				// none, thus the last comment group is a line comment.
 				comment.Line = true
 			}
 		}
@@ -573,25 +640,6 @@ func syncExpr(p *parser) {
 	}
 }
 
-// safePos returns a valid file position for a given position: If pos
-// is valid to begin with, safePos returns pos. If pos is out-of-range,
-// safePos returns the EOF position.
-//
-// This is hack to work around "artificial" end positions in the AST which
-// are computed by adding 1 to (presumably valid) token positions. If the
-// token positions are invalid due to parse errors, the resulting end position
-// may be past the file's EOF position, which would lead to panics if used
-// later on.
-func (p *parser) safePos(pos token.Pos) (res token.Pos) {
-	defer func() {
-		if recover() != nil {
-			res = p.file.Pos(p.file.Base()+p.file.Size(), pos.RelPos()) // EOF position
-		}
-	}()
-	_ = p.file.Offset(pos) // trigger a panic if position is out-of-range
-	return pos
-}
-
 // ----------------------------------------------------------------------------
 // Identifiers
 
@@ -645,6 +693,11 @@ func (p *parser) parseOperand() (expr ast.Expr) {
 
 	switch p.tok {
 	case token.IDENT:
+		if p.lit == "#" {
+			if x := p.parseClosedLiteral(); x != nil {
+				return x
+			}
+		}
 		ident := p.parseIdent()
 		// Check for optional reference marker (?)
 		// Don't consume ? if it's followed by : (that's a field constraint, not optional reference)
@@ -664,11 +717,19 @@ func (p *parser) parseOperand() (expr ast.Expr) {
 		return p.parseList()
 
 	case token.FUNC:
-		if p.cfg.Mode&ParseFuncs != 0 {
+		if p.functionsEnabled() {
 			return p.parseFunc()
-		} else {
-			return p.parseKeyIdent()
 		}
+		if p.disabledFuncSyntaxAhead() {
+			p.errf(p.pos, "function syntax requires @experiment(functions)")
+			// Recover by parsing the function literal as if the experiment
+			// were enabled, including any "->" tokens. The experiment is left
+			// enabled in the scanner: the file failed already, and any further
+			// function syntax is best recovered the same way.
+			p.scanner.SetExperiments(p.scannerExperiments(true))
+			return p.parseFunc()
+		}
+		return p.parseKeyIdent()
 
 	case token.BOTTOM:
 		c := p.openComments()
@@ -690,6 +751,8 @@ func (p *parser) parseOperand() (expr ast.Expr) {
 		defer func() { c.closeNode(p, expr) }()
 		lparen := p.pos
 		p.next()
+		p.pushCloser(token.RPAREN)
+		defer p.popCloser()
 		p.exprLev++
 		p.openList()
 		x := p.parseRHS() // types may be parenthesized: (some type)
@@ -727,11 +790,18 @@ func (p *parser) parseIndexOrSlice(x ast.Expr) (expr ast.Expr) {
 
 	const N = 2
 	lbrack := p.expect(token.LBRACK)
+	p.pushCloser(token.RBRACK)
+	defer p.popCloser()
 
 	p.exprLev++
 	var index [N]ast.Expr
 	var colons [N - 1]token.Pos
-	if p.tok != token.COLON {
+	if p.tok == token.RBRACK {
+		// An empty index is not permitted; accept it for parsing
+		// tolerance, but complain.
+		p.errorExpected(p.pos, "operand")
+		index[0] = &ast.BadExpr{From: p.pos, To: p.pos}
+	} else if p.tok != token.COLON {
 		index[0] = p.parseRHS()
 	}
 	nColons := 0
@@ -788,11 +858,41 @@ func (p *parser) parseCallOrConversion(fun ast.Expr) (expr *ast.CallExpr) {
 	defer p.closeList()
 
 	lparen := p.expect(token.LPAREN)
+	p.pushCloser(token.RPAREN)
+	defer p.popCloser()
 
 	p.exprLev++
 	var list []ast.Expr
+	var labels []ast.Label
+	var ellipsis token.Pos
+	seenLabel := false
 	for p.tok != token.RPAREN && p.tok != token.EOF {
+		if p.tok == token.ELLIPSIS {
+			// A trailing "..." marks a partial application and must be the
+			// last element of the argument list.
+			if !p.functionsEnabled() {
+				p.errf(p.pos, "partial application requires @experiment(functions)")
+			}
+			ellipsis = p.pos
+			p.next()
+			if p.tok == token.COMMA {
+				p.next()
+			}
+			break
+		}
+		label := p.parseCallArgLabel()
+		if label != nil {
+			seenLabel = true
+		} else if seenLabel {
+			p.errf(p.pos, "positional argument after labeled argument")
+		}
 		list = append(list, p.parseRHS()) // builtins may expect a type: make(some type, ...)
+		if label != nil || labels != nil {
+			if labels == nil {
+				labels = make([]ast.Label, len(list)-1)
+			}
+			labels = append(labels, label)
+		}
 		if !p.atComma("argument list", token.RPAREN) {
 			break
 		}
@@ -802,11 +902,37 @@ func (p *parser) parseCallOrConversion(fun ast.Expr) (expr *ast.CallExpr) {
 	rparen := p.expectClosing(token.RPAREN, "argument list")
 
 	return &ast.CallExpr{
-		Fun:    fun,
-		Lparen: lparen,
-		Args:   list,
-		Rparen: rparen,
+		Fun:       fun,
+		Lparen:    lparen,
+		Args:      list,
+		ArgLabels: labels,
+		Ellipsis:  ellipsis,
+		Rparen:    rparen,
 	}
+}
+
+func (p *parser) parseCallArgLabel() ast.Label {
+	if p.tok != token.IDENT {
+		return nil
+	}
+	p.peek()
+	if p.peekToken.tok != token.COLON {
+		return nil
+	}
+	if !p.functionsEnabled() {
+		p.errf(p.pos, "labeled arguments require @experiment(functions)")
+	}
+	label := p.parseIdent()
+	// Mirror the parameter name restrictions of function signatures; see
+	// checkFuncParamName.
+	switch {
+	case internal.IsDef(label.Name):
+		p.errf(label.NamePos, "definitions are not allowed as argument labels")
+	case label.Name == "_":
+		p.errf(label.NamePos, "_ is not allowed as an argument label")
+	}
+	p.expect(token.COLON)
+	return label
 }
 
 // TODO: inline this function in parseFieldList once we no longer user comment
@@ -959,6 +1085,7 @@ func (p *parser) parseField() (decl ast.Decl) {
 
 	switch p.tok {
 	case token.OPTION, token.NOT:
+		p.rejectPatternConstraintMarker(m.Label)
 		m.Constraint = p.tok
 		p.next()
 	}
@@ -1000,9 +1127,16 @@ func (p *parser) parseField() (decl ast.Decl) {
 	m.TokenPos = p.pos
 	p.expect(token.COLON)
 
+	// Each chained label nests its value in another struct.
+	var n int
 	for {
-		if l, ok := m.Label.(*ast.ListLit); ok && len(l.Elts) != 1 {
-			p.errf(l.Pos(), "square bracket must have exactly one element")
+		if l, ok := m.Label.(*ast.ListLit); ok {
+			switch {
+			case l.Hash.IsValid():
+				p.errf(l.Pos(), "a closed list literal cannot be a label")
+			case len(l.Elts) != 1:
+				p.errf(l.Pos(), "square bracket must have exactly one element")
+			}
 		}
 
 		label, expr, _, ok := p.parseLabel(true)
@@ -1013,6 +1147,8 @@ func (p *parser) parseField() (decl ast.Decl) {
 			m.Value = expr
 			break
 		}
+		n++
+		incChainLevel(p)
 		field := &ast.Field{Label: label}
 		m.Value = &ast.StructLit{Elts: []ast.Decl{field}}
 		m = field
@@ -1022,6 +1158,7 @@ func (p *parser) parseField() (decl ast.Decl) {
 
 		switch p.tok {
 		case token.OPTION, token.NOT:
+			p.rejectPatternConstraintMarker(m.Label)
 			m.Constraint = p.tok
 			p.next()
 		}
@@ -1029,6 +1166,7 @@ func (p *parser) parseField() (decl ast.Decl) {
 		m.TokenPos = p.pos
 		p.expect(token.COLON)
 	}
+	p.chainLevel -= n
 
 	if attrs := p.parseAttributes(); attrs != nil {
 		m.Attrs = attrs
@@ -1037,6 +1175,20 @@ func (p *parser) parseField() (decl ast.Decl) {
 	p.consumeDeclComma()
 
 	return this
+}
+
+// rejectPatternConstraintMarker errors if the current ? or ! marker is on a
+// pattern constraint label such as [string], which is optional by construction.
+func (p *parser) rejectPatternConstraintMarker(label ast.Label) {
+	if _, ok := label.(*ast.ListLit); !ok {
+		return
+	}
+	switch p.tok {
+	case token.OPTION:
+		p.errf(p.pos, "pattern constraint cannot be marked optional")
+	case token.NOT:
+		p.errf(p.pos, "pattern constraint cannot be marked required")
+	}
 }
 
 func (p *parser) parseAttributes() (attrs []*ast.Attribute) {
@@ -1053,14 +1205,68 @@ func (p *parser) parseAttribute(inPreamble bool) *ast.Attribute {
 	a := &ast.Attribute{At: p.pos, Text: p.lit}
 
 	if inPreamble {
-		key, body := a.Split()
-		if key == "experiment" {
-			p.expList = append(p.expList, body)
-		}
+		p.addFileAttribute(a, true)
 	}
 	p.next()
 	c.closeNode(p, a)
 	return a
+}
+
+// addFileAttribute records the experiments enabled by a, a file attribute,
+// if it is an @experiment attribute, and the language version it declares
+// if it is the file's @version attribute: the first file attribute, before
+// the package clause. [parser.checkVersionAttrs] reports any other @version
+// attribute.
+func (p *parser) addFileAttribute(a *ast.Attribute, beforePackage bool) {
+	defer func() { p.fileAttrs++ }()
+	switch a.Name() {
+	case "experiment":
+		_, body := a.Split()
+		p.expList = append(p.expList, body)
+	case "version":
+		if p.fileAttrs > 0 || !beforePackage {
+			return
+		}
+		p.versionAttr = a
+		attr := internal.ParseAttr(a)
+		var v string
+		var err error
+		switch {
+		case attr.Err != nil:
+			err = attr.Err
+		case len(attr.Fields) != 1:
+			err = fmt.Errorf("want a single language version")
+		default:
+			if v, err = attr.String(0); err == nil {
+				v, err = cueversion.CheckLanguageVersion(v)
+			}
+		}
+		if err != nil {
+			p.errf(a.At, "invalid @version attribute: %v", err)
+			return
+		}
+		p.fileVersion = v
+	}
+}
+
+// checkVersionAttrs reports any top-level @version attribute of decls other
+// than the file's own: one among the leading attributes repeats it, and any
+// other is misplaced.
+func (p *parser) checkVersionAttrs(decls []ast.Decl) {
+	leading := true
+	for _, d := range decls {
+		a, ok := d.(*ast.Attribute)
+		switch {
+		case !ok:
+			_, comment := d.(*ast.CommentGroup)
+			leading = leading && comment
+		case a == p.versionAttr || a.Name() != "version":
+		case leading && p.versionAttr != nil:
+			p.errf(a.At, "repeated @version attribute")
+		default:
+			p.errf(a.At, "@version must be the first file attribute, before the package clause, any @experiment attribute, and any declaration")
+		}
+	}
 }
 
 func (p *parser) parseLabel(rhs bool) (label ast.Label, expr ast.Expr, decl ast.Decl, ok bool) {
@@ -1140,6 +1346,8 @@ func (p *parser) parseStruct() (expr ast.Expr) {
 		defer un(trace(p, "StructLit"))
 	}
 
+	p.pushCloser(token.RBRACE)
+	defer p.popCloser()
 	elts := p.parseStructBody()
 	rbrace := p.expectClosing(token.RBRACE, "struct literal")
 	return &ast.StructLit{
@@ -1250,8 +1458,16 @@ func (p *parser) parseComprehensionClauses() (clauses []ast.Clause, c *commentSt
 
 		case token.TRY:
 			c := p.openComments()
+			tryPos := p.expect(token.TRY)
+			if first {
+				switch p.tok {
+				case token.COLON, token.BIND, token.OPTION, token.NOT,
+					token.COMMA, token.EOF:
+					return nil, c
+				}
+			}
 
-			tc := &ast.TryClause{Try: p.expect(token.TRY)}
+			tc := &ast.TryClause{Try: tryPos}
 
 			// Check for assignment form: try x = expr
 			if p.tok == token.IDENT {
@@ -1328,6 +1544,191 @@ func (p *parser) parseFallbackClause(clauses []ast.Clause) *ast.FallbackClause {
 	}).(*ast.FallbackClause)
 }
 
+// parseClosedLiteral parses a closed literal, #[...] or #{...}, if the
+// current token is the identifier "#" immediately followed by a bracket, and
+// returns nil otherwise.
+//
+// Without the openlists experiment, "#[" indexes a definition named "#", as
+// it always has. With the experiment, "#[" always starts a closed list, and
+// such an index is written "(#)[...]": "# [" is rejected rather than parsed
+// as an index, as formatting would remove the space.
+func (p *parser) parseClosedLiteral() ast.Expr {
+	// A caller may already have peeked at the token after "#", as call
+	// arguments do to recognize labels.
+	if !p.peekToken.scanned {
+		p.peek()
+	}
+	next := p.peekToken
+	adjacent := next.pos.Offset() == p.pos.Offset()+1
+	enabled := p.experiments != nil && p.experiments.OpenLists
+
+	switch {
+	case next.tok == token.LBRACE && adjacent:
+		if !enabled {
+			p.errf(p.pos, "closed literals require @experiment(openlists)")
+		}
+		hash := p.pos
+		p.next()
+		s, ok := p.parseStruct().(*ast.StructLit)
+		if ok {
+			s.Hash = hash
+		}
+		return s
+
+	case next.tok == token.LBRACK && enabled && !adjacent:
+		p.errf(next.pos, "an index on a definition named # must be written (#)[...] with @experiment(openlists)")
+
+	case next.tok == token.LBRACK && enabled:
+		hash := p.pos
+		p.next()
+		l, ok := p.parseList().(*ast.ListLit)
+		if !ok {
+			return l
+		}
+		l.Hash = hash
+		if n := len(l.Elts); n > 0 {
+			if e, ok := l.Elts[n-1].(*ast.Ellipsis); ok {
+				p.errf(e.Ellipsis, "closed list literal cannot end in an ellipsis")
+			}
+		}
+		return l
+	}
+	return nil
+}
+
+func (p *parser) functionsEnabled() bool {
+	return p.cfg.Mode&ParseFuncs != 0 ||
+		(p.experiments != nil && p.experiments.Functions)
+}
+
+func (p *parser) functionsExperimentEnabled() bool {
+	return p.experiments != nil && p.experiments.Functions
+}
+
+// setExperiments sets up the experiments for the given language version and
+// experiment names, reporting whether it succeeded. On failure, the error is
+// recorded and the parser must not proceed, as p.experiments is unset.
+func (p *parser) setExperiments(version string, names ...string) bool {
+	exp, err := cueexperiment.NewFile(version, names...)
+	if err != nil {
+		e := errors.Wrapf(err, p.pos, "parsing experiments for version %q", version)
+		p.errors = errors.Append(p.errors, e)
+		return false
+	}
+	p.experiments = exp
+	p.file.SetExperiments(exp)
+	p.scanner.SetExperiments(p.scannerExperiments(false))
+	return true
+}
+
+// scannerExperiments returns the experiment state used for scanning. The
+// ParseFuncs compatibility mode and error recovery can force function tokens
+// on without changing the experiment state recorded on the parsed file.
+func (p *parser) scannerExperiments(forceFunctions bool) *cueexperiment.File {
+	experiments := cueexperiment.File{}
+	if p.experiments != nil {
+		experiments = *p.experiments
+	}
+	if forceFunctions || p.cfg.Mode&ParseFuncs != 0 {
+		experiments.Functions = true
+	}
+	return &experiments
+}
+
+// disabledFuncSyntaxAhead reports whether the tokens following a "func"
+// keyword look like function syntax, that is, a parenthesized parameter list
+// followed by "->" or ":". It is used to report a helpful error when function
+// syntax is used while the functions experiment is disabled.
+//
+// The lookahead scans with a copy of the scanner so that the position of the
+// parser itself is unaffected. Scan errors encountered during the lookahead
+// are suppressed; if the input is genuinely malformed, the real parse of the
+// same tokens reports the error.
+//
+// TODO: remove this lookahead once the functions experiment concludes and
+// slightly worse errors for older language versions, where "func" can be a
+// regular identifier, become acceptable.
+func (p *parser) disabledFuncSyntaxAhead() bool {
+	if p.pos.Offset() < p.noFuncSyntaxBefore {
+		return false
+	}
+	s := p.scanner
+	// Recognize "->" during the lookahead: it is precisely the token that
+	// distinguishes function syntax.
+	s.SetExperiments(p.scannerExperiments(true))
+
+	p.inLookahead = true
+	defer func() { p.inLookahead = false }()
+
+	// next returns the next non-comment token, tracking the parenthesis
+	// nesting depth and driving string interpolations per the scanner
+	// contract (see [scanner.Scanner.Scan]): an interpolation expression is
+	// bounded by LPAREN and RPAREN tokens, and after its RPAREN is scanned,
+	// ResumeInterpolation continues the enclosing string literal.
+	depth := 0
+	var interp []int // parenthesis depths of open interpolation expressions
+	var rparen token.Pos
+	afterRParen := false // the previous token was an RPAREN
+	decider := false     // a "->" or ":" followed an RPAREN
+	next := func() token.Token {
+		for {
+			pos, tok, _ := s.Scan()
+			switch tok {
+			case token.COMMENT:
+				continue
+			case token.INTERPOLATION:
+				// The LPAREN opening the interpolation expression is
+				// returned as the next token.
+				interp = append(interp, depth+1)
+				continue
+			case token.LPAREN:
+				depth++
+			case token.RPAREN:
+				if n := len(interp); n > 0 && interp[n-1] == depth {
+					// This parenthesis closes an interpolation expression;
+					// it is part of the string literal, not of the
+					// expression structure.
+					depth--
+					lit := s.ResumeInterpolation()
+					if !strings.HasSuffix(lit, "(") {
+						// No further interpolation expression follows in
+						// this string literal.
+						interp = interp[:n-1]
+					}
+					continue
+				}
+				depth--
+			}
+			if afterRParen && (tok == token.RARROW || tok == token.COLON) {
+				decider = true
+			}
+			afterRParen = tok == token.RPAREN
+			if afterRParen {
+				rparen = pos
+			}
+			return tok
+		}
+	}
+
+	if next() != token.LPAREN {
+		return false
+	}
+	for depth > 0 {
+		if next() == token.EOF {
+			return false
+		}
+	}
+	switch next() {
+	case token.RARROW, token.COLON:
+		return true
+	default:
+		if !decider {
+			p.noFuncSyntaxBefore = rparen.Offset()
+		}
+		return false
+	}
+}
+
 func (p *parser) parseFunc() (expr ast.Expr) {
 	if p.trace {
 		defer un(trace(p, "Func"))
@@ -1347,40 +1748,276 @@ func (p *parser) parseFunc() (expr ast.Expr) {
 		}
 	}
 
-	p.expect(token.LPAREN)
-	args := p.parseFuncArgs()
-	p.expectClosing(token.RPAREN, "argument type list")
+	lparen := p.expect(token.LPAREN)
+	p.pushCloser(token.RPAREN)
+	defer p.popCloser()
+	params, ellipsis := p.parseFuncParams()
+	rparen := p.expectClosing(token.RPAREN, "function parameter list")
 
-	p.expect(token.COLON)
-	ret := p.parseExpr()
+	var arrow token.Pos
+	var ret ast.Expr
+	var colon token.Pos
+	var body ast.Expr
+	if p.tok == token.RARROW {
+		arrow = p.pos
+		p.next()
+		ret = p.parseExpr()
+		if p.tok == token.COLON {
+			colon = p.pos
+			p.next()
+			body = p.parseExpr()
+		}
+	} else if p.tok == token.COLON {
+		colon = p.pos
+		p.next()
+		if p.functionsExperimentEnabled() {
+			body = p.parseExpr()
+		} else {
+			// Compatibility for the old experimental parser hook.
+			ret = p.parseExpr()
+		}
+	}
+	if ellipsis != token.NoPos && body != nil {
+		p.errf(ellipsis, "open function signature cannot have a body")
+	}
 
 	return &ast.Func{
-		Func: fun,
-		Args: args,
-		Ret:  ret,
+		Func:     fun,
+		Lparen:   lparen,
+		Params:   params,
+		Ellipsis: ellipsis,
+		Rparen:   rparen,
+		Arrow:    arrow,
+		Ret:      ret,
+		Colon:    colon,
+		Body:     body,
+		//lint:ignore SA1019 keep populating Args for older consumers
+		Args: funcParamArgs(params),
 	}
 }
 
-func (p *parser) parseFuncArgs() (list []ast.Expr) {
+func funcParamArgs(params []*ast.FuncParam) []ast.Expr {
+	if len(params) == 0 {
+		return nil
+	}
+	args := make([]ast.Expr, 0, len(params))
+	for _, p := range params {
+		args = append(args, p.Value)
+	}
+	return args
+}
+
+func (p *parser) parseFuncParams() (list []*ast.FuncParam, ellipsis token.Pos) {
 	if p.trace {
-		defer un(trace(p, "FuncArgs"))
+		defer un(trace(p, "FuncParams"))
 	}
 	p.openList()
 	defer p.closeList()
 
+	seenNamed := false
+	seenNameOnly := false
 	for p.tok != token.RPAREN && p.tok != token.EOF {
-		list = append(list, p.parseFuncArg())
+		if p.tok == token.ELLIPSIS {
+			pos := p.pos
+			p.next()
+			switch p.tok {
+			case token.COMMA, token.RPAREN, token.EOF:
+			case token.ATTRIBUTE:
+				p.errf(p.pos, "attributes are not allowed after ... in a parameter list")
+				p.parseAttributes() // recover: skip the attributes
+			default:
+				p.errf(p.pos, "variadic parameters are not supported")
+				p.parseExpr() // recover: skip the variadic type expression
+			}
+			if ellipsis == token.NoPos {
+				ellipsis = pos
+			} else {
+				p.errf(pos, "duplicate ... in parameter list")
+			}
+			p.expectComma() // skip over a trailing comma or newline
+			continue
+		}
+		param := p.parseFuncParam()
+		if ellipsis != token.NoPos {
+			p.errf(param.Pos(), "parameter after ... in parameter list")
+		}
+		if (seenNamed && isPositionalOnlyFuncParam(param)) ||
+			(seenNameOnly && isPositionalFuncParam(param)) {
+			p.errf(param.Pos(), "positional parameter after named parameter")
+		}
+		if isNamedFuncParam(param) {
+			seenNamed = true
+		}
+		if isNameOnlyFuncParam(param) {
+			seenNameOnly = true
+		}
+		list = append(list, param)
 		p.expectComma() // skip over a trailing comma or newline
 	}
 
-	return list
+	return list, ellipsis
 }
 
-func (p *parser) parseFuncArg() (expr ast.Expr) {
-	if p.trace {
-		defer un(trace(p, "FuncArg"))
+func isNamedFuncParam(param *ast.FuncParam) bool {
+	if param == nil {
+		return false
 	}
-	return p.parseExpr()
+	ident, ok := param.Label.(*ast.Ident)
+	return ok && ident.Name != "_"
+}
+
+func isPositionalOnlyFuncParam(param *ast.FuncParam) bool {
+	if param == nil || param.Label == nil {
+		return true
+	}
+	ident, ok := param.Label.(*ast.Ident)
+	return ok && ident.Name == "_"
+}
+
+func isPositionalFuncParam(param *ast.FuncParam) bool {
+	if isPositionalOnlyFuncParam(param) {
+		return true
+	}
+	return param != nil && param.Constraint == token.ILLEGAL
+}
+
+func isNameOnlyFuncParam(param *ast.FuncParam) bool {
+	return isNamedFuncParam(param) && param.Constraint != token.ILLEGAL
+}
+
+func (p *parser) parseFuncParam() (param *ast.FuncParam) {
+	if p.trace {
+		defer un(trace(p, "FuncParam"))
+	}
+	c := p.openComments()
+	defer func() { c.closeNode(p, param) }()
+
+	param = &ast.FuncParam{Constraint: token.ILLEGAL}
+
+	// Parameter lists are a restricted form of struct declarations: only
+	// simple (possibly anonymous) parameter declarations are allowed. Report
+	// dedicated errors for the more common declaration forms.
+	switch p.tok {
+	case token.LET:
+		p.errf(p.pos, "let declarations are not allowed in a parameter list")
+		param.Value = p.skipFuncParam(p.pos)
+		return param
+
+	case token.ATTRIBUTE:
+		p.errf(p.pos, "attribute declarations are not allowed in a parameter list")
+		param.Value = p.skipFuncParam(p.pos)
+		return param
+	}
+
+	if p.tok == token.IDENT {
+		p.peek()
+		switch p.peekToken.tok {
+		case token.COLON, token.OPTION, token.NOT, token.TILDE:
+			param.Label = p.parseIdent()
+			param.Alias = p.parseFuncPostfixAlias()
+			switch p.tok {
+			case token.OPTION, token.NOT:
+				param.Constraint = p.tok
+				p.next()
+			}
+			p.checkFuncParamName(param)
+			param.TokenPos = p.expect(token.COLON)
+			param.Value = p.parseExpr()
+			p.parseFuncParamDefault(param)
+			p.checkFuncParamColon(param)
+			param.Attrs = p.parseAttributes()
+			return param
+		}
+	}
+
+	param.Value = p.parseExpr()
+	p.parseFuncParamDefault(param)
+	p.checkFuncParamColon(param)
+	param.Attrs = p.parseAttributes()
+	return param
+}
+
+// parseFuncParamDefault parses the optional default that may follow a
+// parameter's constraint: "=" and an expression, as in a: int = 2. The
+// default applies when a call leaves the parameter unbound. A required
+// parameter (a!) is the name-only counterpart of a named one, so a default
+// makes it omittable in the same way. An optional parameter (a?) is absent
+// from the body when omitted, so a default on it could never apply and is
+// reported; the expression is still parsed to keep the parameter list in
+// sync.
+func (p *parser) parseFuncParamDefault(param *ast.FuncParam) {
+	if p.tok != token.BIND {
+		return
+	}
+	param.Equal = p.pos
+	if param.Constraint == token.OPTION {
+		name := "_"
+		if ident, ok := param.Label.(*ast.Ident); ok {
+			name = ident.Name
+		}
+		p.errf(p.pos, "optional parameter %s cannot have a default; declare it as %s! instead", name, name)
+	}
+	p.next()
+	param.Default = p.parseExpr()
+}
+
+// checkFuncParamName reports a dedicated error for a parameter name that is a
+// syntactically valid identifier but not permitted as a parameter name: a
+// definition (#a), or a blank name carrying an optional or required marker
+// (_?, _!), which could never be bound.
+func (p *parser) checkFuncParamName(param *ast.FuncParam) {
+	ident, ok := param.Label.(*ast.Ident)
+	if !ok {
+		return
+	}
+	if internal.IsDef(ident.Name) {
+		p.errf(ident.Pos(), "definitions are not allowed in a parameter list")
+		return
+	}
+	if ident.Name == "_" && param.Constraint != token.ILLEGAL {
+		p.errf(ident.Pos(), "an anonymous parameter cannot be marked optional or required")
+	}
+}
+
+// checkFuncParamColon reports a dedicated error when a parameter declaration
+// is followed by another colon, which indicates a declaration form that is
+// not allowed in a parameter list, such as a multi-part label (a: b: int), a
+// pattern constraint ([string]: int), or a quoted or dynamic label. It
+// consumes the offending suffix so that subsequent parameters can still be
+// parsed.
+func (p *parser) checkFuncParamColon(param *ast.FuncParam) {
+	if p.tok != token.COLON {
+		return
+	}
+	switch {
+	case param.Label != nil:
+		p.errf(p.pos, "multiple labels are not allowed in a parameter list")
+	case isFuncParamPattern(param.Value):
+		p.errf(p.pos, "pattern constraints are not allowed in a parameter list")
+	default:
+		// The expression parsed as the value was actually intended as a
+		// label, such as a quoted ("a-b":) or dynamic ((x):) label.
+		p.errf(p.pos, "a parameter name must be an identifier")
+	}
+	for p.tok == token.COLON {
+		p.next()
+		p.parseExpr() // recover: skip the remainder of the declaration
+	}
+}
+
+func isFuncParamPattern(v ast.Expr) bool {
+	_, ok := v.(*ast.ListLit)
+	return ok
+}
+
+// skipFuncParam skips the remainder of a malformed parameter declaration up
+// to the next comma or closing parenthesis, returning a BadExpr covering the
+// skipped range.
+func (p *parser) skipFuncParam(from token.Pos) ast.Expr {
+	for p.tok != token.COMMA && p.tok != token.RPAREN && p.tok != token.EOF {
+		p.next()
+	}
+	return &ast.BadExpr{From: from, To: p.pos}
 }
 
 func (p *parser) parseList() (expr ast.Expr) {
@@ -1390,6 +2027,8 @@ func (p *parser) parseList() (expr ast.Expr) {
 		defer un(trace(p, "ListLiteral"))
 	}
 
+	p.pushCloser(token.RBRACK)
+	defer p.popCloser()
 	elts := p.parseListElements()
 
 	if p.tok == token.ELLIPSIS {
@@ -1508,7 +2147,12 @@ func (p *parser) parseAlias(lhs ast.Expr) (expr ast.Expr) {
 
 	// Check if old-style aliases are disallowed
 	if p.experiments != nil && p.experiments.AliasV2 {
-		p.errf(pos, "old-style alias syntax (=) is not allowed with @experiment(aliasv2); use postfix syntax (~X or ~(K,V))")
+		// Blame the language version once aliasv2 is stable there, else the attribute.
+		cause := "with @experiment(aliasv2)"
+		if cueexperiment.IsStable("aliasv2", p.experiments.LanguageVersion()) {
+			cause = "as of language version v0.18.0"
+		}
+		p.errf(pos, "old-style alias syntax (=) is not allowed %s; use postfix syntax (~X or ~(K,V))", cause)
 		p.next()
 		expr = p.parseRHS()
 		return expr
@@ -1528,9 +2172,21 @@ func (p *parser) parseAlias(lhs ast.Expr) (expr ast.Expr) {
 	return expr
 }
 
-// parsePostfixAlias parses the postfix alias syntax: ~X or ~(K,V)
+// parsePostfixAlias parses the postfix alias syntax: ~X or ~(K,V).
 // Returns nil if no alias is present.
 func (p *parser) parsePostfixAlias() *ast.PostfixAlias {
+	return p.parsePostfixAliasAllowed(false)
+}
+
+func (p *parser) parseFuncPostfixAlias() *ast.PostfixAlias {
+	a := p.parsePostfixAliasAllowed(true)
+	if a != nil && a.Label != nil {
+		p.errf(a.Pos(), "dual postfix alias not supported in function parameters")
+	}
+	return a
+}
+
+func (p *parser) parsePostfixAliasAllowed(allowFunctions bool) *ast.PostfixAlias {
 	if p.tok != token.TILDE {
 		return nil
 	}
@@ -1538,8 +2194,10 @@ func (p *parser) parsePostfixAlias() *ast.PostfixAlias {
 	pos := p.pos
 
 	// Check if postfix alias syntax requires experiment
-	if p.experiments == nil || !p.experiments.AliasV2 {
-		p.errf(pos, "postfix alias syntax requires @experiment(aliasv2)")
+	aliasEnabled := p.experiments != nil && p.experiments.AliasV2
+	functionAliasEnabled := allowFunctions && p.functionsExperimentEnabled()
+	if !aliasEnabled && !functionAliasEnabled {
+		p.errf(pos, "postfix alias syntax requires language version v0.18.0 or @experiment(aliasv2)")
 	}
 
 	p.next()
@@ -1616,8 +2274,10 @@ func (p *parser) parsePostfixAlias() *ast.PostfixAlias {
 }
 
 // checkExpr checks that x is an expression (and not a type).
+// A [ast.ParenExpr] is accepted as is: its inner expression was already
+// checked when it was parsed.
 func (p *parser) checkExpr(x ast.Expr) ast.Expr {
-	switch unparen(x).(type) {
+	switch x.(type) {
 	case *ast.BadExpr:
 	case *ast.BottomLit:
 	case *ast.Ident:
@@ -1627,7 +2287,6 @@ func (p *parser) checkExpr(x ast.Expr) ast.Expr {
 	case *ast.StructLit:
 	case *ast.ListLit:
 	case *ast.ParenExpr:
-		panic("unreachable")
 	case *ast.SelectorExpr:
 	case *ast.IndexExpr:
 	case *ast.SliceExpr:
@@ -1639,16 +2298,8 @@ func (p *parser) checkExpr(x ast.Expr) ast.Expr {
 		// all other nodes are not proper expressions
 		p.errorExpected(x.Pos(), "expression")
 		x = &ast.BadExpr{
-			From: x.Pos(), To: p.safePos(x.End()),
+			From: x.Pos(), To: x.End(),
 		}
-	}
-	return x
-}
-
-// If x is of the form (T), unparen returns unparen(T), otherwise it returns x.
-func unparen(x ast.Expr) ast.Expr {
-	if p, isParen := x.(*ast.ParenExpr); isParen {
-		x = unparen(p.X)
 	}
 	return x
 }
@@ -1664,8 +2315,11 @@ func (p *parser) parsePrimaryExpr() ast.Expr {
 
 func (p *parser) parsePrimaryExprTail(operand ast.Expr) ast.Expr {
 	x := operand
+	// Each iteration nests x one level deeper.
+	var n int
 L:
-	for {
+	for n = 1; ; n++ {
+		incChainLevel(p)
 		switch p.tok {
 		case token.PERIOD:
 			period := p.pos
@@ -1710,7 +2364,12 @@ L:
 
 				pos := p.pos
 				p.errorExpected(pos, "selector")
-				p.next() // make progress
+				// Leave a comma or the closing token of the enclosing
+				// construct for it to consume, so that the error does not
+				// cascade.
+				if p.tok != token.COMMA && !p.atCloser() {
+					p.next() // make progress
+				}
 				x = &ast.SelectorExpr{
 					X:      x,
 					Period: period,
@@ -1736,8 +2395,7 @@ L:
 				// Consume the token and give a clear error
 				pos := p.pos
 				p.next()
-				err := errors.Newf(pos, "postfix ... operator requires @experiment(explicitopen)")
-				p.errors = errors.Append(p.errors, err)
+				p.errf(pos, "postfix ... operator requires language version v0.18.0 or @experiment(explicitopen)")
 				// Return a BadExpr to continue parsing
 				x = &ast.BadExpr{From: pos, To: p.pos}
 			}
@@ -1745,6 +2403,7 @@ L:
 			break L
 		}
 	}
+	p.chainLevel -= n
 
 	return x
 }
@@ -1792,9 +2451,12 @@ func (p *parser) parseBinaryExpr(prec1 int) ast.Expr {
 }
 
 func (p *parser) parseBinaryExprTail(prec1 int, x ast.Expr) ast.Expr {
-	for {
+	// Each iteration nests x one level deeper.
+	for n := 1; ; n++ {
+		incChainLevel(p)
 		op, prec := p.tok, p.tok.Precedence()
 		if prec < prec1 {
+			p.chainLevel -= n
 			return x
 		}
 		c := p.openComments()
@@ -1824,6 +2486,10 @@ func (p *parser) parseInterpolation() (expr ast.Expr) {
 	p.next()
 	last := &ast.BasicLit{ValuePos: pos, Kind: token.STRING, Value: lit}
 	exprs := []ast.Expr{last}
+
+	// Each interpolated expression ends with a closing parenthesis.
+	p.pushCloser(token.RPAREN)
+	defer p.popCloser()
 
 	// Note: we can only tell if the string returned by ResumeInterpolation
 	// starts a new interpolated expression by whether it ends in a parenthesis.
@@ -1892,7 +2558,7 @@ func isValidImport(lit string) bool {
 	return s != ""
 }
 
-func (p *parser) parseImportSpec(_ int) *ast.ImportSpec {
+func (p *parser) parseImportSpec() *ast.ImportSpec {
 	if p.trace {
 		defer un(trace(p, "ImportSpec"))
 	}
@@ -1907,10 +2573,24 @@ func (p *parser) parseImportSpec(_ int) *ast.ImportSpec {
 		}
 	}
 
-	path := p.lit
-	pos := p.expect(token.STRING)
-	if pos.IsValid() && !isValidImport(path) {
-		p.errf(pos, "invalid import path: %s", path)
+	pos := p.pos
+	var path string
+	switch {
+	case p.tok == token.STRING:
+		path = p.lit
+		if !isValidImport(path) {
+			p.errf(pos, "invalid import path: %s", path)
+		}
+		p.next()
+	case p.tok == token.INTERPOLATION:
+		p.errf(pos, "import path must not be interpolated")
+		p.parseInterpolation()
+	case p.tok.IsLiteral():
+		p.errf(pos, "import path must be a string")
+		p.next()
+	default:
+		p.errorExpected(pos, "import path")
+		p.skipImportSpec()
 	}
 	p.expectComma() // skip over a comma or newline
 	// collect imports
@@ -1921,6 +2601,33 @@ func (p *parser) parseImportSpec(_ int) *ast.ImportSpec {
 	c.closeNode(p, spec)
 
 	return spec
+}
+
+// skipImportSpec skips to the end of a malformed import spec, without
+// consuming the comma or the closing parenthesis of the import group,
+// so that what follows is still parsed.
+func (p *parser) skipImportSpec() {
+	depth := 0 // of nested brackets within the import spec
+	for p.tok != token.EOF {
+		switch p.tok {
+		case token.COMMA:
+			if depth == 0 {
+				return
+			}
+		case token.LPAREN, token.LBRACK, token.LBRACE:
+			depth++
+		case token.RPAREN, token.RBRACK, token.RBRACE:
+			if depth > 0 {
+				depth--
+			} else if p.atCloser() {
+				return
+			}
+		case token.INTERPOLATION:
+			p.parseInterpolation()
+			continue
+		}
+		p.next()
+	}
 }
 
 func (p *parser) parseImports() *ast.ImportDecl {
@@ -1936,14 +2643,16 @@ func (p *parser) parseImports() *ast.ImportDecl {
 		lparen = p.pos
 		p.next()
 		p.openList()
-		for iota := 0; p.tok != token.RPAREN && p.tok != token.EOF; iota++ {
-			list = append(list, p.parseImportSpec(iota))
+		p.pushCloser(token.RPAREN)
+		defer p.popCloser()
+		for p.tok != token.RPAREN && p.tok != token.EOF {
+			list = append(list, p.parseImportSpec())
 		}
 		p.closeList()
 		rparen = p.expect(token.RPAREN)
 		p.expectComma() // skip over a comma or newline
 	} else {
-		list = append(list, p.parseImportSpec(0))
+		list = append(list, p.parseImportSpec())
 	}
 
 	d := &ast.ImportDecl{
@@ -1975,21 +2684,11 @@ func (p *parser) parseFile() *ast.File {
 
 	var decls []ast.Decl
 
+	// Attributes before the package clause are file attributes.
 	for p.tok == token.ATTRIBUTE {
 		decls = append(decls, p.parseAttribute(true))
 		p.consumeDeclComma()
 	}
-
-	v := p.cfg.Version
-	exp, err := cueexperiment.NewFile(v, p.expList...)
-	if err != nil {
-		e := errors.Wrapf(err, p.pos, "parsing experiments for version %q", v)
-		p.errors = errors.Append(p.errors, e)
-		// Do not proceed without setting p.experiments.
-		return nil
-	}
-	p.experiments = exp
-	p.file.SetExperiments(exp)
 
 	// The package clause is not a declaration: it does not appear in any
 	// scope.
@@ -2015,9 +2714,26 @@ func (p *parser) parseFile() *ast.File {
 		c.closeNode(p, pkg)
 	}
 
+	// Attributes after the package clause are file attributes only when an
+	// import declaration follows them; see [ast.File.Preamble]. Their
+	// experiments are read once that is known.
+	var attrs []*ast.Attribute
 	for p.tok == token.ATTRIBUTE {
-		decls = append(decls, p.parseAttribute(false))
+		a := p.parseAttribute(false)
+		attrs = append(attrs, a)
+		decls = append(decls, a)
 		p.consumeDeclComma()
+	}
+	if p.tok == token.IDENT && p.lit == "import" {
+		for _, a := range attrs {
+			p.addFileAttribute(a, false)
+		}
+	}
+
+	// A file's own @version attribute takes precedence over the configured
+	// version, which is the default for files without one.
+	if !p.setExperiments(cmp.Or(p.fileVersion, p.cfg.Version), p.expList...) {
+		return nil
 	}
 
 	if p.cfg.Mode&PackageClauseOnly == 0 {
@@ -2034,11 +2750,9 @@ func (p *parser) parseFile() *ast.File {
 		}
 	}
 	p.closeList()
+	p.checkVersionAttrs(decls)
 
-	f := &ast.File{
-		Decls:           decls,
-		LanguageVersion: p.cfg.Version,
-	}
+	f := &ast.File{Decls: decls}
 	c.closeNode(p, f)
 	return f
 }

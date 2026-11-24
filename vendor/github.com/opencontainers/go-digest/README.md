@@ -1,10 +1,13 @@
 # go-digest
 
-[![GoDoc](https://godoc.org/github.com/opencontainers/go-digest?status.svg)](https://godoc.org/github.com/opencontainers/go-digest) [![Go Report Card](https://goreportcard.com/badge/github.com/opencontainers/go-digest)](https://goreportcard.com/report/github.com/opencontainers/go-digest) [![Build Status](https://travis-ci.org/opencontainers/go-digest.svg?branch=master)](https://travis-ci.org/opencontainers/go-digest)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Go Reference](https://pkg.go.dev/badge/opencontainers/go-digest)](https://pkg.go.dev/github.com/opencontainers/go-digest)
+[![Go Report Card](https://goreportcard.com/badge/github.com/opencontainers/go-digest)](https://goreportcard.com/report/github.com/opencontainers/go-digest)
+[![CI](https://github.com/opencontainers/go-digest/actions/workflows/test.yml/badge.svg)](https://github.com/opencontainers/go-digest/actions/workflows/test.yml)
 
 Common digest package used across the container ecosystem.
 
-Please see the [godoc](https://godoc.org/github.com/opencontainers/go-digest) for more information.
+Please see the [pkg.go.dev](https://pkg.go.dev/github.com/opencontainers/go-digest) for more information.
 
 # What is a digest?
 
@@ -89,7 +92,7 @@ Copyright © 2019, 2020 OCI Contributors
 Copyright © 2016 Docker, Inc.
 All rights reserved, except as follows.
 Code is released under the [Apache 2.0 license](LICENSE).
-This `README.md` file and the [`CONTRIBUTING.md`](CONTRIBUTING.md) file are licensed under the Creative Commons Attribution 4.0 International License under the terms and conditions set forth in the file [`LICENSE.docs`](LICENSE.docs).
+This `README.md` file and the [`CONTRIBUTING.md`](CONTRIBUTING.md) file are licensed under the Creative Commons Attribution-ShareAlike 4.0 International License under the terms and conditions set forth in the file [`LICENSE.docs`](LICENSE.docs).
 You may obtain a duplicate copy of the same license, titled CC BY-SA 4.0, at http://creativecommons.org/licenses/by-sa/4.0/.
 
 [security]: https://github.com/opencontainers/org/blob/master/security

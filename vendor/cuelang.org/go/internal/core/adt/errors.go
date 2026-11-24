@@ -45,7 +45,7 @@ import (
 // control flow. No other aspects of an error may influence control flow.
 type ErrorCode int8
 
-//go:generate go tool stringer -type=ErrorCode -linecomment
+// See the stringer directive in doc.go for the generated String method.
 
 const (
 	// An EvalError is a fatal evaluation error.
@@ -120,17 +120,6 @@ func isError(v Value) bool {
 	}
 	_, ok := v.(*Bottom)
 	return ok
-}
-
-// isIncomplete reports whether v is associated with an incomplete error.
-func isIncomplete(v *Vertex) bool {
-	if v == nil {
-		return true
-	}
-	if b := v.Bottom(); b != nil {
-		return b.IsIncomplete()
-	}
-	return false
 }
 
 // AddChildError updates x to record an error that occurred in one of
@@ -223,11 +212,40 @@ func addPositions(ctx *OpContext, err *ValueError, c Conjunct) {
 	err.AddPos(c.CloseInfo.Location(ctx))
 }
 
+// NewIncompleteValueError returns the error for a non-concrete value where a
+// concrete one is required, positioned at each of its conjuncts.
+func NewIncompleteValueError(ctx *OpContext, v *Vertex, morePositions ...Node) *Bottom {
+	err := ctx.Newf("incomplete value %v", v.Value())
+	for c := range v.LeafConjuncts() {
+		err.AddPosition(c.Elem())
+	}
+	for _, p := range morePositions {
+		err.AddPosition(p)
+	}
+	return &Bottom{Code: IncompleteError, Err: err}
+}
+
+// NewRequiredNotPresentError reports that the required field v is missing.
+// Besides the required field itself, the error points at the structs unified
+// into v's parent which do not declare it, such as a data file validated
+// against a schema. Structs from definitions are left out, as they are schemas.
+//
+// TODO: consider making the first such struct the primary position, so that
+// tools such as the language server report the error at the data.
 func NewRequiredNotPresentError(ctx *OpContext, v *Vertex, morePositions ...Node) *Bottom {
 	saved := ctx.PushArc(v)
 	err := ctx.Newf("field is required but not present")
 	for _, p := range morePositions {
 		err.AddPosition(p)
+	}
+	// The structs of a vertex within a definition belong to a schema even when
+	// they were not added through a reference to one, as with structure sharing.
+	if p := v.Parent; p != nil && enclosingDef(p) == nil {
+		for _, s := range p.Structs {
+			if !s.fromDef && !declaresField(s.StructLit, v.Label) {
+				err.AddPosition(s.StructLit)
+			}
+		}
 	}
 	for c := range v.LeafConjuncts() {
 		if f, ok := c.x.(*Field); ok && f.ArcType == ArcRequired {
@@ -245,6 +263,26 @@ func NewRequiredNotPresentError(ctx *OpContext, v *Vertex, morePositions ...Node
 	return b
 }
 
+// declaresField reports whether s declares a field with label f, including
+// within embedded struct literals and the bodies and else clauses of
+// comprehensions.
+//
+// TODO: embedded references such as {common, name: "n"} are not resolved,
+// so a struct which declares f through one is reported as lacking it.
+func declaresField(s *StructLit, f Feature) bool {
+	return slices.ContainsFunc(s.Decls, func(d Decl) bool {
+		switch d := d.(type) {
+		case *Field:
+			return d.Label == f
+		case *StructLit:
+			return declaresField(d, f)
+		case *Comprehension:
+			return declaresField(d.Value, f) || d.Fallback != nil && declaresField(d.Fallback, f)
+		}
+		return false
+	})
+}
+
 func newRequiredFieldInComprehensionError(ctx *OpContext, x *ForClause, v *Vertex) *Bottom {
 	err := ctx.Newf("missing required field in for comprehension: %v", v.Label)
 	err.AddPosition(x.Src)
@@ -258,6 +296,16 @@ func newRequiredFieldInComprehensionError(ctx *OpContext, x *ForClause, v *Verte
 }
 
 func (v *Vertex) reportFieldIndexError(c *OpContext, pos token.Pos, f Feature) {
+	// An integer index into a value that can never be a list is a permanent
+	// error. BottomKind falls through so reportFieldError adopts its code.
+	if k := v.Kind(); f.IsInt() && k != BottomKind && k&ListKind == 0 {
+		c.AddBottom(&Bottom{
+			Code: EvalError,
+			Err:  c.NewPosf(pos, "invalid index %d (found %v, want list)", f.Index(), k),
+			Node: v,
+		})
+		return
+	}
 	v.reportFieldError(c, pos, f,
 		"index out of range [%d] with length %d",
 		"undefined field: %s")
@@ -267,6 +315,19 @@ func (v *Vertex) reportFieldCycleError(c *OpContext, pos token.Pos, f Feature) *
 	const msg = "cyclic reference to field %[1]v"
 	b := v.reportFieldError(c, pos, f, msg, msg)
 	return b
+}
+
+// addVertexPositions adds the positions of the expressions that v is composed
+// of to err. Errors about a field of v not being usable otherwise only carry
+// the position of the failing selector, which says nothing about where the
+// value that was searched is declared.
+//
+// Unlike [addPositions], this keeps conjuncts that are not fields, as an
+// inline struct or list is just as much a declaration site as a field is.
+func addVertexPositions(err *ValueError, v *Vertex) {
+	for c := range v.LeafConjuncts() {
+		err.AddPosition(c.x)
+	}
 }
 
 func (v *Vertex) reportFieldError(c *OpContext, pos token.Pos, f Feature, intMsg, stringMsg string) *Bottom {
@@ -287,12 +348,13 @@ func (v *Vertex) reportFieldError(c *OpContext, pos token.Pos, f Feature, intMsg
 
 	label := f.SelectorString(c.Runtime)
 
-	var err errors.Error
+	var err *ValueError
 	if f.IsInt() {
 		err = c.NewPosf(pos, intMsg, f.Index(), iterutil.Count(v.Elems()))
 	} else {
 		err = c.NewPosf(pos, stringMsg, label)
 	}
+	addVertexPositions(err, v)
 	b := &Bottom{
 		Code: code,
 		Err:  err,
@@ -306,12 +368,16 @@ func (v *Vertex) reportFieldError(c *OpContext, pos token.Pos, f Feature, intMsg
 // baseError contains common fields and methods for error types.
 type baseError struct {
 	r      Runtime
-	format func(Runtime, Node) string
 	v      *Vertex
 	pos    token.Pos
 	auxpos []token.Pos
 
 	altPath []string
+
+	// site, if set, is the vertex holding the function call in which the
+	// error arose. The error is then reported at the path of site followed
+	// by altPath (see [OpContext.atCallSite]).
+	site *Vertex
 
 	// auxposBootstrap lets auxpos avoid extra allocations for few positions,
 	// which is a very common scenario.
@@ -343,6 +409,12 @@ func (e *baseError) InputPositions() []token.Pos {
 }
 
 func (e *baseError) Path() (a []string) {
+	if e.site != nil {
+		for _, f := range appendPath(nil, e.site) {
+			a = append(a, f.SelectorString(e.r))
+		}
+		return append(a, e.altPath...)
+	}
 	if len(e.altPath) > 0 {
 		return e.altPath
 	}
@@ -369,13 +441,13 @@ func (c *OpContext) errNode() *Vertex {
 	return c.vertex
 }
 
-// MarkPositions marks the current position stack.
-func (c *OpContext) MarkPositions() int {
+// markPositions marks the current position stack.
+func (c *OpContext) markPositions() int {
 	return len(c.positions)
 }
 
-// ReleasePositions sets the position state to one from a call to MarkPositions.
-func (c *OpContext) ReleasePositions(p int) {
+// releasePositions sets the position state to one from a call to markPositions.
+func (c *OpContext) releasePositions(p int) {
 	c.positions = c.positions[:p]
 }
 
@@ -405,7 +477,6 @@ func (c *OpContext) NewPosf(p token.Pos, format string, args ...interface{}) *Va
 	err := &ValueError{
 		baseError: baseError{
 			r:       c.Runtime,
-			format:  c.Format,
 			v:       c.errNode(),
 			pos:     p,
 			altPath: c.makeAltPath(),
@@ -428,6 +499,7 @@ func (c *OpContext) NewPosf(p token.Pos, format string, args ...interface{}) *Va
 			// Make a shallow copy to avoid that.
 			if v, ok := x.(*Vertex); ok {
 				vcopy := *v
+				vcopy.arcMap = nil
 				x = &vcopy
 			}
 			// Keep the Node in args; ValueError.Msg wraps it in a
@@ -474,7 +546,7 @@ func (e *ValueError) Msg() (format string, args []interface{}) {
 	format, args = e.Message.Msg()
 	for i, a := range args {
 		if x, ok := a.(Node); ok {
-			args[i] = Formatter{X: x, F: e.format, R: e.r}
+			args[i] = Formatter{X: x, R: e.r}
 		}
 	}
 	return format, args
@@ -497,8 +569,8 @@ func (e *ConflictError) Error() string {
 }
 
 func (e *ConflictError) Msg() (format string, args []interface{}) {
-	v1Str := Formatter{X: e.v1, F: e.format, R: e.r}
-	v2Str := Formatter{X: e.v2, F: e.format, R: e.r}
+	v1Str := Formatter{X: e.v1, R: e.r}
+	v2Str := Formatter{X: e.v2, R: e.r}
 	if e.k1 == e.k2 {
 		return "conflicting values %s and %s", []interface{}{v1Str, v2Str}
 	}

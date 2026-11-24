@@ -177,7 +177,7 @@ var p = &pkg.Package{
 		},
 		Result: adt.NumberKind,
 		Func: func(c *pkg.CallCtxt) {
-			xs := c.DecimalList(0)
+			xs := c.NumList(0)
 			if c.Do() {
 				c.Ret, c.Err = Avg(xs)
 			}
@@ -189,7 +189,7 @@ var p = &pkg.Package{
 		},
 		Result: adt.NumberKind,
 		Func: func(c *pkg.CallCtxt) {
-			xs := c.DecimalList(0)
+			xs := c.NumList(0)
 			if c.Do() {
 				c.Ret, c.Err = Max(xs)
 			}
@@ -201,7 +201,7 @@ var p = &pkg.Package{
 		},
 		Result: adt.NumberKind,
 		Func: func(c *pkg.CallCtxt) {
-			xs := c.DecimalList(0)
+			xs := c.NumList(0)
 			if c.Do() {
 				c.Ret, c.Err = Min(xs)
 			}
@@ -213,7 +213,7 @@ var p = &pkg.Package{
 		},
 		Result: adt.NumberKind,
 		Func: func(c *pkg.CallCtxt) {
-			xs := c.DecimalList(0)
+			xs := c.NumList(0)
 			if c.Do() {
 				c.Ret, c.Err = Product(xs)
 			}
@@ -227,7 +227,7 @@ var p = &pkg.Package{
 		},
 		Result: adt.ListKind,
 		Func: func(c *pkg.CallCtxt) {
-			start, limit, step := c.Decimal(0), c.Decimal(1), c.Decimal(2)
+			start, limit, step := c.Num(0), c.Num(1), c.Num(2)
 			if c.Do() {
 				c.Ret, c.Err = Range(start, limit, step)
 			}
@@ -239,7 +239,7 @@ var p = &pkg.Package{
 		},
 		Result: adt.NumberKind,
 		Func: func(c *pkg.CallCtxt) {
-			xs := c.DecimalList(0)
+			xs := c.NumList(0)
 			if c.Do() {
 				c.Ret, c.Err = Sum(xs)
 			}
@@ -292,7 +292,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			list, cmp := c.List(0), c.Value(1)
 			if c.Do() {
-				c.Ret = IsSorted(list, cmp)
+				c.Ret, c.Err = IsSorted(list, cmp)
 			}
 		},
 	}, {
@@ -308,26 +308,48 @@ var p = &pkg.Package{
 			}
 		},
 	}},
-	CUE: `{
-	Comparer: {
-		T:    _
-		x:    T
-		y:    T
-		less: bool
-	}
-	Ascending: {
-		Comparer
-		T:    number | string
-		x:    T
-		y:    T
-		less: x < y
-	}
-	Descending: {
-		Comparer
-		T:    number | string
-		x:    T
-		y:    T
-		less: x > y
-	}
+	CUE: `
+@experiment(functions)
+@pure()
+Drop:        func(x: [...], n: int) -> [...]
+FlattenN:    func(xs: _, depth: int) -> [...]
+Repeat:      func(x: [...], count: int) -> [...]
+Concat:      func(a: [...]) -> [...]
+Take:        func(x: [...], n: int) -> [...]
+Slice:       func(x: [...], i: int, j: int) -> [...]
+Reverse:     func(x: [...]) -> [...]
+MinItems:    func(list: [...], n: int) -> bool
+MaxItems:    func(list: [...], n: int) -> bool
+Contains:    func(a: [...], v: _) -> bool
+MatchN:      func(list: [...], n: _ @schema(), matchValue: _ @schema()) -> bool
+Avg:         func(xs: [...]) -> number
+Max:         func(xs: [...]) -> number
+Min:         func(xs: [...]) -> number
+Product:     func(xs: [...]) -> number
+Range:       func(start: number, limit: number, step: number) -> [...]
+Sum:         func(xs: [...]) -> number
+Sort:        func(list: [...], cmp: _) -> [...]
+SortStable:  func(list: [...], cmp: _) -> [...]
+SortStrings: func(a: [...]) -> [...]
+IsSorted:    func(list: [...], cmp: _) -> bool
+Comparer: {
+	T:    _
+	x:    T
+	y:    T
+	less: bool
+}
+Ascending: {
+	Comparer
+	T:    number | string
+	x:    T
+	y:    T
+	less: x < y
+}
+Descending: {
+	Comparer
+	T:    number | string
+	x:    T
+	y:    T
+	less: x > y
 }`,
 }

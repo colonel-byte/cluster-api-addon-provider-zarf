@@ -17,9 +17,8 @@
 package stats
 
 import (
+	"fmt"
 	"strings"
-	"sync"
-	"text/template"
 
 	"cuelang.org/go/internal"
 )
@@ -107,6 +106,13 @@ type Counts struct {
 	// ResolveDep counts the number calls to markResolver in dep.go.
 	ResolveDep int64
 
+	// Field ordering counters
+
+	// OrderEdges counts the edges requested between fields while sorting
+	// the fields of a struct for export. Requests for an edge which
+	// already exists are counted too.
+	OrderEdges int64
+
 	// Buffer counters
 	//
 	// Each unification and disjunct operation is associated with an object
@@ -162,6 +168,7 @@ func (c *Counts) Add(other Counts) {
 		c.MaxRedirect = other.MaxRedirect
 	}
 	c.ResolveDep += other.ResolveDep
+	c.OrderEdges += other.OrderEdges
 
 	c.Freed += other.Freed
 	c.Retained += other.Retained
@@ -181,6 +188,7 @@ func (c Counts) Since(start Counts) Counts {
 	c.NumCloseIDs -= start.NumCloseIDs
 	c.ConjunctInfos -= start.ConjunctInfos
 	c.ResolveDep -= start.ResolveDep
+	c.OrderEdges -= start.OrderEdges
 
 	// For max values, we don't subtract since they represent peaks
 	// c.MaxConjunctInfos and c.MaxReqSets and c.MaxRedirect remain as-is
@@ -202,39 +210,41 @@ func (s Counts) Leaks() int64 {
 	return s.Allocs + s.Reused - s.Freed
 }
 
-var stats = sync.OnceValue(func() *template.Template {
-	return template.Must(template.New("stats").Parse(`{{"" -}}
-
-Leaks:  {{.Leaks}}
-Freed:  {{.Freed}}
-Reused: {{.Reused}}
-Allocs: {{.Allocs}}
-Retain: {{.Retained}}
-
-Unifications: {{.Unifications}}
-Conjuncts:    {{.Conjuncts}}
-Disjuncts:    {{.Disjuncts}}{{if .Notifications}}
-Notifications: {{.Notifications}}{{end}}{{if .ResolveDep}}
-ResolveDep:   {{.ResolveDep}}{{end}}{{if or .GenerationMismatch .MisalignedConjunct .MisalignedConstraint .SkippedNotification}}
-{{if .GenerationMismatch}}
-GenerationMismatch: {{.GenerationMismatch}}{{end}}{{if .MisalignedConjunct}}
-MisalignedConjunct: {{.MisalignedConjunct}}{{end}}{{if .MisalignedConstraint}}
-MisalignedConstraint: {{.MisalignedConstraint}}{{end}}{{if .SkippedNotification}}
-SkippedNotification: {{.SkippedNotification}}{{end}}{{end}}{{if .NumCloseIDs}}
-
-NumCloseIDs: {{.NumCloseIDs}}{{end}}{{if or (ge .MaxReqSets 150) (ge .MaxConjunctInfos 8) (ge .MaxRedirect 2)}}
-
-ConjunctInfos:       {{.ConjunctInfos}}
-MaxConjunctInfos:    {{.MaxConjunctInfos}}{{if .MaxReqSets}}
-MaxReqSets:          {{.MaxReqSets}}{{end}}{{if .MaxRedirect}}
-MaxRedirect:         {{.MaxRedirect}}{{end}}{{end}}`))
-})
-
 func (s Counts) String() string {
-	buf := &strings.Builder{}
-	err := stats().Execute(buf, s)
-	if err != nil {
-		panic(err)
+	var b strings.Builder
+	fmt.Fprintf(&b, `Leaks:  %d
+Freed:  %d
+Reused: %d
+Allocs: %d
+Retain: %d
+
+Unifications: %d
+Conjuncts:    %d
+Disjuncts:    %d`,
+		s.Leaks(), s.Freed, s.Reused, s.Allocs, s.Retained,
+		s.Unifications, s.Conjuncts, s.Disjuncts)
+	optional := func(format string, n int64) {
+		if n != 0 {
+			fmt.Fprintf(&b, format, n)
+		}
 	}
-	return buf.String()
+	optional("\nNotifications: %d", s.Notifications)
+	optional("\nResolveDep:   %d", s.ResolveDep)
+	optional("\nOrderEdges:   %d", s.OrderEdges)
+	if s.GenerationMismatch != 0 || s.MisalignedConjunct != 0 ||
+		s.MisalignedConstraint != 0 || s.SkippedNotification != 0 {
+		b.WriteString("\n")
+		optional("\nGenerationMismatch: %d", s.GenerationMismatch)
+		optional("\nMisalignedConjunct: %d", s.MisalignedConjunct)
+		optional("\nMisalignedConstraint: %d", s.MisalignedConstraint)
+		optional("\nSkippedNotification: %d", s.SkippedNotification)
+	}
+	optional("\n\nNumCloseIDs: %d", s.NumCloseIDs)
+	if s.MaxReqSets >= 150 || s.MaxConjunctInfos >= 8 || s.MaxRedirect >= 2 {
+		fmt.Fprintf(&b, "\n\nConjunctInfos:       %d\nMaxConjunctInfos:    %d",
+			s.ConjunctInfos, s.MaxConjunctInfos)
+		optional("\nMaxReqSets:          %d", s.MaxReqSets)
+		optional("\nMaxRedirect:         %d", s.MaxRedirect)
+	}
+	return b.String()
 }

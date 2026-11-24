@@ -24,6 +24,7 @@ import (
 
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/cueexperiment"
 )
 
 // ----------------------------------------------------------------------------
@@ -138,7 +139,28 @@ func (clause) clauseNode() {}
 // Comments
 
 type comments struct {
-	groups *[]*CommentGroup
+	// syntacticGroups holds the comment groups syntactically attached
+	// to this node, as produced by the parser. This is used when
+	// rendering an AST, and is what [Comments] returns.
+	syntacticGroups *[]*CommentGroup
+
+	// inheritedDocComments holds doc comments that semantically
+	// document this node but are physically attached to an ancestor
+	// field of a field-chain. For
+	//
+	//	// c
+	//	a: b: {x: 1}
+	//
+	// the group "// c" lives in a.syntacticGroups (it renders above the
+	// chain) and in b.inheritedDocComments (b is what it documents).
+	//
+	// This list is sparse: it holds only inherited groups, never a
+	// node's own physically-attached docs, so it is disjoint from
+	// syntacticGroups.  It is therefore not the complete set of docs
+	// that document this node; for that, use [DocComments], which
+	// unions this with the node's own syntactic docs when the node is
+	// a chain leaf. Populated by [ResolveComments].
+	inheritedDocComments *[]*CommentGroup
 }
 
 func (c *comments) commentInfo() *comments { return c }
@@ -150,10 +172,10 @@ func (c *comments) commentInfo() *comments { return c }
 
 // Deprecated: use [Comments].
 func (c *comments) Comments() []*CommentGroup {
-	if c.groups == nil {
+	if c.syntacticGroups == nil {
 		return []*CommentGroup{}
 	}
-	return *c.groups
+	return slices.Clip(*c.syntacticGroups)
 }
 
 // Deprecated: use [AddComment].
@@ -161,14 +183,14 @@ func (c *comments) AddComment(cg *CommentGroup) {
 	if cg == nil {
 		return
 	}
-	if c.groups == nil {
+	if c.syntacticGroups == nil {
 		a := []*CommentGroup{cg}
-		c.groups = &a
+		c.syntacticGroups = &a
 		return
 	}
 
-	*c.groups = append(*c.groups, cg)
-	a := *c.groups
+	a := append(*c.syntacticGroups, cg)
+	*c.syntacticGroups = a
 	for i := len(a) - 2; i >= 0 && a[i].Position > cg.Position; i-- {
 		a[i], a[i+1] = a[i+1], a[i]
 	}
@@ -176,19 +198,17 @@ func (c *comments) AddComment(cg *CommentGroup) {
 
 // Deprecated: use [SetComments].
 func (c *comments) SetComments(cgs []*CommentGroup) {
-	if c.groups == nil {
+	if c.syntacticGroups == nil {
 		if cgs == nil {
 			// Replacing no comments with a nil slice is a no-op.
 			// Avoid allocating below.
-			// Note that we continue for other zero-length slices,
-			// as the caller may want to reuse memory.
 			return
 		}
-		a := cgs
-		c.groups = &a
+		a := slices.Clone(cgs)
+		c.syntacticGroups = &a
 		return
 	}
-	*c.groups = cgs
+	*c.syntacticGroups = slices.Clone(cgs)
 }
 
 // A Comment node represents a single //-style comment.
@@ -318,12 +338,18 @@ type Field struct {
 
 	Value Expr // the value associated with this field.
 
+	// Equal and Default hold the position of "=" and the default expression
+	// of a function parameter, as in a: int = 2. They are set only on a
+	// FuncParam; a struct field never carries a default.
+	Equal   token.Pos
+	Default Expr
+
 	Attrs []*Attribute
 
 	comments
-	decl
 }
 
+func (*Field) declNode()         {}
 func (d *Field) Pos() token.Pos  { return d.Label.Pos() }
 func (d *Field) pos() *token.Pos { return d.Label.pos() }
 func (d *Field) End() token.Pos {
@@ -569,20 +595,103 @@ func (x *Interpolation) Quotes() (first, last *BasicLit) {
 	return first, last
 }
 
-// A Func node represents a function type.
+// A FuncParam node represents a function parameter.
+//
+// If Label is nil, the parameter is anonymous and positional-only. Otherwise
+// Label, Alias, Constraint, and TokenPos have the same meaning as in Field.
+// Default, if set, is the parameter's default expression, written after "="
+// and used as the argument when a call leaves the parameter unbound; Equal is
+// the position of that "=".
+// Attrs holds field-style attributes following the parameter; like field
+// attributes, they do not affect evaluation.
+// FuncParam has Field's underlying representation so that their field-shaped
+// syntax stays in sync, but remains a distinct node type and is not a Decl.
+type FuncParam Field
+
+func (p *FuncParam) Pos() token.Pos {
+	if p.Label != nil {
+		return p.Label.Pos()
+	}
+	if p.Value != nil {
+		return p.Value.Pos()
+	}
+	return token.NoPos
+}
+func (p *FuncParam) pos() *token.Pos {
+	if p.Label != nil {
+		return p.Label.pos()
+	}
+	if p.Value != nil {
+		return p.Value.pos()
+	}
+	return nil
+}
+func (p *FuncParam) End() token.Pos {
+	if len(p.Attrs) > 0 {
+		return p.Attrs[len(p.Attrs)-1].End()
+	}
+	if p.Default != nil {
+		return p.Default.End()
+	}
+	if p.Value != nil {
+		return p.Value.End()
+	}
+	if p.Alias != nil {
+		return p.Alias.End()
+	}
+	if p.Label != nil {
+		return p.Label.End()
+	}
+	return token.NoPos
+}
+
+// A Func node represents a function type or native CUE function.
 //
 // This is an experimental type and the contents will change without notice.
 type Func struct {
-	Func token.Pos // position of "func"
-	Args []Expr    // list of elements; or nil
-	Ret  Expr      // return type, must not be nil
+	Func     token.Pos    // position of "func"
+	Lparen   token.Pos    // position of "("
+	Params   []*FuncParam // list of parameters; or nil
+	Ellipsis token.Pos    // position of "...", if any; open signatures are bodyless
+	Rparen   token.Pos    // position of ")"
+	Arrow    token.Pos    // position of "->"
+	Ret      Expr         // return type; nil means _
+	Colon    token.Pos    // position of ":" before Body
+	Body     Expr         // implementation body; or nil
+
+	// Args is kept for compatibility with older experimental users.
+	//
+	// Deprecated: use Params.
+	Args []Expr
 
 	comments
 	expr
 }
 
+// Parameters returns the function parameters, synthesizing positional-only
+// parameters from the legacy Args field for nodes that set Args instead of
+// Params. It is a convenience for code that only inspects parameter values;
+// callers that traverse or rewrite the parameter nodes themselves should
+// branch on Params versus Args directly, since the synthesized parameters
+// carry no label, alias, or comments.
+func (x *Func) Parameters() []*FuncParam {
+	if len(x.Params) > 0 || len(x.Args) == 0 {
+		return x.Params
+	}
+	params := make([]*FuncParam, len(x.Args))
+	for i, arg := range x.Args {
+		params[i] = &FuncParam{Value: arg}
+	}
+	return params
+}
+
 // A StructLit node represents a literal struct.
 type StructLit struct {
+	// Hash is the position of the "#" of a closed struct literal, #{...},
+	// which requires the openlists experiment. A literal is closed if Hash
+	// is valid; a constructed node may use a position without a file.
+	Hash token.Pos
+
 	Lbrace token.Pos // position of "{"
 	Elts   []Decl    // list of elements; or nil
 	Rbrace token.Pos // position of "}"
@@ -674,6 +783,11 @@ type embedding EmbedDecl
 
 // A ListLit node represents a literal list.
 type ListLit struct {
+	// Hash is the position of the "#" of a closed list literal, #[...],
+	// which requires the openlists experiment. A literal is closed if Hash
+	// is valid; a constructed node may use a position without a file.
+	Hash token.Pos
+
 	Lbrack token.Pos // position of "["
 
 	// TODO: change to embedding or similar.
@@ -816,11 +930,25 @@ type SliceExpr struct {
 }
 
 // A CallExpr node represents an expression followed by an argument list.
+//
+// TODO(v1): join Args and ArgLabels into a single slice of a node type
+// that describes an optionally keyed expression, such as CallArg or
+// KeyedExpr.
 type CallExpr struct {
 	Fun    Expr      // function expression
 	Lparen token.Pos // position of "("
 	Args   []Expr    // function arguments; or nil
-	Rparen token.Pos // position of ")"
+	// ArgLabels optionally records argument labels aligned with Args. A nil
+	// label marks a positional argument, so f(1, b: 2) is represented as
+	// Args [1, 2] and ArgLabels [nil, b]. ArgLabels may be nil when all
+	// arguments are positional.
+	ArgLabels []Label
+	// Ellipsis records the position of a trailing "..." marking a partial
+	// application, as in f(a: 1, ...); it is [token.NoPos] otherwise. A
+	// partial application binds the given arguments and yields a function
+	// over the remaining parameters.
+	Ellipsis token.Pos
+	Rparen   token.Pos // position of ")"
 
 	comments
 	expr
@@ -892,14 +1020,22 @@ func (x *Func) Pos() token.Pos           { return x.Func }
 func (x *Func) pos() *token.Pos          { return &x.Func }
 func (x *StructLit) Pos() token.Pos      { return getPos(x) }
 func (x *StructLit) pos() *token.Pos {
+	if x.Hash.IsValid() {
+		return &x.Hash
+	}
 	if x.Lbrace == token.NoPos && len(x.Elts) > 0 {
 		return x.Elts[0].pos()
 	}
 	return &x.Lbrace
 }
 
-func (x *ListLit) Pos() token.Pos         { return x.Lbrack }
-func (x *ListLit) pos() *token.Pos        { return &x.Lbrack }
+func (x *ListLit) Pos() token.Pos { return *x.pos() }
+func (x *ListLit) pos() *token.Pos {
+	if x.Hash.IsValid() {
+		return &x.Hash
+	}
+	return &x.Lbrack
+}
 func (x *Ellipsis) Pos() token.Pos        { return x.Ellipsis }
 func (x *Ellipsis) pos() *token.Pos       { return &x.Ellipsis }
 func (x *LetClause) Pos() token.Pos       { return x.Let }
@@ -938,7 +1074,33 @@ func (x *Ident) End() token.Pos {
 func (x *BasicLit) End() token.Pos { return x.ValuePos.Add(len(x.Value)) }
 
 func (x *Interpolation) End() token.Pos { return x.Elts[len(x.Elts)-1].End() }
-func (x *Func) End() token.Pos          { return x.Ret.End() }
+func (x *Func) End() token.Pos {
+	if x.Body != nil {
+		return x.Body.End()
+	}
+	if x.Ret != nil {
+		return x.Ret.End()
+	}
+	if x.Rparen != token.NoPos {
+		return x.Rparen.Add(1)
+	}
+	// The parameter list's ")" is missing: as for a struct literal
+	// missing its "}", the literal extends to the last of what was
+	// parsed.
+	if n := len(x.Params); n > 0 {
+		return x.Params[n-1].End()
+	}
+	if x.Ellipsis != token.NoPos {
+		return x.Ellipsis.Add(len("..."))
+	}
+	if x.Lparen != token.NoPos {
+		return x.Lparen.Add(1)
+	}
+	if x.Func != token.NoPos {
+		return x.Func.Add(len("func"))
+	}
+	return token.NoPos
+}
 func (x *StructLit) End() token.Pos {
 	if x.Rbrace == token.NoPos && len(x.Elts) > 0 {
 		return x.Elts[len(x.Elts)-1].End()
@@ -1102,18 +1264,56 @@ type File struct {
 
 	Unresolved []*Ident // unresolved identifiers in this file
 
-	// TODO remove this field: it's here as a temporary
-	// entity so that tests can determine which version
-	// the file was parsed with. A better approach is probably to
-	// include the language version in the `token.File` so
-	// it's available in every Position.
-	LanguageVersion string // The language version as configured by [parser.ParseFile].
-
 	comments
+
+	// experiments are the experiments that apply to a file assembled rather
+	// than parsed, carrying the language version it is written for. A parsed
+	// file's positions carry them instead; see [hiddenFile.SetExperiments].
+	experiments *cueexperiment.File
 }
 
-// Preamble returns the declarations of the preamble at the top of the file,
-// including any package clause or import declaration found in it.
+// hiddenFile allows defining methods in File that are hidden from public
+// documentation.
+type hiddenFile = File
+
+// Experiment reports the experiments that apply to f, which carry the
+// language version it is written for.
+//
+// A file assembled rather than parsed carries them itself, as its
+// declarations may hold positions of whatever they were read from, which say
+// nothing about the file they have been assembled into. Otherwise they come
+// from the file's position, as a parsed file's do.
+//
+// A file with neither reports no experiments at all, rather than those of the
+// current language version; what to make of that is the caller's.
+func (f *hiddenFile) Experiment() cueexperiment.File {
+	if f.experiments != nil {
+		return *f.experiments
+	}
+	return f.Pos().Experiment()
+}
+
+// SetExperiments records the experiments that apply to f, which carry the
+// language version f is written for. It replaces any already recorded.
+//
+// This is for a file built by a generator, which has no source to resolve
+// them from: a generator writing CUE into a module that declares an older
+// language version says so here, as not all syntax is accepted at every
+// version.
+func (f *hiddenFile) SetExperiments(experiments *cueexperiment.File) {
+	f.experiments = experiments
+}
+
+// Preamble returns the declarations of the preamble at the top of the file:
+// the package clause and import declarations, if any, along with the comments
+// and attributes preceding them. The attributes in the preamble are file
+// attributes, which apply to the file rather than to the package's value.
+//
+// An attribute is part of the preamble only when it precedes the package
+// clause or the first import declaration. In particular, attributes after the
+// package clause in a file without imports are package attributes, like any
+// later top-level attribute, as are the leading attributes of a file with
+// neither.
 func (f *File) Preamble() []Decl {
 	p := 0
 outer:
@@ -1130,7 +1330,7 @@ outer:
 			p = i + 1
 		}
 	}
-	return f.Decls[:p]
+	return slices.Clip(f.Decls[:p])
 }
 
 // VisitImports iterates through the import declarations in the file.

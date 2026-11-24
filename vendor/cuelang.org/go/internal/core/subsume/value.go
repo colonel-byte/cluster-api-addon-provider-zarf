@@ -34,7 +34,11 @@ func (s *subsumer) values(a, b adt.Value) (result bool) {
 	}
 
 	if s.Defaults {
-		b = adt.Default(b)
+		if y, ok := b.(*adt.Vertex); ok {
+			b = s.defaultOf(y)
+		} else {
+			b = adt.ConcreteDefault(b)
+		}
 	}
 
 	switch b := b.(type) {
@@ -99,12 +103,25 @@ func (s *subsumer) values(a, b adt.Value) (result bool) {
 		return s.bound(x, b)
 
 	case *adt.Builtin:
-		return x == b
+		y, ok := b.(*adt.Builtin)
+		return ok && adt.BuiltinSubsumes(x, y)
+
+	case *adt.FuncValue:
+		switch y := b.(type) {
+		case *adt.FuncValue:
+			return s.funcValues(x, y)
+		case *adt.Builtin:
+			return s.funcBuiltin(x, y)
+		}
+		return false
 
 	case *adt.BuiltinValidator:
-		state := s.ctx.PushState(s.ctx.Env(0), b.Source())
-		// TODO: is this always correct?
-		cx := adt.MakeRootConjunct(s.ctx.Env(0), x)
+		env := x.Env
+		if env == nil {
+			env = s.ctx.Env(0)
+		}
+		state := s.ctx.PushState(env, b.Source())
+		cx := adt.MakeRootConjunct(env, x)
 		b1 := s.ctx.Validate(cx, b)
 		if b1 != nil {
 			s.errs = errors.Append(s.errs, b1.Err)
@@ -175,7 +192,7 @@ func (s *subsumer) values(a, b adt.Value) (result bool) {
 	case *adt.Disjunction:
 
 		if s.LeftDefault {
-			a = adt.Default(a)
+			a = adt.ConcreteDefault(a)
 			var ok bool
 			x, ok = a.(*adt.Disjunction)
 			if !ok {

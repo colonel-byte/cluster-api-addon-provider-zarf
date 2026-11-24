@@ -37,7 +37,8 @@ import (
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/compile"
-	"cuelang.org/go/internal/types"
+	"cuelang.org/go/internal/core/runtime"
+	cuejson "cuelang.org/go/internal/encoding/json"
 )
 
 // This file contains functionality for converting Go to CUE.
@@ -57,7 +58,7 @@ var astTypeCache sync.Map // map[reflect.Type]ast.Expr
 // The returned CUE value is finalized and concrete.
 func FromGoValue(ctx *adt.OpContext, x any, nilIsTop bool) adt.Value {
 	val := reflect.ValueOf(x)
-	v := fromGoValue(ctx, nilIsTop, val)
+	v := fromGoValue(ctx, nilIsTop, val, 0)
 	if v == nil {
 		return ctx.AddErrf("unsupported Go type (%T)", x)
 	}
@@ -127,25 +128,34 @@ func splitTag(tag string) (cue string, options string) {
 	return tag, ""
 }
 
+// getName returns the CUE name of a struct field. The first of the json, yaml,
+// and protobuf tags present on the field decides its name, even when the tag
+// gives no name, so that a field is named consistently with one encoding.
+//
 // TODO: should we allow mapping names in cue tags? This only seems like a good
 // idea if we ever want to allow mapping CUE to a different name than JSON.
-var tagsWithNames = []string{"json", "yaml", "protobuf"}
-
 func getName(f *reflect.StructField) string {
-	name := f.Name
-	if f.Anonymous {
-		name = ""
-	}
-	for _, s := range tagsWithNames {
-		if tag, ok := f.Tag.Lookup(s); ok {
-			tag, _, _ = strings.Cut(tag, ",")
-			if tag != "" {
-				name = tag
+	var name string
+	if tag, ok := f.Tag.Lookup("json"); ok {
+		name, _, _ = strings.Cut(tag, ",")
+	} else if tag, ok := f.Tag.Lookup("yaml"); ok {
+		name, _, _ = strings.Cut(tag, ",")
+	} else if tag, ok := f.Tag.Lookup("protobuf"); ok {
+		// Protobuf tags give the name as an option, like "bytes,2,opt,name=foo".
+		for opt := range strings.SplitSeq(tag, ",") {
+			if n, ok := strings.CutPrefix(opt, "name="); ok {
+				name = n
 				break
 			}
 		}
 	}
-	return name
+	switch {
+	case name != "":
+		return name
+	case f.Anonymous:
+		return ""
+	}
+	return f.Name
 }
 
 // isOptional indicates whether a field should be marked as optional.
@@ -171,12 +181,21 @@ func isOptional(f *reflect.StructField) bool {
 			}
 		}
 	} else if tag, ok = f.Tag.Lookup("json"); ok {
-		isOptional = false
-		if slices.Contains(strings.Split(tag, ",")[1:], "omitempty") {
+		isOptional = hasJSONOption(tag, "omitempty") || hasJSONOption(tag, "omitzero")
+	}
+	return isOptional
+}
+
+// hasJSONOption reports whether a json struct tag contains the given option,
+// such as "omitempty" or "omitzero".
+func hasJSONOption(tag, option string) bool {
+	_, opts, _ := strings.Cut(tag, ",")
+	for s := range strings.SplitSeq(opts, ",") {
+		if s == option {
 			return true
 		}
 	}
-	return isOptional
+	return false
 }
 
 // isOmitEmpty means that the zero value is interpreted as undefined.
@@ -192,18 +211,52 @@ func isOmitEmpty(f reflect.StructField) bool {
 		// TODO: we can also infer omit empty if a type cannot be nil if there
 		// is a constraint that unconditionally disallows the zero value.
 	}
-	tag, ok := f.Tag.Lookup("json")
-	if ok {
-		isOmitEmpty = false
-		i := 0
-		for s := range strings.SplitSeq(tag, ",") {
-			if i > 0 && s == "omitempty" {
-				return true
-			}
-			i++
-		}
+	if tag, ok := f.Tag.Lookup("json"); ok {
+		isOmitEmpty = hasJSONOption(tag, "omitempty")
 	}
 	return isOmitEmpty
+}
+
+// isOmitZero reports whether a field has the json "omitzero" option, meaning
+// that a zero value, as reported by [isZero], is interpreted as undefined.
+func isOmitZero(f reflect.StructField) bool {
+	tag, ok := f.Tag.Lookup("json")
+	return ok && hasJSONOption(tag, "omitzero")
+}
+
+// isZeroer matches types with an IsZero method, as used by json's omitzero.
+type isZeroer interface{ IsZero() bool }
+
+var isZeroerType = reflect.TypeFor[isZeroer]()
+
+// isZero mirrors encoding/json's "omitzero" semantics: it reports whether val
+// is the zero value for its type, using the type's IsZero method when one is
+// implemented and falling back to [reflect.Value.IsZero] otherwise.
+func isZero(val reflect.Value) bool {
+	t := val.Type()
+	switch {
+	case t.Kind() == reflect.Interface && t.Implements(isZeroerType):
+		// Avoid panics calling IsZero on a nil interface or
+		// a non-nil interface with a nil pointer.
+		return val.IsNil() ||
+			(val.Elem().Kind() == reflect.Pointer && val.Elem().IsNil()) ||
+			val.Interface().(isZeroer).IsZero()
+	case t.Kind() == reflect.Pointer && t.Implements(isZeroerType):
+		// Avoid panics calling IsZero on a nil pointer.
+		return val.IsNil() || val.Interface().(isZeroer).IsZero()
+	case t.Implements(isZeroerType):
+		return val.Interface().(isZeroer).IsZero()
+	case reflect.PointerTo(t).Implements(isZeroerType):
+		if !val.CanAddr() {
+			// Temporarily box val so we can take its address.
+			v2 := reflect.New(t).Elem()
+			v2.Set(val)
+			val = v2
+		}
+		return val.Addr().Interface().(isZeroer).IsZero()
+	default:
+		return val.IsZero()
+	}
 }
 
 func isNil(x reflect.Value) bool {
@@ -214,9 +267,22 @@ func isNil(x reflect.Value) bool {
 	return false
 }
 
-func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result adt.Value) {
+// maxNestingDepth bounds how deeply nested a Go value or type may be,
+// so that a cyclic one results in an error rather than unbounded recursion.
+// It matches the limit of [encoding/json].
+const maxNestingDepth = 10000
+
+// fromGoValue converts val, which is nested depth levels deep in the Go value
+// being converted.
+func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value, depth int) (result adt.Value) {
+	if depth > maxNestingDepth {
+		return ctx.AddErrf("unsupported Go value: exceeded max nesting depth of %d", maxNestingDepth)
+	}
 	src := ctx.Source()
-	if !val.IsValid() { // untyped nil, or dereferencing a nil pointer/interface
+	// An untyped nil, or dereferencing a nil interface. A nil pointer of any
+	// type is the same, and must not reach the types special-cased below.
+	// A nil map or slice is not, as those encode as empty.
+	if !val.IsValid() || val.Kind() == reflect.Pointer && val.IsNil() {
 		if nilIsTop {
 			ident, _ := src.(*ast.Ident)
 			return &adt.Top{Src: ident}
@@ -237,6 +303,12 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		}
 		return x
 
+	case adtNum:
+		// A number computed by a builtin, which carries its own kind; see
+		// [adt.NumAdd].
+		v, _ := reflect.TypeAssert[*adt.Num](val)
+		return v
+
 	case bigInt:
 		v, _ := reflect.TypeAssert[*big.Int](val)
 		return &adt.Num{
@@ -247,15 +319,18 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 
 	case bigRat:
 		v, _ := reflect.TypeAssert[*big.Rat](val)
+		// An integral rational is an integer, so convert its numerator directly.
+		// Dividing by the denominator would work as well, but the quotient may
+		// carry a non-zero exponent, which [adt.IntKind] values must not have.
+		if v.IsInt() {
+			return &adt.Num{Src: src, K: adt.IntKind, X: fromGoBigInt(v.Num())}
+		}
 		// should we represent this as a binary operation?
-		n := &adt.Num{Src: src, K: adt.IntKind}
+		n := &adt.Num{Src: src, K: adt.FloatKind}
 		num := fromGoBigInt(v.Num())
 		denom := fromGoBigInt(v.Denom())
 		if _, err := internal.BaseContext.Quo(&n.X, &num, &denom); err != nil {
 			return ctx.AddErrf("could not convert *big.Rat: %v", err)
-		}
-		if !v.IsInt() {
-			n.K = adt.FloatKind
 		}
 		return n
 
@@ -263,7 +338,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		v, _ := reflect.TypeAssert[*big.Float](val)
 		n := &adt.Num{Src: src, K: adt.FloatKind}
 		// NOTE: apd.Decimal has an API to set from a big.Int, but not from a big.Float.
-		if _, _, err := n.X.SetString(v.String()); err != nil {
+		if _, _, err := n.X.SetString(v.Text('g', -1)); err != nil {
 			return ctx.AddErr(errors.Promote(err, "invalid float"))
 		}
 		return n
@@ -274,19 +349,19 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		// It is a bit tricky, as we would also need to pass down the result of rounding.
 		// So more likely an API must return explicitly whether a value is a float or an int after all.
 		// The code to autodetect whether something is an integer can be done with this:
-		kind := adt.FloatKind
-		var d apd.Decimal
-		res, _ := internal.BaseContext.RoundToIntegralExact(&d, v)
-		if !res.Inexact() {
-			kind = adt.IntKind
-			v = &d
+		n := &adt.Num{Src: src, K: adt.IntKind}
+		res, _ := internal.BaseContext.RoundToIntegralExact(&n.X, v)
+		if res.Inexact() {
+			n.K = adt.FloatKind
+			// Copying the struct could share its coefficient with v.
+			n.X.Set(v)
 		}
-		n := &adt.Num{Src: src, K: kind}
-		n.X = *v
 		return n
 	}
 
-	if v, ok := typeAssert[types.Interface](val); ok {
+	if v, ok := typeAssert[interface{ Core() runtime.Value }](val); ok {
+		// TODO: the zero cue.Value holds no vertex, and nil panics later on.
+		// See https://cuelang.org/issue/3175.
 		t := v.Core()
 		return t.V
 	}
@@ -302,6 +377,9 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		if err != nil {
 			panic(err) // cannot happen
 		}
+		// Simplify like the json encoding package, e.g. rendering
+		// strings with newlines as multiline literals.
+		cuejson.PatchExpr(expr, nil)
 		return compileExpr(ctx, expr)
 	}
 	if v, ok := typeAssert[encoding.TextMarshaler](val); ok {
@@ -358,7 +436,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		return n
 
 	case reflect.Pointer, reflect.Interface:
-		return fromGoValue(ctx, nilIsTop, val.Elem())
+		return fromGoValue(ctx, nilIsTop, val.Elem(), depth+1)
 
 	case reflect.Struct:
 		// Grow the slices to match the number of fields in the Go struct,
@@ -387,7 +465,10 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 			if isOmitEmpty(sf) && val.IsZero() {
 				continue
 			}
-			sub := fromGoValue(ctx, nilIsTop, val)
+			if isOmitZero(sf) && isZero(val) {
+				continue
+			}
+			sub := fromGoValue(ctx, nilIsTop, val, depth+1)
 			if sub == nil {
 				// mimic behavior of encoding/json: skip fields of unsupported types
 				continue
@@ -415,7 +496,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		}
 
 		// There is no closedness or cycle info for Go structs, so we pass an empty CloseInfo.
-		v.AddStruct(sl, 0)
+		v.AddStruct(sl, 0, false)
 		v.SetValue(ctx, &adt.StructMarker{})
 		v.ForceDone()
 		return v
@@ -437,7 +518,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 			iter := val.MapRange()
 			for iter.Next() {
 				k, val := iter.Key(), iter.Value()
-				sub := fromGoValue(ctx, nilIsTop, val)
+				sub := fromGoValue(ctx, nilIsTop, val, depth+1)
 				// mimic behavior of encoding/json: report error of unsupported type.
 				if sub == nil {
 					return ctx.AddErrf("unsupported Go type (%T)", val.Interface())
@@ -459,7 +540,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 			}
 		}
 
-		v.AddStruct(obj, 0)
+		v.AddStruct(obj, 0, false)
 		v.SetValue(ctx, structMarker)
 		v.ForceDone()
 		return v
@@ -474,9 +555,16 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		// avoiding repeated slice growth in append calls below.
 		numElems := val.Len()
 		src, _ := src.(*ast.ListLit)
+		// Without a source of its own, the list belongs to the file of the
+		// expression being evaluated, such as a builtin call.
+		pos := ctx.Pos()
+		if src != nil {
+			pos = src.Pos()
+		}
 		list := &adt.ListLit{
-			Src:   src,
-			Elems: make([]adt.Elem, 0, numElems),
+			Src:      src,
+			Elems:    make([]adt.Elem, 0, numElems),
+			OpenData: src == nil && pos.Experiment().OpenLists,
 		}
 		v := &adt.Vertex{
 			Arcs: make([]*adt.Vertex, 0, numElems),
@@ -488,7 +576,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		// See the upstream bug report: https://go.dev/issue/76357
 		for i := range numElems {
 			val := val.Index(i)
-			x := fromGoValue(ctx, nilIsTop, val)
+			x := fromGoValue(ctx, nilIsTop, val, depth+1)
 			if x == nil {
 				return ctx.AddErrf("unsupported Go type (%T)", val.Interface())
 			}
@@ -501,7 +589,7 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 		}
 
 		v.AddConjunct(adt.MakeRootConjunct(env, list))
-		v.SetValue(ctx, listMarker)
+		v.SetValue(ctx, adt.ListMarkerAt(pos))
 		v.ForceDone()
 		return v
 	}
@@ -511,7 +599,6 @@ func fromGoValue(ctx *adt.OpContext, nilIsTop bool, val reflect.Value) (result a
 // These are effectively singletons, so avoid allocating new ones.
 var (
 	structMarker = &adt.StructMarker{}
-	listMarker   = &adt.ListMarker{}
 )
 
 func fromGoBigInt(x *big.Int) apd.Decimal {
@@ -560,6 +647,7 @@ var (
 	bigRat        = reflect.TypeFor[*big.Rat]()
 	bigFloat      = reflect.TypeFor[*big.Float]()
 	apdDecimal    = reflect.TypeFor[*apd.Decimal]()
+	adtNum        = reflect.TypeFor[*adt.Num]()
 	topSentinel   = ast.NewIdent("_")
 )
 
@@ -596,6 +684,7 @@ type typeBuilder struct {
 	byType    map[reflect.Type]*namedType // lookup by Go type
 	nameCount map[string]int              // disambiguate same-named types from different packages
 	errs      *[]errors.Error
+	depth     int // nesting depth of the type being built, bounded by maxNestingDepth
 }
 
 type namedType struct {
@@ -665,6 +754,13 @@ func (b *typeBuilder) finalize(topExpr ast.Expr, errs *[]errors.Error) ast.Expr 
 
 // build recursively converts a Go type to a CUE AST expression.
 func (b *typeBuilder) build(t reflect.Type, allowNullDefault bool) ast.Expr {
+	if b.depth > maxNestingDepth {
+		*b.errs = append(*b.errs, errors.Newf(token.NoPos, "unsupported Go type (%v): exceeded max nesting depth of %d", t, maxNestingDepth))
+		return &ast.BadExpr{}
+	}
+	b.depth++
+	defer func() { b.depth-- }()
+
 	// Check special types first — these short-circuit regardless of being named.
 	switch reflect.Zero(t).Interface().(type) {
 	case *big.Int, big.Int:
@@ -685,11 +781,7 @@ func (b *typeBuilder) build(t reflect.Type, allowNullDefault bool) ast.Expr {
 
 	switch k := t.Kind(); k {
 	case reflect.Pointer:
-		elem := t.Elem()
-		for elem.Kind() == reflect.Pointer {
-			elem = elem.Elem()
-		}
-		e := b.build(elem, false)
+		e := b.build(t.Elem(), false)
 		if allowNullDefault {
 			e = wrapOrNull(e)
 		}
@@ -734,6 +826,9 @@ func (b *typeBuilder) build(t reflect.Type, allowNullDefault bool) ast.Expr {
 			if elem == nil {
 				*b.errs = append(*b.errs, errors.Newf(token.NoPos, "unsupported Go type (%v)", t.Elem()))
 				return &ast.BadExpr{}
+			}
+			if isBad(elem) {
+				return elem
 			}
 
 			if t.Kind() == reflect.Array {
@@ -812,8 +907,7 @@ func (b *typeBuilder) buildStruct(t reflect.Type) ast.Expr {
 // buildStructLit builds the struct literal for a Go struct type.
 func (b *typeBuilder) buildStructLit(t reflect.Type) ast.Expr {
 	obj := &ast.StructLit{}
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		if f.PkgPath != "" {
 			continue
 		}
@@ -853,6 +947,9 @@ func (b *typeBuilder) buildStructLit(t reflect.Type) ast.Expr {
 }
 
 func fromGoType(ctx *adt.OpContext, t reflect.Type) adt.Expr {
+	if t == nil { // an untyped nil
+		return nil
+	}
 	var errs []errors.Error
 	e := astFromGoType(t, true, &errs)
 	for _, err := range errs {

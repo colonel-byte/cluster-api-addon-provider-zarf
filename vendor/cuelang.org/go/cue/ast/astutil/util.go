@@ -18,7 +18,6 @@ import (
 	"strconv"
 
 	"cuelang.org/go/cue/ast"
-	"cuelang.org/go/cue/token"
 )
 
 // ImportPathName derives the package name from the given import path.
@@ -145,11 +144,12 @@ outer:
 		*decls = a
 	}
 
+	// Insert a copy, as spec may belong to another file.
+	spec = ast.Clone(spec)
 	if orig != nil {
 		CopyComments(spec, orig)
 	}
 	imports.Specs = append(imports.Specs, spec)
-	ast.SetRelPos(imports.Specs[0], token.NoRelPos)
 
 	return spec
 }

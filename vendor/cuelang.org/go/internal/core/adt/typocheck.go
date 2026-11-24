@@ -175,9 +175,9 @@ import (
 
 type defID uint32
 
-//go:generate go tool stringer -type=defIDType -linecomment
-
 type defIDType int8
+
+// See the stringer directive in doc.go for the generated String method.
 
 const (
 	// defIDTypeUnknown indicates that the ID is not a definition.
@@ -247,6 +247,11 @@ type refInfo struct {
 	// isRecursive indicates this is recursively closed.
 	isRecursive bool
 
+	// reclose indicates the struct literal of a __reclose call, which is
+	// closed as the values it embeds through a spread are closed; see
+	// [nodeContext.recloseEmbedded].
+	reclose bool
+
 	// conjunctOpened indicates this resolver is from an opened conjunction
 	// operand ((A & B)...). It must not use the parent==0 shortcut in
 	// hasEvidenceForOne, so that mutual constraints between conjunction
@@ -303,10 +308,28 @@ func (n *nodeContext) addReplacement(x replaceID) {
 
 	// TODO: we currently may compute n.reqSets too early in some rare
 	// circumstances. We clear the set if it needs to be recomputed.
-	n.computedCloseInfo = false
-	n.reqSets = n.reqSets[:0]
+	n.invalidateReqSets()
 
 	n.replaceIDs = append(n.replaceIDs, x)
+}
+
+// invalidateReqSets forces the next [nodeContext.getReqSets] to recompute
+// the requirement sets.
+func (n *nodeContext) invalidateReqSets() {
+	n.computedCloseInfo = false
+	n.reqSets = n.reqSets[:0]
+}
+
+// reqIndex returns the index in n.reqDefIDs of the requirement tracked for v,
+// or -1 if there is none.
+func (n *nodeContext) reqIndex(v *Vertex) int {
+	return slices.IndexFunc(n.reqDefIDs, func(x refInfo) bool { return x.v == v })
+}
+
+// reqIndexByID returns the index in n.reqDefIDs of the requirement with the
+// scope id p, or -1 if there is none.
+func (n *nodeContext) reqIndexByID(p defID) int {
+	return slices.IndexFunc(n.reqDefIDs, func(x refInfo) bool { return x.id == p })
 }
 
 func (n *nodeContext) updateConjunctInfo(k Kind, id CloseInfo, flags conjunctFlags) {
@@ -397,16 +420,17 @@ func (n *nodeContext) addResolver(p Node, v *Vertex, id CloseInfo, forceIgnore b
 	}
 
 	dstID := defID(0)
-	for i, x := range n.reqDefIDs {
-		if x.v == v {
-			dstID = x.id
-			if x.ignore && !ignore {
-				// Override settings of a vertex added by #A...
-				n.reqDefIDs[i].ignore = false
-				n.reqDefIDs[i].parent = id.outerID
-				n.reqDefIDs[i].embed = id.enclosingEmbed
-			}
-			break
+	if i := n.reqIndex(v); i >= 0 {
+		x := &n.reqDefIDs[i]
+		dstID = x.id
+		if !ignore && (x.ignore || (x.conjunctOpened && !id.ConjunctOpened)) {
+			// A reference that does not open the vertex overrides the
+			// settings of an entry added by #A... or by an operand of
+			// (#A & #B)..., closing it again.
+			x.ignore = false
+			x.parent = id.outerID
+			x.embed = id.enclosingEmbed
+			x.conjunctOpened = id.ConjunctOpened
 		}
 	}
 
@@ -438,6 +462,43 @@ func (n *nodeContext) addResolver(p Node, v *Vertex, id CloseInfo, forceIgnore b
 	n.addReplacement(replaceID{from: srcID, to: dstID})
 
 	return id
+}
+
+// linkCyclicResolver records the closedness relation of a resolver whose
+// conjuncts are not scheduled because v is the node itself or the reference
+// was dropped as a cycle. The value is already present in the node, but the
+// requirement introduced by the reference still needs the evidence which
+// [nodeContext.addResolver] would otherwise have recorded.
+//
+// A struct which embeds the node admits everything the node admits, so a
+// reference back to the node makes the requirements along the containment
+// chain of id vacuous. Any other requirement is linked to the one already
+// tracked for v.
+func (n *nodeContext) linkCyclicResolver(v *Vertex, id CloseInfo) {
+	c := n.ctx
+	if c.OpenDef || id.defID == 0 || id.opID != c.opID {
+		return
+	}
+	if deref(n.node) != deref(v) {
+		if i := n.reqIndex(v); i >= 0 {
+			n.addReplacement(replaceID{from: id.defID, to: n.reqDefIDs[i].id})
+		}
+		return
+	}
+	// Walk the raw chain rather than using containsDefID, which memoizes
+	// flatReplaceIDs while replacements may still be added. Parents are
+	// always smaller than their child, so the walk terminates.
+	changed := false
+	for p := id.defID; p != 0; p = c.containments[p].id {
+		i := n.reqIndexByID(p)
+		if i >= 0 && !n.reqDefIDs[i].ignore {
+			n.reqDefIDs[i].ignore = true
+			changed = true
+		}
+	}
+	if changed {
+		n.invalidateReqSets()
+	}
 }
 
 // subField updates a CloseInfo for subfields of a struct.
@@ -557,33 +618,109 @@ func (n *nodeContext) injectEmbedNode(x Decl, id CloseInfo) CloseInfo {
 // definition is embedded within a struct. It can be removed if we implement
 // the #A vs #A... semantics.
 func (n *nodeContext) splitStruct(s *StructLit, id CloseInfo) CloseInfo {
-	if Pos(s).Experiment().ExplicitOpen || n.ctx.OpenDef {
+	if s.IsFile() || !n.closesLiteral(s) {
+		// Files are scheduled one by one at the root of the evaluation,
+		// which stays open to fields added by other files or through
+		// the API. See splitPackage for a package reached through a
+		// reference.
 		return id
 	}
+	return n.splitLiteral(s, id)
+}
 
+// splitPackage marks a package reached through a reference, such as an
+// imported package used as the value of a field, as the boundary at which
+// closedness applies, as splitStruct does for a struct literal. The boundary
+// is established once for all files of the package, so that its own fields
+// are allowed alongside a definition embedded in any of them.
+func (n *nodeContext) splitPackage(v *Vertex, id CloseInfo) CloseInfo {
+	// Only the root of an instance holds files, so the conjuncts of any
+	// other vertex need not be inspected. A package opened with the
+	// explicitopen ... operator is not a boundary either.
+	if v.Parent != nil || id.Opened {
+		return id
+	}
+	for _, c := range v.Conjuncts {
+		// The files of a package may differ in their experiments.
+		if s, ok := c.x.(*StructLit); ok && s.IsFile() && s.hasEmbed() && n.closesLiteral(s) {
+			return n.splitLiteral(s, id)
+		}
+	}
+	return id
+}
+
+// closesLiteral reports whether closedness applies at the struct literal s,
+// which it does not under the explicitopen experiment or OpenDef.
+func (n *nodeContext) closesLiteral(s *StructLit) bool {
+	return !Pos(s).Experiment().ExplicitOpen && !n.ctx.OpenDef
+}
+
+// splitLiteral marks the struct s as the boundary at which closedness
+// applies, unless it shares the scope of an enclosing struct.
+func (n *nodeContext) splitLiteral(s *StructLit, id CloseInfo) CloseInfo {
 	if id.outerID != 0 {
-		// This is not strictly necessary, but it reduces the counters a bit.
+		// A literal nested within a struct scope shares that scope:
+		// hasEvidenceForOne looks for evidence one scope up only, so
+		// a field declared beside the nested literal in the enclosing
+		// one must count for it.
 		return id
 	}
 	if id.FromEmbed {
 		// If we already had a struct within this field we can simply use it.
 		return id
 	}
+	return n.splitScope(s, id)
+}
 
-	if _, ok := s.Src.(*ast.File); ok {
-		// If this is not a file, the struct indicates the scope/
-		// boundary at which closedness should apply. This is not true
-		// for files.
-		// We should also not spawn if this is a nested Comprehension,
-		// where the spawn is already done as it may lead to spurious
-		// field not allowed errors. We can detect this with a nil s.Src.
-		// TODO(evalv3): use a more principled detection mechanism.
-		// TODO: set this as a flag in StructLit so as to not have to
-		// do the somewhat dangerous cast here.
+// isClosedLiteral reports whether s is written as a closed struct literal,
+// #{...}.
+func isClosedLiteral(s *StructLit) bool {
+	src, ok := s.Src.(*ast.StructLit)
+	return ok && src.Hash.IsValid()
+}
+
+// closeLiteral closes the node at one level for a closed struct literal,
+// #{...}, as close does: each field of the node must be declared in the
+// literal. Unlike the argument of close, the literal keeps the recursive
+// closedness of an enclosing definition, which id carries.
+func (n *nodeContext) closeLiteral(s *StructLit, id CloseInfo) CloseInfo {
+	closes := ClosesOnce
+	if id.FromDef {
+		closes = ClosesRecursively
+	}
+	return n.closedScope(s, id, closes, false)
+}
+
+// closedScope adds the requirement group of the struct literal s, which is
+// closed where it is written: as #{...} or by a builtin marked
+// [Builtin.Closes]. Each field of the node must be declared in s, or in
+// every struct within it when closes is recursive. A spread of s opens it
+// again. A __reclose literal, for which reclose is set, is closed only once
+// a value it embeds is, beyond any closing of a close call it wraps; see
+// [nodeContext.recloseEmbedded].
+//
+// The struct enclosing s stays the outer struct of the fields of s, as it
+// is for a reference to a closed struct, so that a field the enclosing
+// struct declares beside s counts as declared within that outer struct.
+func (n *nodeContext) closedScope(s *StructLit, id CloseInfo, closes Closing, reclose bool) CloseInfo {
+	if n.ctx.OpenDef {
 		return id
 	}
-
-	return n.splitScope(s, id)
+	outer := id.outerID
+	k := len(n.reqDefIDs)
+	id = n.newReq(s, id, defStruct)
+	if len(n.reqDefIDs) > k {
+		r := &n.reqDefIDs[k]
+		r.ignore = id.Opened || closes == NoClosing
+		// Unlike the FromDef default of newReq, a close call inside a
+		// definition closes its literal at one level only.
+		r.isRecursive = closes == ClosesRecursively
+		r.parent = outer
+		r.conjunctOpened = id.ConjunctOpened
+		r.reclose = reclose && !id.Opened && !id.ConjunctOpened
+	}
+	id.outerID = outer
+	return id
 }
 
 func (n *nodeContext) splitScope(p Node, id CloseInfo) CloseInfo {
@@ -603,8 +740,9 @@ func (n *nodeContext) checkTypos() {
 		return
 	}
 
-	// Avoid unnecessary errors.
-	if b, ok := v.BaseValue.(*Bottom); ok && !b.CloseCheck {
+	// Avoid unnecessary errors if the struct itself is in error. Errors in
+	// its fields, recorded with ChildError, should not hide its typos.
+	if b, ok := v.BaseValue.(*Bottom); ok && !b.CloseCheck && !b.ChildError {
 		return
 	}
 
@@ -613,8 +751,15 @@ func (n *nodeContext) checkTypos() {
 		return
 	}
 
+	// The arcs after one which fails the disjunct were not evaluated: they
+	// lack evidence of being allowed, and their errors would replace its own.
+	arcs := v.Arcs
+	if i := slices.IndexFunc(arcs, n.failsDisjunct); i >= 0 {
+		arcs = arcs[:i+1]
+	}
+
 	var err *Bottom
-	for _, a := range v.Arcs {
+	for _, a := range arcs {
 		f := a.Label
 
 		// TODO(mem): child states of uncompleted nodes must have a state.
@@ -636,8 +781,8 @@ func (n *nodeContext) checkTypos() {
 		}
 
 		for a := range required.elemPtrs() {
-			if id := hasParentEllipsis(n, a, n.conjunctInfo); id != 0 {
-				a.removed = true
+			if id, embed := hasParentEllipsis(n, a, n.conjunctInfo); id != 0 {
+				n.removeSet(a, embed, n.scopeDepth)
 			}
 		}
 
@@ -654,7 +799,7 @@ func (n *nodeContext) checkTypos() {
 			continue
 		}
 
-		if na.hasEvidenceForAll(required, na.conjunctInfo) {
+		if na.hasEvidenceForAll(required, na.conjunctInfo, n.scopeDepth) {
 			continue
 		}
 
@@ -677,7 +822,7 @@ func (n *nodeContext) checkTypos() {
 // hasEvidenceForAll reports whether there is evidence in a set of
 // conjuncts for each of the typo-checked structs represented by
 // the reqSets.
-func (n *nodeContext) hasEvidenceForAll(a reqSets, conjuncts []conjunctInfo) bool {
+func (n *nodeContext) hasEvidenceForAll(a reqSets, conjuncts []conjunctInfo, ownDepth int32) bool {
 	for i, rs := range a {
 		if rs.ignored {
 			continue
@@ -686,7 +831,7 @@ func (n *nodeContext) hasEvidenceForAll(a reqSets, conjuncts []conjunctInfo) boo
 			continue
 		}
 
-		if !n.hasEvidenceForOne(a, uint32(i), conjuncts) {
+		if !n.hasEvidenceForOne(a, uint32(i), conjuncts, ownDepth) {
 			if n.ctx.LogEval > 0 {
 				n.Logf("DENIED BY %d", a[i].id)
 			}
@@ -698,7 +843,7 @@ func (n *nodeContext) hasEvidenceForAll(a reqSets, conjuncts []conjunctInfo) boo
 
 // hasEvidenceForOne reports whether a single typo-checked set has evidence for
 // any of its defIDs.
-func (n *nodeContext) hasEvidenceForOne(all reqSets, i uint32, conjuncts []conjunctInfo) bool {
+func (n *nodeContext) hasEvidenceForOne(all reqSets, i uint32, conjuncts []conjunctInfo, ownDepth int32) bool {
 	a := all[i]
 	for _, x := range conjuncts {
 		if n.containsDefID(a.id, x.id) {
@@ -727,6 +872,11 @@ func (n *nodeContext) hasEvidenceForOne(all reqSets, i uint32, conjuncts []conju
 	}
 
 	outerScope, ok := all.lookupSet(a.parent)
+	// Whether the outer struct is opened by an ellipsis of the node whose
+	// arcs are checked, and not just within the embedding.
+	outerOpen := ok && outerScope.removed && outerScope.removedAt == ownDepth &&
+		(outerScope.removedEmbed == 0 ||
+			!n.containsDefID(embedScope.id, outerScope.removedEmbed))
 
 outer:
 	for _, c := range conjuncts {
@@ -735,21 +885,10 @@ outer:
 			continue outer
 		}
 
-		if a.parent == 0 {
-			// If the embedding's parent is not in the local
-			// reqSets, it originated from a different context
-			// (e.g. cross-package) and cannot provide evidence.
-			if embedScope.parent != 0 {
-				if _, ok2 := all.lookupSet(embedScope.parent); !ok2 {
-					continue outer
-				}
-			}
-			return true
-		}
 		if !ok {
 			return true
 		}
-		if outerScope.removed {
+		if outerOpen {
 			return true
 		}
 
@@ -808,6 +947,8 @@ func (n *nodeContext) containsDefID(node, child defID) bool {
 		}
 	}
 
+	// Seed the visited set with child, as containsDefIDRec explores it now.
+	c.containsDefIDVisited = append(c.containsDefIDVisited[:0], child)
 	result := n.containsDefIDRec(node, child, child)
 
 	if caching {
@@ -844,8 +985,16 @@ func (n *nodeContext) containsDefIDRec(node, child, start defID) bool {
 			// Process all entries with 'to' == p.
 			for cursor < len(n.flatReplaceIDs) && n.flatReplaceIDs[cursor].to == p {
 				from := n.flatReplaceIDs[cursor].from
-				if from != child && n.containsDefIDRec(node, from, start) {
-					return true
+				// Replacements may form cycles, for instance between mutually
+				// embedded definitions under the explicitopen experiment.
+				// Exploring a source we already explored within this
+				// top-level call cannot yield a new match, and following a
+				// cycle would recurse forever, so explore each one once.
+				if !slices.Contains(c.containsDefIDVisited, from) {
+					c.containsDefIDVisited = append(c.containsDefIDVisited, from)
+					if n.containsDefIDRec(node, from, start) {
+						return true
+					}
 				}
 				cursor++
 			}
@@ -900,6 +1049,21 @@ type reqSet struct {
 	// we still need to track the group memberships for embeddings or enclosing
 	// structs.
 	removed bool
+	// removedEmbed is the embedding scope of the ellipsis which removed this
+	// reqSet, or zero if it is outside of any embedding. It is only used when
+	// checking fields added outside of an embedding against its closedness,
+	// which an ellipsis within the embedding does not open.
+	removedEmbed defID
+
+	// removedAt is the [nodeContext.scopeDepth] of the node whose conjunct
+	// holds the ellipsis which removed this reqSet. An ellipsis opens the
+	// fields of its own node only, not those they declare in turn, so it
+	// is evidence just when checking the arcs of that node; see
+	// [nodeContext.hasEvidenceForOne]. The depth names a single node only
+	// because reqSets are inherited down the [Vertex.Parent] chain alone,
+	// which scopeDepth counts as well; inheriting them along another path,
+	// such as from a shared or copied Vertex, would break this.
+	removedAt int32
 
 	// conjunctOpened indicates this requirement is from an opened conjunction
 	// operand. See [refInfo.conjunctOpened].
@@ -965,15 +1129,28 @@ func getReqSets(n *nodeContext) reqSets {
 	v := n.node
 
 	var parentReqs reqSets
-	// Only inherit parent reqSets from the same OpContext to avoid stale defIDs.
-	if p := v.Parent; p != nil && !n.dropParentRequirements && p.state != nil && p.state.opID == n.opID {
-		parentReqs = getReqSets(p.state)
+	var parentConjuncts []conjunctInfo
+	// Only use the parent's close info from the same OpContext to avoid stale defIDs.
+	if p := v.Parent; p != nil && p.state != nil && p.state.opID == n.opID {
+		if !n.dropParentRequirements {
+			parentReqs = getReqSets(p.state)
+		}
+		parentConjuncts = p.state.conjunctInfo
 	}
 
 	// Grow the capacity of the slice ahead of time to avoid incremental growth below.
 	a = slices.Grow(a, len(parentReqs)+len(n.reqDefIDs))
 	a = append(a, parentReqs...)
 	markIgnored(a)
+	// Walk the ancestors only when the parent's depth is not available.
+	if p := v.Parent; p != nil && p.state != nil && p.state.computedCloseInfo {
+		n.scopeDepth = p.state.scopeDepth + 1
+	} else {
+		n.scopeDepth = 0
+		for p := v.Parent; p != nil; p = p.Parent {
+			n.scopeDepth++
+		}
+	}
 
 	last := len(a) - 1
 
@@ -1040,11 +1217,6 @@ outer:
 		})
 	}
 
-	var parentConjuncts []conjunctInfo
-	if p := v.Parent; p != nil && p.state != nil {
-		parentConjuncts = p.state.conjunctInfo
-	}
-
 	a = n.filterTop(a, parentConjuncts)
 
 	n.computedCloseInfo = true
@@ -1058,7 +1230,11 @@ outer:
 // If there is a top or ellipsis for all supported conjuncts, we have
 // evidence that this node can be dropped.
 func (n *nodeContext) filterTop(a reqSets, parentConjuncts []conjunctInfo) reqSets {
-	return filterSets(a, func(a *reqSet) bool {
+	parentDepth := n.scopeDepth - 1
+	// outside holds the scopes opened by an ellipsis of the parent in which
+	// this node has no conjuncts: it is a field the ellipsis added.
+	var outside []defID
+	a = filterSets(a, func(a *reqSet) bool {
 		var f conjunctFlags
 		hasAny := false
 
@@ -1081,10 +1257,11 @@ func (n *nodeContext) filterTop(a reqSets, parentConjuncts []conjunctInfo) reqSe
 			return true
 		}
 
-		switch id := hasParentEllipsis(n, a, parentConjuncts); {
+		switch id, embed := hasParentEllipsis(n, a, parentConjuncts); {
 		case id == 0:
 		case !hasAny:
-			a.removed = true
+			n.removeSet(a, embed, parentDepth)
+			outside = append(outside, a.id)
 		case a.kind != defStruct:
 			// The following logic should only apply to non-structs.
 		default:
@@ -1095,27 +1272,120 @@ func (n *nodeContext) filterTop(a reqSets, parentConjuncts []conjunctInfo) reqSe
 				}
 			}
 			if !hasAny {
-				a.removed = true
+				n.removeSet(a, embed, parentDepth)
 			}
 		}
 
 		return true
 	})
+	if len(outside) == 0 {
+		return a
+	}
+	// A requirement within such a scope does not apply to the added field
+	// either, unless the field has conjuncts of its own within it, as the
+	// ellipsis does not reach into those.
+outer:
+	for x := range a.elemPtrs() {
+		if x.removed {
+			continue
+		}
+		for _, c := range n.conjunctInfo {
+			if n.containsDefID(x.id, c.id) {
+				continue outer
+			}
+		}
+		for p := x.parent; p != 0; {
+			ps, ok := a.lookupSet(p)
+			if !ok {
+				break
+			}
+			if slices.Contains(outside, p) {
+				n.removeSet(x, ps.removedEmbed, ps.removedAt)
+				break
+			}
+			p = ps.parent
+		}
+	}
+	return a
+}
+
+// openByEllipsis reports whether n admits fields which none of its conjuncts
+// declare. An ellipsis only opens the struct or definition it is part of, so
+// this requires each typo-checked struct of n to be opened by one.
+func (n *nodeContext) openByEllipsis() bool {
+	// A vertex which is not closed admits any field without an ellipsis.
+	if v := n.node; n.ctx.OpenDef || !(v.ClosedRecursive || v.ClosedNonRecursive) {
+		return true
+	}
+	required := getReqSets(n)
+	if !slices.ContainsFunc(required, func(a reqSet) bool {
+		return !a.ignored && !a.removed
+	}) {
+		return true
+	}
+	// As in checkTypos, but without marking the sets shared with the arcs.
+	// The copy rarely has more than a few sets, and it stays on the stack
+	// as long as it is not ranged over via elemPtrs.
+	var buf [8]reqSet
+	required = append(buf[:0], required...)
+	for i := range required {
+		if id, embed := hasParentEllipsis(n, &required[i], n.conjunctInfo); id != 0 {
+			n.removeSet(&required[i], embed, n.scopeDepth)
+		}
+	}
+	// The zero conjunctInfo stands for a field added from outside of any
+	// definition or embedding.
+	return n.hasEvidenceForAll(required, []conjunctInfo{{}}, n.scopeDepth)
 }
 
 // hasParentEllipsis reports if the parent has any conjuncts from an ellipsis
-// matching any of the ids in a.
+// matching any of the ids in a. It returns the id of the first such conjunct,
+// and the outermost embedding scope of all of them; see [nodeContext.outerEmbed].
 //
-// TODO: this is currently called twice. Consider an approach where we only need
+// TODO: this is currently called thrice. Consider an approach where we only need
 // to filter this once for each node. Luckily we can avoid quadratic checks
 // for any conjunct that is not an ellipsis, which is most.
-func hasParentEllipsis(n *nodeContext, a *reqSet, conjuncts []conjunctInfo) defID {
+func hasParentEllipsis(n *nodeContext, a *reqSet, conjuncts []conjunctInfo) (id, embed defID) {
 	for _, c := range conjuncts {
-		if !c.flags.hasEllipsis() {
+		if !c.flags.hasEllipsis() || !n.containsDefID(a.id, c.id) {
 			continue
 		}
-		if n.containsDefID(a.id, c.id) {
-			return c.id
+		if id == 0 {
+			id, embed = c.id, c.embed
+		} else {
+			embed = n.outerEmbed(embed, c.embed)
+		}
+		if embed == 0 {
+			// Already outside of any embedding; no scope can widen that.
+			break
+		}
+	}
+	return id, embed
+}
+
+// removeSet marks a as removed by an ellipsis from the embedding scope embed,
+// held by a conjunct of the node at the given depth.
+func (n *nodeContext) removeSet(a *reqSet, embed defID, depth int32) {
+	if a.removed {
+		embed = n.outerEmbed(a.removedEmbed, embed)
+	}
+	a.removed = true
+	a.removedEmbed = embed
+	a.removedAt = depth
+}
+
+// outerEmbed returns the innermost scope which contains both of the embedding
+// scopes x and y, or zero, meaning outside of any embedding, if none does.
+func (n *nodeContext) outerEmbed(x, y defID) defID {
+	if x == 0 || y == 0 {
+		return 0
+	}
+	if n.containsDefID(y, x) {
+		return y
+	}
+	for p := x; p != 0; p = n.ctx.containments[p].id {
+		if n.containsDefID(p, y) {
+			return p
 		}
 	}
 	return 0

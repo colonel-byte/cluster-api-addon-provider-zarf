@@ -366,7 +366,8 @@ func (c *Context) Quo(d, x, y *Decimal) (Condition, error) {
 }
 
 // QuoInteger sets d to the integer part of the quotient x/y. If the result
-// cannot fit in d.Precision digits, an error is returned.
+// cannot fit in c.Precision digits, an error is returned. Unlike Rem,
+// QuoInteger requires c.Precision > 0.
 func (c *Context) QuoInteger(d, x, y *Decimal) (Condition, error) {
 	if set, res, err := c.quoSpecials(d, x, y, false); set {
 		return res, err
@@ -393,7 +394,8 @@ func (c *Context) QuoInteger(d, x, y *Decimal) (Condition, error) {
 }
 
 // Rem sets d to the remainder part of the quotient x/y. If
-// the integer part cannot fit in d.Precision digits, an error is returned.
+// the integer part cannot fit in c.Precision digits, an error is returned.
+// A precision of zero disables this limit.
 func (c *Context) Rem(d, x, y *Decimal) (Condition, error) {
 	if c.shouldSetAsNaN(x, y) {
 		return c.setAsNaN(d, x, y)
@@ -425,7 +427,7 @@ func (c *Context) Rem(d, x, y *Decimal) (Condition, error) {
 	}
 	var tmp2 BigInt
 	tmp2.QuoRem(a, b, &d.Coeff)
-	if NumDigits(&tmp2) > int64(c.Precision) {
+	if c.Precision > 0 && NumDigits(&tmp2) > int64(c.Precision) {
 		d.Set(decimalNaN)
 		return c.goError(DivisionImpossible)
 	}
@@ -461,8 +463,25 @@ func (c *Context) rootSpecials(d, x *Decimal, factor int32) (bool, Condition, er
 		}
 	case 0:
 		d.Set(x)
-		d.Exponent /= factor
-		return true, 0, nil
+		// The ideal exponent is the operand's exponent divided by factor,
+		// rounded towards negative infinity; Go's / truncates towards zero.
+		// This matches the GDA squareroot vectors; cube root is not a GDA
+		// operation, so for it this is apd's convention.
+		e := x.Exponent / factor
+		if x.Exponent%factor != 0 && x.Exponent < 0 {
+			e--
+		}
+		var res Condition
+		if etiny := c.etiny(); e < etiny {
+			e = etiny
+			res = Clamped
+		} else if e > c.MaxExponent {
+			e = c.MaxExponent
+			res = Clamped
+		}
+		d.Exponent = e
+		res, err := c.goError(res)
+		return true, res, err
 	}
 	return false, 0, nil
 }
@@ -1182,7 +1201,13 @@ func (c *Context) quantize(d, v *Decimal, exp int32) Condition {
 		p := int32(d.NumDigits()) - diff
 		if p < 0 {
 			if !d.IsZero() {
+				// The coefficient has fewer digits than diff, so the discarded value is
+				// below a tenth of a unit in the last place and always less than one half.
+				// Only sign- or zero-driven rounders (ceiling, floor, up, 05up) can round up.
 				d.Coeff.SetInt64(0)
+				if c.Rounding.ShouldAddOne(&d.Coeff, d.Negative, -1) {
+					d.Coeff.SetInt64(1)
+				}
 				res = Inexact | Rounded
 			}
 		} else {

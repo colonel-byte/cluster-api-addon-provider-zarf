@@ -75,12 +75,8 @@ type reclaimer struct {
 	// recursively.
 	recurse bool
 
-	// force allows a node to be freed if it is not finalized.
-	//
-	// TODO(mem): it is currently appears to be safe to free a nodeContext if it
-	// is not finalized, even for nodes that are part of the output tree. We
-	// should consider enforcing this though as it seems this could uncover some
-	// bugs.
+	// force allows a node to be freed if it is not finalized. This is unsafe
+	// if the node may still be evaluated later; see [Vertex.escapes].
 	force bool
 }
 
@@ -99,6 +95,17 @@ func (c *OpContext) reclaimRecursive(v *Vertex) {
 	r := reclaimer{
 		ctx:     c,
 		force:   true,
+		recurse: true,
+	}
+	r.reclaim(v)
+}
+
+// reclaimInline reclaims all buffers of the inline vertex v and its children,
+// keeping those which are not finalized if v escapes.
+func (c *OpContext) reclaimInline(v *Vertex) {
+	r := reclaimer{
+		ctx:     c,
+		force:   !v.escapes,
 		recurse: true,
 	}
 	r.reclaim(v)
@@ -149,13 +156,14 @@ func (r reclaimer) reclaim(v *Vertex) bool {
 		// Skip in-flight nodes (refCount > 0): freeing one mid-unify
 		// would null n.node under a live stack frame. Applies on both
 		// r.guard paths because n.toFree subtrees can carry in-progress
-		// descendants on cyclic inline vertices.
-		if n.refCount > 0 {
+		// descendants on cyclic inline vertices. Without force, also skip
+		// unfinished nodes, whose evaluation may still resume.
+		if n.refCount > 0 || (!r.force && v.status != finalized) {
 			goto skipRoot
 		}
 
 		for _, v := range n.toFree {
-			r.ctx.reclaimRecursive(v)
+			r.ctx.reclaimInline(v)
 		}
 		n.toFree = n.toFree[:0]
 
@@ -222,12 +230,20 @@ skipRoot:
 func (r reclaimer) reclaimBaseValueBuffers(v *Vertex) {
 	switch x := v.BaseValue.(type) {
 	case *Disjunction:
+		// A cloned Vertex (see [overlayContext.cloneVertex]) shares its
+		// BaseValue with the original vertex, so only the owner may reclaim
+		// the disjuncts, which may still be pending finalization there.
+		if x.owner != v {
+			break
+		}
 		for _, d := range x.Values {
 			if v, ok := d.(*Vertex); ok {
 				r.ctx.reclaimRecursive(v)
 			}
 		}
 	case *Conjunction:
+		// TODO(mem): Conjunction values may be shared with a clone in the
+		// same way, but there is no ownership record to guard with yet.
 		for _, d := range x.Values {
 			if v, ok := d.(*Vertex); ok {
 				r.ctx.reclaimRecursive(v)
@@ -241,4 +257,5 @@ func (v *Vertex) clearArcs(c *OpContext) {
 		c.reclaimRecursive(arc)
 	}
 	v.Arcs = v.Arcs[:0]
+	v.arcMap = nil
 }

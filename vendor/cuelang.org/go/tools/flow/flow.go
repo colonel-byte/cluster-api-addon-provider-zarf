@@ -71,6 +71,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"cuelang.org/go/cue"
@@ -78,7 +79,6 @@ import (
 	"cuelang.org/go/cue/stats"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/convert"
-	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/value"
 )
 
@@ -109,6 +109,7 @@ type Runner interface {
 	//
 	// If for a returned error x errors.Is(x, ErrAbort), all dependant tasks
 	// will not be run, without this being an error.
+	// Any results set via [Task.Fill] by an aborting task are discarded.
 	Run(t *Task, err error) error
 }
 
@@ -175,6 +176,11 @@ type Controller struct {
 	inst        cue.Value
 	valueSeqNum int64
 
+	// instPath is the path of inst within its instance. It is non-empty only
+	// if New was given a value that is not at the root of its instance. Task
+	// paths and labels are stored relative to it.
+	instPath cue.Path
+
 	env *adt.Environment
 
 	conjuncts   []adt.Conjunct
@@ -225,8 +231,9 @@ func (c *Controller) Stats() (counts stats.Counts) {
 // This may currently only be called before Run is called or from within
 // a call to UpdateFunc. Task pointers returned by this call are not guaranteed
 // to be the same between successive calls to this method.
+// The result must not be modified.
 func (c *Controller) Tasks() []*Task {
-	return c.tasks
+	return slices.Clip(c.tasks)
 }
 
 func (c *Controller) cancel() {
@@ -244,7 +251,7 @@ func (c *Controller) addErr(err error, msg string) {
 // The instance value can either be a *cue.Instance or a cue.Value.
 func New(cfg *Config, inst cue.InstanceOrValue, f TaskFunc) *Controller {
 	v := inst.Value()
-	ctx := eval.NewContext(value.ToInternal(v))
+	ctx := value.OpContext(v)
 
 	c := &Controller{
 		isTask: f,
@@ -264,6 +271,10 @@ func New(cfg *Config, inst cue.InstanceOrValue, f TaskFunc) *Controller {
 }
 
 // Run runs the tasks of a workflow until completion.
+//
+// When Run stops early, because of an error or because ctx is canceled,
+// it cancels the context of the tasks still running and returns without
+// waiting for them to finish.
 func (c *Controller) Run(ctx context.Context) error {
 	c.context, c.cancelFunc = context.WithCancel(ctx)
 	defer c.cancelFunc()
@@ -323,8 +334,8 @@ func mermaidGraph(c *Controller) string {
 //	    ↘︎        ↙︎
 //	    Terminated
 //
-// A Task may move from Waiting to Terminating if one of
-// the tasks on which it depends fails.
+// A Task may move from Waiting to Terminated if one of
+// the tasks on which it depends aborts with [ErrAbort].
 //
 // NOTE: transitions from Running to Waiting are currently not supported. In
 // the future this may be possible if a task depends on continuously running
@@ -374,12 +385,13 @@ type Task struct {
 	deps     map[*Task]bool
 	pathDeps map[string][]*Task
 
-	conjunctSeq int64
-	valueSeq    int64
-	v           cue.Value
-	err         errors.Error
-	state       State
-	depTasks    []*Task
+	// v is written by the run loop only; mu lets other goroutines read
+	// it through [Task.Value] while the run loop keeps it up to date.
+	mu       sync.Mutex
+	v        cue.Value
+	err      errors.Error
+	state    State
+	depTasks []*Task
 
 	stats stats.Counts
 }
@@ -399,8 +411,8 @@ func (t *Task) Context() context.Context {
 	return t.c.context
 }
 
-// Path reports the path of Task within the Instance in which it is defined.
-// The Path is always valid.
+// Path reports the path of Task relative to the value from which the
+// Controller was created. The Path is always valid.
 func (t *Task) Path() cue.Path {
 	return t.path
 }
@@ -411,17 +423,28 @@ func (t *Task) Index() int {
 	return t.index
 }
 
+// IsService reports whether the Task's runner is a [Service].
+// This will not change over time.
+func (t *Task) IsService() bool {
+	return t.isService
+}
+
 func (t *Task) done() bool {
 	return t.state > Running
 }
 
-func (t *Task) isReady() bool {
+// isReady reports whether all the tasks on which t depends are done.
+// If any of them aborted with [ErrAbort], it returns that task's error.
+func (t *Task) isReady() (ready bool, aborted errors.Error) {
+	ready = true
 	for _, d := range t.depTasks {
 		if !d.done() {
-			return false
+			ready = false
+		} else if errors.Is(d.err, ErrAbort) {
+			return false, d.err
 		}
 	}
-	return true
+	return ready, nil
 }
 
 func (t *Task) vertex() *adt.Vertex {
@@ -489,26 +512,34 @@ func (t *Task) Fill(x interface{}) error {
 // This method may currently only be called before Run is called or after a
 // Task completed, or from within a call to UpdateFunc.
 func (t *Task) Value() cue.Value {
-	// TODO: synchronize
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.v
+}
+
+func (t *Task) setValue(v cue.Value) {
+	t.mu.Lock()
+	t.v = v
+	t.mu.Unlock()
 }
 
 // Dependencies reports the Tasks t depends on.
 //
 // This method may currently only be called before Run is called or after a
 // Task completed, or from within a call to UpdateFunc.
+// The result must not be modified.
 func (t *Task) Dependencies() []*Task {
 	// TODO: add synchronization.
-	return t.depTasks
+	return slices.Clip(t.depTasks)
 }
 
 // PathDependencies reports the dependencies found for a value at the given
 // path.
 //
 // This may currently only be called before Run is called or from within
-// a call to UpdateFunc.
+// a call to UpdateFunc. The result must not be modified.
 func (t *Task) PathDependencies(p cue.Path) []*Task {
-	return t.pathDeps[p.String()]
+	return slices.Clip(t.pathDeps[p.String()])
 }
 
 // Err returns the error of a completed Task.

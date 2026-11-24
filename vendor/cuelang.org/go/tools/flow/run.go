@@ -31,8 +31,8 @@ import (
 	"slices"
 
 	"cuelang.org/go/cue/errors"
+	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
-	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/cuedebug"
 	"cuelang.org/go/internal/value"
 )
@@ -68,7 +68,10 @@ func (c *Controller) runLoop() {
 
 			case Ready:
 				t.state = Running
-				c.updateTaskValue(t)
+				// A task found through a dependency may hold a vertex from
+				// a different tree than the configuration's; run it against
+				// the configuration.
+				t.setValue(c.inst.LookupPath(t.path))
 
 				// If the task's path no longer resolves in the configuration
 				// (e.g. because a conditional guard was eliminated as the
@@ -79,14 +82,23 @@ func (c *Controller) runLoop() {
 				}
 
 				running = true
-				t.ctxt = eval.NewContext(value.ToInternal(t.v))
+				// Fill's context must not be bound to the task's vertex:
+				// the conjuncts it produces stay in c.conjuncts for the
+				// whole run, and an environment pointing into the current
+				// tree would keep every replaced tree reachable.
+				t.ctxt = adt.NewContext(c.opCtx.Runtime, nil)
 
 				go func(t *Task) {
 					if err := t.r.Run(t, nil); err != nil {
-						t.err = errors.Promote(err, "task failed")
+						t.err = taskFailed(t, err)
 					}
 
-					t.c.taskCh <- t
+					// The run loop stops receiving once the context is
+					// canceled, which Run does on every return.
+					select {
+					case t.c.taskCh <- t:
+					case <-t.c.context.Done():
+					}
 				}(t)
 
 			case Running:
@@ -118,13 +130,13 @@ func (c *Controller) runLoop() {
 
 			start := *c.opCtx.Stats()
 
-			switch t.err {
-			case nil:
+			switch {
+			case t.err == nil:
 				c.updateTaskResults(t)
 
-			case ErrAbort:
-				// TODO: do something cleverer.
-				fallthrough
+			case errors.Is(t.err, ErrAbort):
+				// The task's results are dropped,
+				// and markReady terminates its dependants.
 
 			default:
 				c.addErr(t.err, "task failure")
@@ -136,9 +148,10 @@ func (c *Controller) runLoop() {
 				// initTasks was already called in New to catch initialization
 				// errors earlier and add stats.
 				c.initTasks(false)
+			} else {
+				// The configuration may have been recomputed while t ran.
+				t.setValue(c.inst.LookupPath(t.path))
 			}
-
-			c.updateTaskValue(t)
 
 			t.stats.Add(c.opCtx.Stats().Since(start))
 
@@ -148,9 +161,21 @@ func (c *Controller) runLoop() {
 }
 
 func (c *Controller) markReady(t *Task) {
-	for _, x := range c.tasks {
-		if x.state == Waiting && x.isReady() {
-			x.state = Ready
+	// Tasks which depend on an aborted task, transitively,
+	// are terminated without being run.
+	for changed := true; changed; {
+		changed = false
+		for _, x := range c.tasks {
+			if x.state != Waiting {
+				continue
+			}
+			if ready, aborted := x.isReady(); aborted != nil {
+				x.state = Terminated
+				x.err = aborted
+				changed = true
+			} else if ready {
+				x.state = Ready
+			}
 		}
 	}
 
@@ -188,29 +213,16 @@ func (c *Controller) updateValue() bool {
 
 	c.inst = value.Make(c.opCtx, v)
 	c.valueSeqNum = c.conjunctSeq
-	return true
-}
 
-// updateTaskValue updates the value of the task in the configuration if it is
-// out of date.
-func (c *Controller) updateTaskValue(t *Task) {
-	required := t.conjunctSeq
-	for _, dep := range t.depTasks {
-		if dep.conjunctSeq > required {
-			required = dep.conjunctSeq
+	// Completed tasks are not dispatched again, so point them at the new
+	// configuration here, keeping their values current and releasing the
+	// configuration computed when each of them completed.
+	for _, t := range c.tasks {
+		if t.state == Terminated {
+			t.setValue(c.inst.LookupPath(t.path))
 		}
 	}
-
-	if t.valueSeq == required {
-		return
-	}
-
-	if c.valueSeqNum < required {
-		c.updateValue()
-	}
-
-	t.v = c.inst.LookupPath(t.path)
-	t.valueSeq = required
+	return true
 }
 
 // updateTaskResults updates the result status of the task and adds any result
@@ -253,7 +265,31 @@ func (c *Controller) updateTaskResults(t *Task) bool {
 	// conjunct before. This will allow for serving applications.
 	c.conjuncts = append(c.conjuncts, adt.MakeRootConjunct(c.env, expr))
 	c.conjunctSeq++
-	t.conjunctSeq = c.conjunctSeq
 
 	return true
 }
+
+// taskFailed returns the error of a failed task, attaching the path of the
+// task unless err already carries a path of its own.
+func taskFailed(t *Task, err error) errors.Error {
+	perr := errors.Promote(err, "task failed")
+	if len(perr.Path()) > 0 {
+		return perr
+	}
+	e := &taskError{}
+	for _, sel := range t.Value().Path().Selectors() {
+		e.path = append(e.path, sel.String())
+	}
+	return errors.Wrap(e, perr)
+}
+
+// taskError is the parent error of a failed task's error,
+// providing the path of the task.
+type taskError struct {
+	path []string
+	errors.Message
+}
+
+func (e *taskError) Path() []string              { return e.path }
+func (e *taskError) Position() token.Pos         { return token.NoPos }
+func (e *taskError) InputPositions() []token.Pos { return nil }

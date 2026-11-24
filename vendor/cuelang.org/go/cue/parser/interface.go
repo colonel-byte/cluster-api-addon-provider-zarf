@@ -23,7 +23,6 @@ import (
 	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal/cueexperiment"
 	"cuelang.org/go/internal/cueversion"
 	"cuelang.org/go/internal/mod/semver"
 	"cuelang.org/go/internal/source"
@@ -119,8 +118,9 @@ const (
 
 	// ParseFuncs causes function declarations to be parsed.
 	//
-	// This is an experimental function and the API is likely to
-	// change or dissapear.
+	// Deprecated: enable the functions experiment with an
+	// @experiment(functions) file attribute instead. ParseFuncs remains
+	// honored while the experiment is in preview.
 	ParseFuncs
 
 	// Trace causes parsing to print a trace of parsed productions.
@@ -141,13 +141,19 @@ func (m Mode) apply(c *Config) {
 	c.Mode |= m
 }
 
-// Version specifies the language version to use when parsing
-// the CUE. The argument must be a valid semantic version, as
-// checked by [semver.IsValid].
+// Version specifies the language version to use when parsing the CUE. A
+// non-empty version must be a valid semantic version, as checked by
+// [semver.IsValid]; the empty string selects the current language version,
+// which is also what [NewConfig] starts from, so that a caller whose version
+// may be unset can pass it on without guarding the call.
 //
-// The version will be recorded in the [ast.File] returned
-// from [ParseFile].
+// The version is recorded in the [cuelang.org/go/cue/token.File] holding the
+// parsed source, so every position reports it; see
+// [cuelang.org/go/cue/token.Pos.LanguageVersion].
 func Version(v string) Option {
+	if v == "" {
+		v = cueversion.LanguageVersion()
+	}
 	if !semver.IsValid(v) {
 		panic(fmt.Errorf("invalid language version %q", v))
 	}
@@ -215,15 +221,23 @@ func ParseFile(filename string, src any, mode ...Option) (f *ast.File, err error
 	}
 	f.Filename = filename
 	astutil.Resolve(f, pp.errf)
+	if pp.cfg.Mode&ParseComments != 0 {
+		ast.ResolveComments(f)
+	}
 
 	return f, pp.errors
 }
 
 // ParseExpr is a convenience function for parsing an expression.
-// The arguments have the same meaning as for Parse, but the source must
-// be a valid CUE (type or value) expression. Specifically, fset must not
-// be nil.
-func ParseExpr(filename string, src any, mode ...Option) (_ ast.Expr, err error) {
+// The arguments have the same meaning as for [ParseFile], but the source
+// must be a valid CUE (type or value) expression.
+//
+// If the source couldn't be read, the returned AST is nil and the error
+// indicates the specific failure. If the source was read but syntax
+// errors were found, the result is a partial AST (with Bad* nodes
+// representing the fragments of erroneous source code), which may be nil
+// if parsing was abandoned.
+func ParseExpr(filename string, src any, mode ...Option) (expr ast.Expr, err error) {
 	// get source
 	text, err := source.ReadAll(filename, src)
 	if err != nil {
@@ -242,16 +256,14 @@ func ParseExpr(filename string, src any, mode ...Option) (_ ast.Expr, err error)
 	p.init(filename, text, mode)
 	// We don't have a file with experiment attributes, but we still want to apply
 	// the default experiment values given the configured language version.
-	exp, expErr := cueexperiment.NewFile(p.cfg.Version)
-	if expErr != nil {
-		return nil, errors.Newf(token.NoPos, "parsing experiments: %v", expErr)
+	if !p.setExperiments(p.cfg.Version) {
+		return nil, p.errors
 	}
-	p.experiments = exp
 	// Set up pkg-level scopes to avoid nil-pointer errors.
 	// This is not needed for a correct expression x as the
 	// parser will be ok with a nil topScope, but be cautious
 	// in case of an erroneous x.
-	e := p.parseRHS()
+	expr = p.parseRHS()
 
 	// If a comma was inserted, consume it;
 	// report an error if there's more tokens.
@@ -262,10 +274,10 @@ func ParseExpr(filename string, src any, mode ...Option) (_ ast.Expr, err error)
 		p.expect(token.EOF)
 	}
 
-	if p.errors != nil {
-		return nil, p.errors
+	astutil.ResolveExpr(expr, p.errf)
+	if p.cfg.Mode&ParseComments != 0 {
+		ast.ResolveComments(expr)
 	}
-	astutil.ResolveExpr(e, p.errf)
 
-	return e, p.errors
+	return expr, p.errors
 }

@@ -33,7 +33,10 @@ import (
 	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/encoding/jsonschema/internal/structbuilder"
 	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/cueexperiment"
+	"cuelang.org/go/internal/value"
 )
 
 const (
@@ -54,6 +57,10 @@ type decoder struct {
 	cfg          *Config
 	errs         errors.Error
 	mapURLErrors map[string]bool
+
+	// targetExp holds the experiments of [Config.TargetLanguageVersion],
+	// which decide the spellings the extracted syntax may use.
+	targetExp *cueexperiment.File
 
 	root   cue.Value
 	rootID *url.URL
@@ -76,7 +83,7 @@ type decoder struct {
 	defs map[string]*definedSchema
 
 	// builder is used to build the final syntax tree as it becomes known.
-	builder structBuilder
+	builder structbuilder.Builder
 
 	// needAnotherPass is set to true when we know that
 	// we need another pass through the schema extraction
@@ -120,13 +127,43 @@ func (d *decoder) addImport(n cue.Value, pkg string) *ast.Ident {
 	return ident
 }
 
+// seedBase adds [Config.Base], if any, to the builder. It is invoked whenever
+// the builder starts from empty: before the first decoding pass and after any
+// reset for a subsequent pass.
+func (d *decoder) seedBase() error {
+	if d.cfg.Base == nil {
+		return nil
+	}
+	return d.builder.AddBase(d.cfg.Base)
+}
+
 func (d *decoder) decode(v cue.Value) *ast.File {
 	var defsRoot cue.Value
+	// rootValues holds the schemas to decode when [Config.Roots] is used.
+	var rootValues []cue.Value
+	useRoots := d.cfg.Roots != nil
 	// docRoot represents the root of the actual data, by contrast
 	// with the "root" value as specified in [Config.Root] which
 	// represents the root of the schemas to be decoded.
 	docRoot := v
-	if d.cfg.Root != "" {
+	switch {
+	case useRoots:
+		for _, r := range d.cfg.Roots {
+			n, err := lookupRoot(v, r)
+			if err != nil {
+				d.errf(cue.Value{}, "invalid Config.Roots value %q: %v", r, err)
+				return nil
+			}
+			if !n.Exists() {
+				if d.cfg.AllowNonExistentRoot {
+					continue
+				}
+				d.errf(v, "root value at path %v does not exist", r)
+				return nil
+			}
+			rootValues = append(rootValues, n)
+		}
+	case d.cfg.Root != "":
 		rootPath, err := parseRootRef(d.cfg.Root)
 		if err != nil {
 			d.errf(cue.Value{}, "invalid Config.Root value %q: %v", d.cfg.Root, err)
@@ -141,7 +178,7 @@ func (d *decoder) decode(v cue.Value) *ast.File {
 			v = root
 		} else {
 			if !root.Exists() {
-				root = v.Context().CompileString("{}")
+				root = value.Context(v).CompileString("{}")
 			}
 			if root.Kind() != cue.StructKind {
 				d.errf(root, "value at path %v must be struct containing definitions but is actually %v", d.cfg.Root, root)
@@ -160,6 +197,10 @@ func (d *decoder) decode(v cue.Value) *ast.File {
 	// not part of the regular traversal are found.
 	basePass := 0
 
+	if err := d.seedBase(); err != nil {
+		d.errf(cue.Value{}, "invalid Config.Base value: %v", err)
+		return nil
+	}
 	for pass := 0; ; pass++ {
 		if pass > 10 {
 			// Should never happen: the most we should ever see in practice
@@ -177,7 +218,15 @@ func (d *decoder) decode(v cue.Value) *ast.File {
 			pos:    docRoot,
 		}
 
-		if defsRoot.Exists() {
+		if useRoots {
+			// Each entry in [Config.Roots] points to a single schema;
+			// ensure each is defined so that [Config.MapRef] places it and
+			// references between them resolve.
+			for _, n := range rootValues {
+				root.ensureDefinition(n)
+				root.schema(n)
+			}
+		} else if defsRoot.Exists() {
 			// When d.cfg.Root is non-empty, it points to a struct
 			// containing a field for each definition.
 			constraintAddDefinitions("schemas", defsRoot, root)
@@ -191,7 +240,7 @@ func (d *decoder) decode(v cue.Value) *ast.File {
 				root.errf(v, "constraints are not possible to satisfy")
 				return nil
 			}
-			if !d.builder.put(cue.Path{}, expr, state.comment()) {
+			if !d.builder.Put(cue.Path{}, expr, state.comment()) {
 				root.errf(v, "duplicate definition at root") // TODO better error message
 				return nil
 			}
@@ -225,7 +274,12 @@ func (d *decoder) decode(v cue.Value) *ast.File {
 			break
 		}
 
-		d.builder = structBuilder{}
+		d.builder = structbuilder.Builder{}
+		if err := d.seedBase(); err != nil {
+			// Should never happen: the base was accepted before the first pass.
+			d.errf(cue.Value{}, "invalid Config.Base value: %v", err)
+			return nil
+		}
 		for _, def := range d.defs {
 			def.schema = nil
 		}
@@ -240,7 +294,7 @@ func (d *decoder) decode(v cue.Value) *ast.File {
 			}
 		}
 	}
-	f, err := d.builder.syntax()
+	f, err := d.builder.Syntax()
 	if err != nil {
 		d.errf(v, "cannot build final syntax: %v", err)
 		return nil
@@ -394,7 +448,12 @@ var coreToCUE = []cue.Kind{
 	objectType: cue.StructKind,
 }
 
-func kindToAST(k cue.Kind, explicitOpen bool) ast.Expr {
+// kindToAST returns the CUE syntax for a JSON Schema core type. A struct
+// is written open unless openOnlyWhenExplicit is set, per
+// [Config.OpenOnlyWhenExplicit]; note that this is a JSON Schema
+// closedness policy and has nothing to do with the explicitopen
+// experiment, which does not vary the syntax written here.
+func kindToAST(k cue.Kind, openOnlyWhenExplicit bool) ast.Expr {
 	switch k {
 	case cue.NullKind:
 		// TODO: handle OpenAPI restrictions.
@@ -412,7 +471,7 @@ func kindToAST(k cue.Kind, explicitOpen bool) ast.Expr {
 	case cue.ListKind:
 		return ast.NewList(&ast.Ellipsis{})
 	case cue.StructKind:
-		if explicitOpen {
+		if openOnlyWhenExplicit {
 			return ast.NewStruct()
 		}
 		return ast.NewStruct(&ast.Ellipsis{})
@@ -436,8 +495,8 @@ type constraintInfo struct {
 	constraints []ast.Expr
 }
 
-func (c *constraintInfo) setTypeUsed(n cue.Value, t coreType, explicitOpen bool) {
-	c.typ = kindToAST(coreToCUE[t], explicitOpen)
+func (c *constraintInfo) setTypeUsed(n cue.Value, t coreType, openOnlyWhenExplicit bool) {
+	c.typ = kindToAST(coreToCUE[t], openOnlyWhenExplicit)
 	setPos(c.typ, n)
 	ast.SetRelPos(c.typ, token.NoRelPos)
 }
@@ -450,8 +509,36 @@ func (c *constraintInfo) add(n cue.Value, x ast.Expr) {
 	}
 }
 
+// addPositioned adds a constraint whose parts carry positions of their
+// own. [constraintInfo.add] would set the keyword's position on x, which
+// for a disjunction is the position of its first operand, as
+// [ast.SetPos] on an [ast.BinaryExpr] writes to that operand.
+func (c *constraintInfo) addPositioned(x ast.Expr) {
+	ast.SetRelPos(x, token.NoRelPos)
+	c.constraints = append(c.constraints, x)
+}
+
 func (s *state) add(n cue.Value, t coreType, x ast.Expr) {
 	s.types[t].add(n, x)
+}
+
+// removeMinItems drops the constraint generated for the "minItems"
+// keyword. It's called when another constraint turns out to imply it.
+func (s *state) removeMinItems() {
+	if s.minItemsExpr == nil {
+		return
+	}
+	c := &s.types[arrayType]
+	c.constraints = slices.DeleteFunc(c.constraints, func(e ast.Expr) bool {
+		return e == s.minItemsExpr
+	})
+	s.minItemsExpr = nil
+}
+
+// hasListPrefix reports whether a positional schema prefix has been
+// established by the array form of "items" or by "prefixItems".
+func (s *state) hasListPrefix() bool {
+	return s.list != nil || s.listStruct != nil
 }
 
 func (s *state) setTypeUsed(n cue.Value, t coreType) {
@@ -494,9 +581,37 @@ type state struct {
 	obj  *ast.StructLit
 	objN cue.Value // used for adding obj to constraints
 
-	patterns []ast.Expr
+	// patterns holds the regexps of the pattern constraints in obj.
+	patterns []string
 
+	// patternSkipped holds whether "patternProperties" has a regexp
+	// which could not be expressed, leaving its properties unknown.
+	patternSkipped bool
+
+	// list holds the list literal generated for the array form of
+	// "items" or for "prefixItems", holding the elements of the prefix
+	// that are guaranteed to be present. It's non-nil once such a
+	// keyword has been seen.
 	list *ast.ListLit
+
+	// listStruct holds the struct generated for the same keywords when
+	// the instance is allowed to be shorter than the prefix: it embeds
+	// list and adds an index constraint for each remaining element; see
+	// [constraintPrefixItems]. It's nil when list holds the whole
+	// prefix.
+	listStruct *ast.StructLit
+
+	// listPrefixLen holds the number of positional schemas in list or
+	// listStruct.
+	listPrefixLen int
+
+	// minItems holds the value of the "minItems" keyword, or zero if
+	// it's not present, which is also its default.
+	minItems uint64
+
+	// minItemsExpr holds the constraint generated for a non-zero
+	// "minItems", so that [state.removeMinItems] can drop it again.
+	minItemsExpr ast.Expr
 
 	// listItemsIsArray keeps track of whether the
 	// value of the "items" keyword is an array.
@@ -854,9 +969,20 @@ func (s0 *state) schemaState(n cue.Value, types cue.Kind, init func(*state)) (ex
 		return s.errf(n, "schema expects mapping node, found %s", n.Kind()), s.schemaInfo
 	}
 
+	// Collect the fields once, as iterating over n is not cheap.
+	type field struct {
+		key   string
+		value cue.Value
+	}
+	var fields []field
+	s.processMap(n, func(key string, value cue.Value) {
+		fields = append(fields, field{key, value})
+	})
+
 	// do multiple passes over the constraints to ensure they are done in order.
 	for pass := range numPhases {
-		s.processMap(n, func(key string, value cue.Value) {
+		for _, f := range fields {
+			key, value := f.key, f.value
 			if pass == 0 && key == "$ref" {
 				// Before 2019-19, keywords alongside $ref are ignored so keep
 				// track of whether we've seen any non-$ref keywords so we can
@@ -872,20 +998,20 @@ func (s0 *state) schemaState(n cue.Value, types cue.Kind, init func(*state)) (ex
 					// not intended to be a valid keyword, and is explicitly
 					// allowed by OpenAPI. It seems reasonable that
 					// this is not an error even with StrictKeywords enabled.
-					return
+					continue
 				}
 				if pass == 0 && s.cfg.StrictKeywords {
 					// TODO: value is not the correct position, albeit close. Fix this.
 					s.warnUnrecognizedKeyword(key, value, "unknown keyword %q", key)
 				}
-				return
+				continue
 			}
 			if c.phase != pass {
-				return
+				continue
 			}
 			if !s.schemaVersion.is(c.versions) {
 				s.warnUnrecognizedKeyword(key, value, "keyword %q is not supported in JSON schema version %v", key, s.schemaVersion)
-				return
+				continue
 			}
 			if pass > 0 && !s.schemaVersion.is(vfrom(VersionDraft2019_09)) && s.hasRefKeyword && key != "$ref" {
 				// We're using a schema version that ignores keywords alongside $ref.
@@ -897,10 +1023,10 @@ func (s0 *state) schemaState(n cue.Value, types cue.Kind, init func(*state)) (ex
 				// keyword itself). We could make that situation an explicit error, but other
 				// implementations don't, and it would require an entire extra pass just to do so.
 				s.warnUnrecognizedKeyword(key, value, "ignoring keyword %q alongside $ref", key)
-				return
+				continue
 			}
 			c.fn(key, value, s)
-		})
+		}
 		if s.schemaVersion == VersionKubernetesCRD && s.isRoot {
 			// The root of a CRD is always a resource, so treat it as if it contained
 			// the x-kubernetes-embedded-resource keyword
@@ -968,7 +1094,7 @@ func (s *state) maybeDefine(expr ast.Expr, info schemaInfo) ast.Expr {
 	def.comment = info.comment()
 	if def.importPath == "" {
 		// It's a local definition that's not at the root.
-		if !s.builder.put(def.path, expr, s.comment()) {
+		if !s.builder.Put(def.path, expr, s.comment()) {
 			s.errf(s.pos, "redefinition of schema CUE path %v", def.path)
 			return expr
 		}
@@ -1007,7 +1133,7 @@ func (s *state) definedSchemaForNode(n cue.Value) *definedSchema {
 func (s *state) addDefinition(n cue.Value) *definedSchema {
 	var loc SchemaLoc
 	schemaRoot := s.schemaRoot()
-	loc.ID = ref(*schemaRoot.id)
+	loc.ID = new(*schemaRoot.id)
 	loc.ID.Fragment = mustCUEPathToJSONPointer(relPath(n, schemaRoot.pos))
 	idStr := loc.ID.String()
 	def, ok := s.defs[idStr]
@@ -1038,7 +1164,7 @@ func (s *state) addDefinition(n cue.Value) *definedSchema {
 func (s *state) refExpr(n cue.Value, importPath string, path cue.Path) ast.Expr {
 	if importPath == "" {
 		// Internal reference
-		expr, err := s.builder.getRef(path)
+		expr, err := s.builder.GetRef(path)
 		if err != nil {
 			s.errf(n, "cannot generate reference: %v", err)
 			return nil
@@ -1054,7 +1180,7 @@ func (s *state) refExpr(n cue.Value, importPath string, path cue.Path) ast.Expr 
 	}
 	ident := ast.NewIdent(ip.Qualifier)
 	ident.Node = &ast.ImportSpec{Path: ast.NewString(importPath)}
-	expr, err := pathRefSyntax(path, ident)
+	expr, err := structbuilder.PathRefSyntax(path, ident)
 	if err != nil {
 		s.errf(n, "cannot determine CUE path: %v", err)
 		return nil
@@ -1086,8 +1212,36 @@ func (s *state) constValue(n cue.Value) ast.Expr {
 		if !n.IsConcrete() {
 			s.errf(n, "invalid non-concrete value")
 		}
-		return n.Syntax(cue.Final()).(ast.Expr)
+		x := setPos(n.Syntax(cue.Final()).(ast.Expr), n)
+		if k&cue.NumberKind == 0 {
+			return x
+		}
+		// JSON Schema compares numbers by mathematical value, so a const
+		// of 1 must also match 1.0. Unification keeps ints and floats
+		// apart, whereas bounds compare by value.
+		if s.targetExp.StructCmp {
+			return setPos(&ast.UnaryExpr{Op: token.EQL, X: x}, n)
+		}
+		// Unary == needs the StructCmp experiment, so spell the same
+		// constraint as a pair of bounds for older targets, each with its
+		// own literal rather than one node aliased into both.
+		y := setPos(n.Syntax(cue.Final()).(ast.Expr), n)
+		return ast.NewBinExpr(token.AND,
+			setPos(&ast.UnaryExpr{Op: token.GEQ, X: x}, n),
+			setPos(&ast.UnaryExpr{Op: token.LEQ, X: y}, n),
+		)
 	}
+}
+
+// constValueKind reports the kind of values that [state.constValue] accepts
+// for n. Numbers are rendered as bounds, which match by mathematical value, so
+// a number admits both ints and floats regardless of how it is written.
+func constValueKind(n cue.Value) cue.Kind {
+	k := n.Kind()
+	if k&cue.NumberKind != 0 {
+		k = cue.NumberKind
+	}
+	return k
 }
 
 // processMap processes a yaml node, expanding merges.
@@ -1115,7 +1269,7 @@ func (s *state) listItems(name string, n cue.Value, allowEmpty bool) (a []cue.Va
 	return a
 }
 
-// excludeFields returns either an empty slice (if decls is empty)
+// excludeFields returns either an empty slice (if decls has no named fields)
 // or a slice containing a CUE expression that can be used to exclude the
 // fields of the given declaration in a label expression. For instance, for
 //
@@ -1130,9 +1284,6 @@ func (s *state) listItems(name string, n cue.Value, allowEmpty bool) (a []cue.Va
 //
 //	[!~"^(foo|bar)$"]: string
 func excludeFields(decls []ast.Decl) []ast.Expr {
-	if len(decls) == 0 {
-		return nil
-	}
 	var buf strings.Builder
 	first := true
 	buf.WriteString("^(")
@@ -1149,6 +1300,9 @@ func excludeFields(decls []ast.Decl) []ast.Expr {
 			buf.WriteString(regexp.QuoteMeta(str))
 			first = false
 		}
+	}
+	if first {
+		return nil
 	}
 	buf.WriteString(")$")
 	return []ast.Expr{
@@ -1198,8 +1352,10 @@ func addTag(field ast.Label, tag, value string) *ast.Field {
 	}
 }
 
+// setPos gives e the position of the value it was decoded from, but not
+// that value's layout: the generated CUE is formatted anew.
 func setPos(e ast.Expr, v cue.Value) ast.Expr {
-	ast.SetPos(e, v.Pos())
+	ast.SetPos(e, v.Pos().WithRel(token.NoRelPos))
 	return e
 }
 

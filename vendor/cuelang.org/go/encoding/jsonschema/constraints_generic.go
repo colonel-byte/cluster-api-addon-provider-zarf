@@ -17,6 +17,7 @@ package jsonschema
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 
@@ -45,8 +46,9 @@ func constraintComment(key string, n cue.Value, s *state) {
 
 func constraintConst(key string, n cue.Value, s *state) {
 	s.all.add(n, s.constValue(n))
-	s.allowedTypes &= n.Kind()
-	s.knownTypes &= n.Kind()
+	k := constValueKind(n)
+	s.allowedTypes &= k
+	s.knownTypes &= k
 }
 
 func constraintDefault(key string, n cue.Value, s *state) {
@@ -68,18 +70,28 @@ func constraintEnum(key string, n cue.Value, s *state) {
 	var a []ast.Expr
 	var types cue.Kind
 	for _, x := range s.listItems("enum", n, true) {
-		if (s.allowedTypes & x.Kind()) == 0 {
+		// Note that this asks for the kind as written, not the wider one
+		// [constValueKind] reports, so a float member of an integer enum
+		// is still dropped, unless it has no fractional part: JSON Schema
+		// compares numbers by value, so 1.0 is an integer too.
+		kind := x.Kind()
+		if f, err := x.Float64(); err == nil && kind == cue.FloatKind {
+			if _, frac := math.Modf(f); frac == 0 {
+				kind |= cue.IntKind
+			}
+		}
+		if (s.allowedTypes & kind) == 0 {
 			// Enum value is redundant because it's
 			// not in the allowed type set.
 			continue
 		}
 		a = append(a, s.constValue(x))
-		types |= x.Kind()
+		types |= constValueKind(x)
 	}
 	s.knownTypes &= types
 	s.allowedTypes &= types
 	if len(a) > 0 {
-		s.all.add(n, ast.NewBinExpr(token.OR, a...))
+		s.all.addPositioned(ast.NewBinExpr(token.OR, a...))
 	}
 }
 
@@ -90,6 +102,9 @@ func constraintExamples(key string, n cue.Value, s *state) {
 }
 
 func constraintNullable(key string, n cue.Value, s *state) {
+	if !s.boolValue(n) {
+		return
+	}
 	null := ast.NewNull()
 	setPos(null, n)
 	s.nullable = null
@@ -114,6 +129,11 @@ func constraintRef(key string, n cue.Value, s *state) {
 	}
 	if e := s.refExpr(n, importPath, path); e != nil {
 		s.all.add(n, e)
+		// The reference only allows the types of the schema it refers to,
+		// so other keywords need not allow any other types.
+		types := schemaRoot.refTypes(n)
+		s.allowedTypes &= types
+		s.knownTypes &= types
 	}
 }
 

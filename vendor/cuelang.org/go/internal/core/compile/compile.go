@@ -15,6 +15,9 @@
 package compile
 
 import (
+	"cmp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"cuelang.org/go/cue/ast"
@@ -143,12 +146,6 @@ type compiler struct {
 	errs errors.Error
 }
 
-func (c *compiler) reset() {
-	c.fileScope = nil
-	c.stack = c.stack[:0]
-	c.errs = nil
-}
-
 func (c *compiler) errf(n ast.Node, format string, args ...interface{}) *adt.Bottom {
 	err := &compilerError{
 		n:       n,
@@ -274,10 +271,21 @@ func (c *compiler) pushScope(n labeler, upCount int32, id ast.Node) *frame {
 func (c *compiler) popScope() {
 	k := len(c.stack) - 1
 	f := c.stack[k]
-	for k, v := range f.aliases {
+	var unused []string
+	for name, v := range f.aliases {
 		if !v.used {
-			c.errf(v.source, "unreferenced alias or let clause %s", k)
+			unused = append(unused, name)
 		}
+	}
+	// Report the errors in source order rather than map order.
+	slices.SortFunc(unused, func(a, b string) int {
+		return cmp.Or(
+			f.aliases[a].source.Pos().Compare(f.aliases[b].source.Pos()),
+			cmp.Compare(a, b),
+		)
+	})
+	for _, name := range unused {
+		c.errf(f.aliases[name].source, "unreferenced alias or let clause %s", name)
 	}
 	c.stack = c.stack[:k]
 }
@@ -328,7 +336,10 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 	}
 
 	for _, file := range a {
-		c.experiments = file.Pos().Experiment()
+		// Ask the file rather than its position: a file a generator
+		// assembled carries experiments of its own, which the positions of
+		// its declarations know nothing about.
+		c.setExperiments(file.Experiment())
 
 		c.pushScope(nil, 0, file) // File scope
 		v := &adt.StructLit{Src: file}
@@ -341,6 +352,10 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 }
 
 func (c *compiler) compileExpr(x ast.Expr) adt.Conjunct {
+	// A standalone expression carries no experiments itself; its positions
+	// report those of the source it was parsed from, if any.
+	c.setExperiments(x.Pos().Experiment())
+
 	expr := c.expr(x)
 
 	env := &adt.Environment{}
@@ -355,17 +370,15 @@ func (c *compiler) compileExpr(x ast.Expr) adt.Conjunct {
 	return adt.MakeRootConjunct(env, expr)
 }
 
-// requireVersion checks if a feature is available in the current language version.
-// Returns an error if the feature requires a newer version, nil otherwise.
-func (c *compiler) requireVersion(n ast.Node, minVersion, feature string) *adt.Bottom {
-	v := c.experiments.LanguageVersion()
-	if v == "" {
-		return nil
+// setExperiments records the experiments to compile with, assuming the
+// defaults of the current language version for source that carries none.
+// This covers the compiler's gates only; evaluation-time gates that resolve
+// experiments from positions on their own still see none for such source.
+func (c *compiler) setExperiments(exp cueexperiment.File) {
+	if exp.LanguageVersion() == "" {
+		exp = cueexperiment.Default()
 	}
-	if semver.Compare(minVersion, v) > 0 {
-		return c.errf(n, "%s requires language version %s or later; current version is %s", feature, minVersion, v)
-	}
-	return nil
+	c.experiments = exp
 }
 
 // verifyVersion checks whether n is a Builtin and then checks whether the
@@ -392,18 +405,13 @@ func (c *compiler) verifyVersion(src ast.Node, n adt.Expr) adt.Expr {
 		name = x.Src.Name
 		// Check if Self experiment is enabled
 		if !c.experiments.AliasV2 {
-			return c.errf(src, "%s %q requires @experiment(aliasv2)", kind, name)
+			return c.errf(src, "%s %q requires language version v0.18.0 or @experiment(aliasv2)", kind, name)
 		}
 		x.Label = adt.MakeStringLabel(c.index, name)
 		return n
 	}
 
 	v := c.experiments.LanguageVersion()
-	if v == "" {
-		// We assume "latest" if the file is not associated with a version.
-		return n
-	}
-
 	if semver.Compare(added, v) <= 0 {
 		// The feature is available in the file version.
 		return n
@@ -498,6 +506,9 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 
 		// Predeclared name references created without [ast.NewPredeclared].
 		if p := predeclared(n); p != nil {
+			return c.verifyVersion(n, p)
+		}
+		if p := c.experimentPredeclared(n); p != nil {
 			return c.verifyVersion(n, p)
 		}
 
@@ -616,6 +627,13 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			UpCount: upCount,
 			Label:   label,
 			X:       entry.expr, // TODO: remove usage
+		}
+
+	case *ast.FuncParam:
+		return &adt.FieldReference{
+			Src:     n,
+			UpCount: upCount,
+			Label:   c.funcParamLocal(f),
 		}
 
 	// Handle new-style postfix aliases: a~X or a~(K,V)
@@ -925,6 +943,10 @@ func (c *compiler) elem(n ast.Expr) adt.Elem {
 func (c *compiler) comprehension(x *ast.Comprehension, inList bool) adt.Elem {
 	var a []adt.Yielder
 	hasTry := false
+	// The scope depth before any clause pushes its own; the fallback body is
+	// compiled at this depth. The clauses below only ever pop via defer, so
+	// their scopes are all still on the stack when the fallback is compiled.
+	outerDepth := len(c.stack)
 	for _, v := range x.Clauses {
 		switch x := v.(type) {
 		case *ast.ForClause:
@@ -1068,17 +1090,10 @@ func (c *compiler) comprehension(x *ast.Comprehension, inList bool) adt.Elem {
 		// Pop all comprehension scopes temporarily to compile fallback in outer scope.
 		// We need to compile the fallback body outside the comprehension's scope chain.
 		savedStack := c.stack
-		// Find the scope depth before the comprehension clauses were pushed.
-		// Each for/let clause pushes one scope.
-		outerDepth := len(savedStack)
-		for _, clause := range x.Clauses {
-			switch clause.(type) {
-			case *ast.ForClause, *ast.LetClause:
-				outerDepth--
-			}
-		}
-		// Temporarily truncate to outer scope depth.
-		c.stack = savedStack[:outerDepth]
+		// Limit the capacity so that a scope pushed while compiling the
+		// fallback body does not overwrite the clause scopes, which the
+		// pending popScope calls still read.
+		c.stack = savedStack[:outerDepth:outerDepth]
 		fallbackBody := c.expr(x.Fallback.Body)
 		c.stack = savedStack // Restore full stack
 		if fallbackSt, ok := fallbackBody.(*adt.StructLit); ok {
@@ -1115,6 +1130,125 @@ func (c *compiler) labeledExprAt(k int, f ast.Decl, lab labeler, expr ast.Expr) 
 	return value
 }
 
+func (c *compiler) funcParamLocal(p *ast.FuncParam) adt.Feature {
+	if p == nil {
+		return adt.InvalidLabel
+	}
+	if p.Alias != nil && isNonBlank(p.Alias.Field) {
+		return c.label(p.Alias.Field)
+	}
+	if p.Label != nil {
+		return c.label(p.Label)
+	}
+	return adt.InvalidLabel
+}
+
+// funcParam compiles the i-th parameter of a function literal. The constraint
+// and the default are compiled in the current, closure scope: only the body of
+// a function literal gets a parameter scope.
+func (c *compiler) funcParam(i int, p *ast.FuncParam) adt.FuncParam {
+	if p == nil {
+		return adt.FuncParam{
+			Label:      adt.InvalidLabel,
+			Local:      adt.InvalidLabel,
+			Positional: true,
+		}
+	}
+	param := adt.FuncParam{
+		Src:        p,
+		Label:      adt.InvalidLabel,
+		Local:      c.funcParamLocal(p),
+		Positional: true,
+	}
+	if p.Alias != nil && p.Alias.Label != nil {
+		param.Value = c.errf(p.Alias, "dual postfix alias not supported in function parameters")
+		return param
+	}
+	if p.Label != nil {
+		param.Label = c.label(p.Label)
+	}
+	param.Value = c.expr(p.Value)
+	if p.Default != nil {
+		param.Default = c.expr(p.Default)
+	}
+	if err := c.checkFuncParamMarks(i, p, &param); err != nil {
+		param.Value = err
+		param.Default = nil
+		return param
+	}
+	param.ArcType = adt.ConstraintFromToken(p.Constraint)
+	if param.ArcType != adt.ArcMember {
+		param.Positional = false
+	}
+	if param.Label == adt.InvalidLabel && param.Local == adt.InvalidLabel {
+		param.Positional = true
+	}
+	return param
+}
+
+// funcParamName names a parameter in a diagnostic: its callable label, else
+// its body-local name, else its 1-based position.
+func (c *compiler) funcParamName(i int, param *adt.FuncParam) string {
+	switch {
+	case param.Label != adt.InvalidLabel:
+		return param.Label.SelectorString(c.index)
+	case param.Local != adt.InvalidLabel:
+		return param.Local.SelectorString(c.index)
+	}
+	return strconv.Itoa(i + 1)
+}
+
+// checkFuncParamMarks reports a default mark (*) written directly in a
+// parameter's constraint or default. Whether a call may omit a parameter is
+// decided by a declared default alone, so a mark in a constraint would be
+// inert, and it is most likely the retired idiom for declaring a parameter
+// default; a mark inside a default is meaningless. Only the outermost
+// disjunction of the expression is inspected: a mark nested inside a struct
+// or list literal compiles inside its own node, and a default reached through
+// a reference is an ordinary part of the parameter's value.
+func (c *compiler) checkFuncParamMarks(i int, p *ast.FuncParam, param *adt.FuncParam) *adt.Bottom {
+	name := c.funcParamName(i, param)
+	if d, ok := param.Value.(*adt.DisjunctionExpr); ok && d.HasDefaults {
+		var others []string
+		var def string
+		var pos ast.Node = p
+		for _, v := range d.Values {
+			s := "_"
+			src := v.Val.Source()
+			if src != nil {
+				s = astinternal.DebugStr(src)
+			}
+			switch {
+			case !v.Default:
+				others = append(others, s)
+			case def == "":
+				def = s
+				if src != nil {
+					pos = src
+				}
+			}
+		}
+		suggestion := strings.Join(others, " | ") + " = " + def
+		if p.Label != nil {
+			suggestion = name + ": " + suggestion
+		}
+		return c.errf(pos, "parameter %s: default mark not allowed in a constraint; write %s instead", name, suggestion)
+	}
+	if d, ok := param.Default.(*adt.DisjunctionExpr); ok && d.HasDefaults {
+		var pos ast.Node = p.Default
+		for _, v := range d.Values {
+			if v.Default {
+				if src := v.Val.Source(); src != nil {
+					pos = src
+				}
+				break
+			}
+		}
+		return c.errf(pos, "parameter %s: a default cannot itself carry a default mark", name)
+	}
+	return nil
+}
+
 func (c *compiler) expr(expr ast.Expr) adt.Expr {
 	switch n := expr.(type) {
 	case nil:
@@ -1123,14 +1257,52 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 		return c.resolve(n)
 
 	case *ast.Func:
-		// We don't yet support function types natively in
-		// CUE.  ast.Func exists only to support external
-		// injections. Function values (really, adt.Builtin)
-		// are only created by the runtime, or injected by
-		// external injections.
-		//
-		// TODO: revise this when we add function types.
-		return c.resolve(ast.NewIdent("_"))
+		if !c.experiments.Functions {
+			return c.errf(n, "function syntax requires @experiment(functions)")
+		}
+		if n.Ellipsis != token.NoPos && n.Body != nil {
+			return c.errf(n, "open function signature cannot have a body")
+		}
+		fn := &adt.Function{Src: n, Open: n.Ellipsis != token.NoPos}
+		seenCallableName := false
+		params := n.Parameters()
+		seenParamName := map[adt.Feature]ast.Node{}
+		seenCallName := map[adt.Feature]ast.Node{}
+		seenNameOnly := false
+		for i, p := range params {
+			param := c.funcParam(i, p)
+			if (seenCallableName && param.Label == adt.InvalidLabel) ||
+				(seenNameOnly && param.Positional) {
+				return c.errf(p, "positional parameter after named parameter")
+			}
+			if param.Label != adt.InvalidLabel {
+				seenCallableName = true
+				if !param.Positional {
+					seenNameOnly = true
+				}
+				// The callable name must be unique even when the parameters
+				// declare distinct local aliases: a labeled argument would
+				// otherwise bind to multiple parameters.
+				if prev := seenCallName[param.Label]; prev != nil {
+					return c.errf(p, "parameter %s redeclared in same scope", param.Label.SelectorString(c.index))
+				}
+				seenCallName[param.Label] = p
+			}
+			if param.Local != adt.InvalidLabel {
+				if prev := seenParamName[param.Local]; prev != nil {
+					return c.errf(p, "parameter %s redeclared in same scope", param.Local.SelectorString(c.index))
+				}
+				seenParamName[param.Local] = p
+			}
+			fn.Params = append(fn.Params, param)
+		}
+		// Parameter constraints and return values are compiled in the closure
+		// scope. Only the implementation body gets a function-parameter scope.
+		fn.Ret = c.expr(n.Ret)
+		c.pushScope(nil, 1, n)
+		fn.Body = c.expr(n.Body)
+		c.popScope()
+		return fn
 
 	case *ast.StructLit:
 		c.pushScope(nil, 1, n)
@@ -1246,9 +1418,25 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 		return c.expr(n.X)
 
 	case *ast.CallExpr:
-		call := &adt.CallExpr{Src: n, Fun: c.expr(n.Fun)}
-		for _, a := range n.Args {
+		call := &adt.CallExpr{Src: n, Fun: c.expr(n.Fun), Partial: n.Ellipsis != token.NoPos}
+		seenLabel := false
+		for i, a := range n.Args {
 			call.Args = append(call.Args, c.expr(a))
+			if n.ArgLabels != nil {
+				var label ast.Label
+				if i < len(n.ArgLabels) {
+					label = n.ArgLabels[i]
+				}
+				if label != nil {
+					seenLabel = true
+					call.ArgLabels = append(call.ArgLabels, c.label(label))
+				} else {
+					if seenLabel {
+						return c.errf(a, "positional argument after labeled argument")
+					}
+					call.ArgLabels = append(call.ArgLabels, adt.InvalidLabel)
+				}
+			}
 		}
 		return call
 
@@ -1304,9 +1492,12 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 		case token.ELLIPSIS:
 			if !c.experiments.ExplicitOpen {
 				// TODO: consider not returning.
-				return c.errf(n, "postfix ... operator requires @experiment(explicitopen)")
+				return c.errf(n, "postfix ... operator requires language version v0.18.0 or @experiment(explicitopen)")
 			}
 
+			// TODO(explicitopen): applying ... to a non-struct, non-list
+			// value is a no-op; the intended future behavior is an error,
+			// which needs the fixer to know resolved types.
 			return &adt.OpenExpr{
 				Src: n,
 				X:   c.expr(n.X),

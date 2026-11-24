@@ -15,9 +15,11 @@
 package file
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/errors"
@@ -56,6 +58,7 @@ type cmdRemoveAll struct{}
 
 func (c *cmdRead) Run(ctx *task.Context) (res interface{}, err error) {
 	filename := ctx.String("filename")
+	contents := ctx.Lookup("contents")
 	if ctx.Err != nil {
 		return nil, ctx.Err
 	}
@@ -66,7 +69,7 @@ func (c *cmdRead) Run(ctx *task.Context) (res interface{}, err error) {
 	}
 	update := map[string]interface{}{"contents": b}
 
-	switch v := ctx.Lookup("contents"); v.IncompleteKind() {
+	switch contents.IncompleteKind() {
 	case cue.BytesKind:
 		// already set above
 	case cue.StringKind:
@@ -194,8 +197,12 @@ func (c *cmdRemoveAll) Run(ctx *task.Context) (res interface{}, err error) {
 		return nil, ctx.Err
 	}
 
-	if _, err := os.Stat(path); err != nil {
-		return map[string]interface{}{"success": false}, nil
+	if _, err := os.Lstat(path); err != nil {
+		// A path below a file does not exist either, but fails with ENOTDIR.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return map[string]interface{}{"success": false}, nil
+		}
+		return nil, errors.Wrapf(err, ctx.Obj.Pos(), "failed to remove path")
 	}
 
 	if err := os.RemoveAll(path); err != nil {

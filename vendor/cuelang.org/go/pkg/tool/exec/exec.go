@@ -15,9 +15,11 @@
 package exec
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
+	"unicode"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/errors"
@@ -26,9 +28,6 @@ import (
 
 func init() {
 	task.Register("tool/exec.Run", newExecCmd)
-
-	// For backwards compatibility.
-	task.Register("exec", newExecCmd)
 }
 
 type execCmd struct{}
@@ -44,25 +43,43 @@ func (c *execCmd) Run(ctx *task.Context) (res interface{}, err error) {
 	}
 
 	// TODO: set environment variables, if defined.
-	stream := func(name string) (stream cue.Value, ok bool) {
+	stream := func(name string) (stream cue.Value, ok bool, err error) {
 		c := ctx.Obj.LookupPath(cue.ParsePath(name))
-		if c.Err() != nil || c.IsNull() {
-			return
+		// A field that is absent or null is simply not configured;
+		// an error, such as a failure to compute its value, must not be ignored.
+		if !c.Exists() || c.IsNull() {
+			return cue.Value{}, false, nil
 		}
-		return c, true
+		if err := c.Err(); err != nil {
+			return cue.Value{}, false, err
+		}
+		return c, true, nil
 	}
 
-	if v, ok := stream("stdin"); !ok {
+	if v, ok, err := stream("stdin"); err != nil {
+		return nil, err
+	} else if !ok {
 		cmd.Stdin = ctx.Stdin
 	} else if cmd.Stdin, err = v.Reader(); err != nil {
 		return nil, errors.Wrapf(err, v.Pos(), "invalid input")
 	}
-	_, captureOut := stream("stdout")
-	if !captureOut {
+	var stdout, stderr bytes.Buffer
+	stdoutVal, captureOut, err := stream("stdout")
+	if err != nil {
+		return nil, err
+	}
+	if captureOut {
+		cmd.Stdout = &stdout
+	} else {
 		cmd.Stdout = ctx.Stdout
 	}
-	_, captureErr := stream("stderr")
-	if !captureErr {
+	stderrVal, captureErr, err := stream("stderr")
+	if err != nil {
+		return nil, err
+	}
+	if captureErr {
+		cmd.Stderr = &stderr
+	} else {
 		cmd.Stderr = ctx.Stderr
 	}
 
@@ -72,33 +89,43 @@ func (c *execCmd) Run(ctx *task.Context) (res interface{}, err error) {
 		return nil, errors.Wrapf(err, v.Pos(), "invalid bool value")
 	}
 
+	err = cmd.Run()
+	isExit := errors.As(err, new(*exec.ExitError))
+
 	update := map[string]interface{}{}
 	if captureOut {
-		var stdout []byte
-		stdout, err = cmd.Output()
-		update["stdout"] = string(stdout)
-	} else {
-		err = cmd.Run()
+		update["stdout"] = output(stdoutVal, stdout.Bytes())
+	}
+	if captureErr {
+		// An error other than a non-zero exit status, such as a missing
+		// program, is reported via stderr too.
+		if err != nil && !isExit {
+			stderr.WriteString(err.Error())
+		}
+		update["stderr"] = output(stderrVal, stderr.Bytes())
 	}
 	update["success"] = err == nil
 
-	if err == nil {
+	if err == nil || !mustSucceed {
 		return update, nil
 	}
 
-	if captureErr {
-		if exit := (*exec.ExitError)(nil); errors.As(err, &exit) {
-			update["stderr"] = string(exit.Stderr)
-		} else {
-			update["stderr"] = err.Error()
-		}
+	// The captured stderr is otherwise lost, hiding why the command failed.
+	// Indent its lines to set them apart from the surrounding error output.
+	if msg := bytes.TrimRightFunc(stderr.Bytes(), unicode.IsSpace); isExit && len(msg) > 0 {
+		msg = bytes.ReplaceAll(msg, []byte("\n"), []byte("\n  "))
+		err = fmt.Errorf("%v\n  %s", err, msg)
 	}
-
-	if !mustSucceed {
-		return update, nil
-	}
-
 	return nil, fmt.Errorf("command %q failed: %v", doc, err)
+}
+
+// output returns captured output as bytes if v is constrained to bytes,
+// and as a string otherwise.
+func output(v cue.Value, b []byte) any {
+	if v.IncompleteKind() == cue.BytesKind {
+		return b
+	}
+	return string(b)
 }
 
 // mkCommand builds an [exec.Cmd] from a CUE task value,
@@ -115,8 +142,9 @@ func mkCommand(ctx *task.Context) (c *exec.Cmd, doc []string, err error) {
 	switch v.Kind() {
 	case cue.StringKind:
 		str, _ := v.String()
-		list := strings.Fields(str)
-		bin, args = list[0], list[1:]
+		if list := strings.Fields(str); len(list) > 0 {
+			bin, args = list[0], list[1:]
+		}
 
 	case cue.ListKind:
 		list, _ := v.List()
@@ -142,7 +170,12 @@ func mkCommand(ctx *task.Context) (c *exec.Cmd, doc []string, err error) {
 
 	cmd := exec.CommandContext(ctx.Context, bin, args...)
 
-	cmd.Dir, _ = ctx.Obj.LookupPath(cue.ParsePath("dir")).String()
+	if v := ctx.Obj.LookupPath(cue.ParsePath("dir")); v.Exists() {
+		cmd.Dir, err = v.String()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
 	env := ctx.Obj.LookupPath(cue.ParsePath("env"))
 

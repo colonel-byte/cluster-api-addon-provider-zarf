@@ -20,7 +20,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 
+	"cuelang.org/go/internal/cueversion"
 	"cuelang.org/go/internal/mod/semver"
 )
 
@@ -34,13 +37,15 @@ import (
 //	preview:     the version from when the experiment was introduced.
 //	stable:      the version from when it is permanently set to true.
 //	withdrawn:   results in an error if the user attempts to use the flag.
+//
+// Every experiment must declare a preview version, as it is the version in
+// which the experiment was introduced; the other stages are optional.
 type File struct {
 	// version is the module version of the file that was compiled.
 	version string
 
-	// experiments is a comma-separated list of experiments that are enabled
-	// for this file. This is for documentation purposes only, as the
-	// experiments are already set in the struct fields.
+	// experiments is the sorted, comma-separated list of experiments
+	// explicitly enabled for this file, as returned by [File.Experiments].
 	experiments string
 
 	// Testing is used to enable experiments for testing.
@@ -57,36 +62,34 @@ type File struct {
 	// operator to be defined on all values. For instance, comparing 1 and
 	// "foo" will return false, whereas previously it would return an error.
 	//
-	// Proposal:      https://cuelang.org/issue/2583
-	// Spec change:   https://cuelang.org/cl/1217013
-	// Spec change:   https://cuelang.org/cl/1217014
+	// Proposal: https://cuelang.org/issue/2583
 	StructCmp bool `experiment:"preview:v0.14.0,stable:v0.15.0"`
 
 	// ExplicitOpen enables the postfix ... operator to explicitly open
-	// closed structs, allowing additional fields to be added.
+	// closed structs, allowing additional fields to be added. It is stable as
+	// of v0.18.0, so a file at that language version or later embeds strictly
+	// and may use the postfix ... operator; cue fix migrates older files.
 	//
-	// Proposal:      https://cuelang.org/issue/4032
-	// Spec change:   https://cuelang.org/cl/1221642
-	// Requires cue fix when upgrading
-	ExplicitOpen bool `experiment:"preview:v0.15.0"`
+	// Proposal: https://cuelang.org/issue/4032
+	// Note: Requires cue fix when upgrading
+	ExplicitOpen bool `experiment:"preview:v0.15.0,stable:v0.18.0"`
 
 	// AliasV2 enables the use of 'self' identifier to refer to the
 	// enclosing struct and enables the postfix alias syntax (~X and ~(K,V)).
 	// The file where this experiment is enabled disallows the use of old prefix
-	// alias syntax (X=).
+	// alias syntax (X=). It is stable as of v0.18.0, so a file at that
+	// language version or later must use the postfix syntax.
 	//
-	// Proposal:      https://cuelang.org/issue/4014
-	// Spec change:   https://cuelang.org/cl/1222377
-	// Requires cue fix when upgrading
-	AliasV2 bool `experiment:"preview:v0.15.0"`
+	// Proposal: https://cuelang.org/issue/4014
+	// Note: Requires cue fix when upgrading
+	AliasV2 bool `experiment:"preview:v0.15.0,stable:v0.18.0"`
 
 	// Try enables the try clause and optional reference markers (?).
 	// The try clause allows conditional field inclusion based on whether
 	// optional references resolve. The ? marker on references (a?, a.b?, a[i]?)
 	// is only valid within a try context.
 	//
-	// Proposal:      https://cuelang.org/issue/4019
-	// Spec change:   https://cuelang.org/cl/1231444
+	// Proposal: https://cuelang.org/issue/4019
 	Try bool `experiment:"preview:v0.16.0"`
 
 	// ShortCircuit enables short-circuit evaluation for the logical operators
@@ -98,6 +101,22 @@ type File struct {
 	// is evaluated conditionally") and is consistent with all mainstream
 	// languages.
 	ShortCircuit bool `experiment:"preview:v0.17.0"`
+
+	// Functions enables experimental function signatures and native CUE
+	// function bodies.
+	//
+	// Proposal: https://cuelang.org/issue/4484
+	Functions bool `experiment:"preview:v0.18.0"`
+
+	// OpenLists makes list literals open by default outside definitions,
+	// analogous to structs. A list without a trailing ellipsis is closed
+	// only within a definition or when closed with the close builtin.
+	// It also enables closed literals, #[...] and #{...}, which close a list
+	// or struct at its own level; #[1, 2] means what [1, 2] means without
+	// the experiment. An index on a definition named # is written (#)[i].
+	//
+	// Proposal: https://cuelang.org/issue/1999
+	OpenLists bool `experiment:"preview:v0.18.0"`
 }
 
 // LanguageVersion returns the language version of the file or "" if no language
@@ -106,13 +125,28 @@ func (f *File) LanguageVersion() string {
 	return f.version
 }
 
+// Experiments returns the names of the experiments that were
+// explicitly enabled for the file, in sorted order. It does not
+// include experiments that are enabled by default for the file's
+// language version.
+func (f *File) Experiments() []string {
+	if f.experiments == "" {
+		return nil
+	}
+	return strings.Split(f.experiments, ",")
+}
+
 // NewFile parses the given comma-separated list of experiments for
 // the given version and returns a PerFile struct with the experiments enabled.
 // A empty version indicates the default version.
 func NewFile(version string, experiments ...string) (*File, error) {
-	// TODO: cash versions for a given version where there is no experiment
-	// string.
 	m := parseExperiments(experiments...)
+	if m == nil {
+		if f, ok := filesByVersion.Load(version); ok {
+			f := f.(File)
+			return &f, nil
+		}
+	}
 	f := &File{
 		version:     version,
 		experiments: strings.Join(slices.Sorted(maps.Keys(m)), ","),
@@ -121,26 +155,42 @@ func NewFile(version string, experiments ...string) (*File, error) {
 	if err := parseConfig(f, version, m); err != nil {
 		return nil, err
 	}
+	if m == nil && numFilesByVersion.Add(1) <= maxFilesByVersion {
+		filesByVersion.Store(version, *f)
+	}
 	return f, nil
 }
 
-// IsPreview returns true if the experiment exists and can be used
-// for the given version.
-func IsPreview(experiment, version string) bool {
-	return isPreview(experiment, version, File{})
+// filesByVersion caches the results of [NewFile] naming no experiments,
+// as nearly every file is parsed that way, by language version.
+// Since versions come from user input, the number of entries is capped
+// by [maxFilesByVersion]; a program sees only a handful in practice.
+var (
+	filesByVersion    sync.Map // map[string]File
+	numFilesByVersion atomic.Int64
+)
+
+const maxFilesByVersion = 64
+
+// Default returns the experiment configuration of the current language
+// version with no experiments named: what applies to source that carries no
+// version of its own.
+func Default() File {
+	return defaultFile()
 }
 
-func isPreview(experiment, version string, t any) bool {
-	expInfo := getExperimentInfoT(experiment, t)
-	if expInfo == nil {
-		return false
+var defaultFile = sync.OnceValue(func() File {
+	f, err := NewFile(cueversion.LanguageVersion())
+	if err != nil {
+		// The current version naming no experiments cannot be rejected.
+		panic(err)
 	}
-	return expInfo.isValidForVersion(version)
-}
+	return *f
+})
 
 func (e *experimentInfo) isValidForVersion(version string) bool {
 	// Check if experiment is available for this version
-	if version != "" && e.Preview != "" {
+	if version != "" {
 		if semver.Compare(version, e.Preview) < 0 {
 			return false
 		}
@@ -159,7 +209,7 @@ func (e *experimentInfo) isValidForVersion(version string) bool {
 // IsStable returns true if the experiment is stable (no longer
 // experimental) for the given version.
 func IsStable(experiment, version string) bool {
-	expInfo := getExperimentInfo(experiment)
+	expInfo := getExperimentInfo(experiment, File{})
 	if expInfo == nil {
 		return false
 	}
@@ -180,15 +230,14 @@ func CanApplyFix(experiment, version, target string) error {
 }
 
 func canApplyExperimentFix(experiment, version, target string, t any) error {
-	expInfo := getExperimentInfoT(experiment, t)
+	expInfo := getExperimentInfo(experiment, t)
 	if expInfo == nil {
 		return fmt.Errorf("unknown experiment %q", experiment)
 	}
 
 	// Check if experiment is valid for this version
 	if !expInfo.isValidForVersion(target) {
-		if version != "" && expInfo.Preview != "" &&
-			semver.Compare(target, expInfo.Preview) < 0 {
+		if version != "" && semver.Compare(target, expInfo.Preview) < 0 {
 			const msg = "experiment %q requires language version %s or later, have %s"
 			return fmt.Errorf(msg, experiment, expInfo.Preview, version)
 		}
@@ -203,7 +252,7 @@ func canApplyExperimentFix(experiment, version, target string, t any) error {
 
 	// Check if experiment is already stable (cannot fix)
 	if expInfo.isStableForVersion(version) {
-		const msg = "experiment %q is already stable as of language version %s - cannot apply fix"
+		const msg = "experiment %q is already stable as of language version %s; files at this version use it without an attribute"
 		return fmt.Errorf(msg, experiment, expInfo.Stable)
 	}
 
@@ -220,8 +269,7 @@ func getActiveExperiments(origVersion, targetVersion string, t any) []string {
 	var active []string
 
 	ft := reflect.TypeOf(t)
-	for i := 0; i < ft.NumField(); i++ {
-		field := ft.Field(i)
+	for field := range ft.Fields() {
 		tagStr, ok := field.Tag.Lookup("experiment")
 		if !ok {
 			continue
@@ -230,7 +278,7 @@ func getActiveExperiments(origVersion, targetVersion string, t any) []string {
 		expInfo := parseExperimentTag(tagStr)
 
 		// Skip if not yet available for this version
-		if targetVersion != "" && expInfo.Preview != "" && semver.Compare(targetVersion, expInfo.Preview) < 0 {
+		if targetVersion != "" && semver.Compare(targetVersion, expInfo.Preview) < 0 {
 			continue
 		}
 
@@ -265,8 +313,7 @@ func getUpgradeExperiments(origVersion, targetVersion string, t any) []string {
 	}
 
 	ft := reflect.TypeOf(t)
-	for i := 0; i < ft.NumField(); i++ {
-		field := ft.Field(i)
+	for field := range ft.Fields() {
 		tagStr, ok := field.Tag.Lookup("experiment")
 		if !ok {
 			continue
@@ -285,12 +332,6 @@ func getUpgradeExperiments(origVersion, targetVersion string, t any) []string {
 	return accepted
 }
 
-// ShouldRemoveAttribute returns true if the experiment attribute
-// should be removed because the experiment is stable for the given version.
-func ShouldRemoveAttribute(experiment, version string) bool {
-	return IsStable(experiment, version)
-}
-
 // experimentInfo holds parsed experiment lifecycle information
 type experimentInfo struct {
 	Preview   string
@@ -298,15 +339,11 @@ type experimentInfo struct {
 	Withdrawn string
 }
 
-// getExperimentInfo returns experiment lifecycle info for the given experiment name
-func getExperimentInfo(experiment string) *experimentInfo {
-	return getExperimentInfoT(experiment, File{})
-}
-
-func getExperimentInfoT(experiment string, t any) *experimentInfo {
+// getExperimentInfo returns experiment lifecycle info for the given experiment name,
+// looked up in the fields of t.
+func getExperimentInfo(experiment string, t any) *experimentInfo {
 	ft := reflect.TypeOf(t)
-	for i := 0; i < ft.NumField(); i++ {
-		field := ft.Field(i)
+	for field := range ft.Fields() {
 		if strings.EqualFold(field.Name, experiment) {
 			if tagStr, ok := field.Tag.Lookup("experiment"); ok {
 				return parseExperimentTag(tagStr)

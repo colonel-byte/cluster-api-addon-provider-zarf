@@ -184,17 +184,7 @@ func MakeIdentLabel(r StringIndexer, s, pkgpath string) Feature {
 // its package.
 func HiddenKey(s, pkgPath string) string {
 	// TODO: Consider just using space instead of \x00.
-	return fmt.Sprintf("%s\x00%s", s, pkgPath)
-}
-
-// MakeNamedLabel creates a feature for the given name and feature type.
-func MakeNamedLabel(r StringIndexer, t FeatureType, s string) Feature {
-	i := r.StringToIndex(s)
-	f, err := MakeLabel(nil, i, t)
-	if err != nil {
-		panic("out of free string slots")
-	}
-	return f
+	return s + "\x00" + pkgPath
 }
 
 // MakeLetLabel creates a label for the given let identifier s.
@@ -337,9 +327,6 @@ func (f FeatureType) IsHidden() bool {
 func (f FeatureType) IsLet() bool {
 	return f == LetLabel
 }
-
-// IsValid reports whether f is a valid label.
-func (f Feature) IsValid() bool { return f != InvalidLabel }
 
 // Typ reports the type of label.
 func (f Feature) Typ() FeatureType { return FeatureType(f & fTypeMask) }

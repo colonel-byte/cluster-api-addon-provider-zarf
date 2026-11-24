@@ -18,21 +18,27 @@ import (
 	"fmt"
 )
 
-type nilableNode interface {
+// NilableNode is used for type constraints. In practice, all Node
+// types should be comparable (pointers or interface
+// values containing pointers).
+type NilableNode interface {
 	Node
 	comparable // pointer nodes, which can be compared to nil
 }
 
-func walkIfNotNil[N nilableNode](node N, before func(Node) bool, after func(Node)) {
+func walkIfNotNil[N NilableNode](node N, before func(Node) bool, after func(Node)) {
 	var zero N // nil
 	if node != zero {
 		Walk(node, before, after)
 	}
 }
 
-func walkList[N Node](list []N, before func(Node) bool, after func(Node)) {
+func walkList[N NilableNode](list []N, before func(Node) bool, after func(Node)) {
+	var zero N // nil
 	for _, node := range list {
-		Walk(node, before, after)
+		if node != zero {
+			Walk(node, before, after)
+		}
 	}
 }
 
@@ -67,11 +73,27 @@ func Walk(node Node, before func(Node) bool, after func(Node)) {
 		Walk(n.Label, before, after)
 		walkIfNotNil(n.Alias, before, after)
 		walkIfNotNil(n.Value, before, after)
+		walkIfNotNil(n.Default, before, after)
+		walkList(n.Attrs, before, after)
+
+	case *FuncParam:
+		walkIfNotNil(n.Label, before, after)
+		walkIfNotNil(n.Alias, before, after)
+		walkIfNotNil(n.Value, before, after)
+		walkIfNotNil(n.Default, before, after)
 		walkList(n.Attrs, before, after)
 
 	case *Func:
-		walkList(n.Args, before, after)
-		Walk(n.Ret, before, after)
+		// Walk the nodes actually present in the AST rather than the
+		// synthesized view of [Func.Parameters], whose discriminator
+		// between the two signature styles this condition mirrors.
+		if len(n.Params) > 0 || len(n.Args) == 0 {
+			walkList(n.Params, before, after)
+		} else {
+			walkList(n.Args, before, after)
+		}
+		walkIfNotNil(n.Ret, before, after)
+		walkIfNotNil(n.Body, before, after)
 
 	case *StructLit:
 		walkList(n.Elts, before, after)
@@ -107,6 +129,7 @@ func Walk(node Node, before func(Node) bool, after func(Node)) {
 
 	case *CallExpr:
 		Walk(n.Fun, before, after)
+		walkList(n.ArgLabels, before, after)
 		walkList(n.Args, before, after)
 
 	case *UnaryExpr:

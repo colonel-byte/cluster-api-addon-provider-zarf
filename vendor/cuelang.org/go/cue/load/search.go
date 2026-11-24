@@ -29,6 +29,51 @@ import (
 	pkgpath "cuelang.org/go/pkg/path"
 )
 
+// matchPattern returns a function reporting whether a cleaned,
+// slash-separated path matches pattern, which may contain "..."
+// wildcards matching any string, including the empty string.
+// As in Go's package patterns, a trailing "/..." also matches
+// the path before the slash, so "a/..." matches "a".
+func matchPattern(pattern string) func(name string) bool {
+	pattern = path.Clean(pattern)
+	segs := strings.Split(pattern, "...")
+	suffix := ""
+	if strings.HasSuffix(pattern, "/...") {
+		// Matching name+"/" lets the pattern's final "/" literal
+		// consume it, so that "a/..." also matches "a".
+		suffix = "/"
+	}
+	return func(name string) bool {
+		return matchSegments(name+suffix, segs)
+	}
+}
+
+// matchSegments reports whether name matches the literal segments
+// between "..." wildcards: the first as a prefix, the last as a suffix,
+// and the rest greedily at their leftmost occurrence, which suffices
+// as a wildcard can absorb any skipped text.
+func matchSegments(name string, segs []string) bool {
+	if len(segs) == 1 {
+		// No wildcard; the pattern is a literal.
+		return name == segs[0]
+	}
+	rest, ok := strings.CutPrefix(name, segs[0])
+	if !ok {
+		return false
+	}
+	rest, ok = strings.CutSuffix(rest, segs[len(segs)-1])
+	if !ok {
+		return false
+	}
+	for _, seg := range segs[1 : len(segs)-1] {
+		_, rest, ok = strings.Cut(rest, seg)
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // A match represents the result of matching a single package pattern.
 type match struct {
 	Pattern string // the pattern itself
@@ -144,13 +189,12 @@ func (l *loader) matchPackagesInFS(pattern, pkgName string) *match {
 	// Could be smarter but this one optimization
 	// is enough for now, since ... is usually at the
 	// end of a path.
-	//
-	// TODO this logic entirely ignores the pattern that's
-	// after the "...". See cuelang.org/issue/3212
 	before, _, _ := strings.Cut(pattern, "...")
 	dir, _ := path.Split(before)
 
-	root := l.abs(dir)
+	match := matchPattern(pattern)
+
+	root := c.absPath(dir)
 
 	// Find new module root from here or check there are no additional
 	// cue.mod files between here and the next module.
@@ -188,35 +232,31 @@ func (l *loader) matchPackagesInFS(pattern, pkgName string) *match {
 			}
 		}
 
-		// name := prefix + filepath.ToSlash(path)
-		// if !match(name) {
-		// 	return nil
-		// }
-
-		// We keep the directory if we can import it, or if we can't import it
-		// due to invalid CUE source files. This means that directories
-		// containing parse errors will be built (and fail) instead of being
-		// silently skipped as not matching the pattern.
+		// We keep the directory if we can import it, or if we can't import
+		// it, whether due to invalid CUE source files or to an import that
+		// does not resolve. Such directories are built (and fail) instead
+		// of being silently skipped as not matching the pattern, and the
+		// error stays with the package's own instance: a package whose
+		// import fails must not turn the whole pattern into one error
+		// instance, dropping every other package it matched.
 		// Do not take root, as we want to stay relative
 		// to one dir only.
 		relPath, err2 := pkgpath.Rel(c.Dir, path, c.pathOS)
 		if err2 != nil {
 			panic(err2) // Should never happen because c.Dir is absolute.
 		}
-		relPath = "./" + pkgpath.ToSlash(relPath, c.pathOS)
+		relPath = pkgpath.ToSlash(relPath, c.pathOS)
+		if !match(relPath) {
+			return nil
+		}
+		relPath = "./" + relPath
 		// TODO: consider not doing these checks here.
 		inst := l.newRelInstance(token.NoPos, relPath, pkgName)
 		pkgs := l.importPkg(token.NoPos, inst)
 		for _, p := range pkgs {
-			if err := p.Err; err != nil && (p == nil || len(p.InvalidFiles) == 0) {
-				switch err.(type) {
-				case *NoFilesError:
-					if c.DataFiles && len(p.OrphanedFiles) > 0 {
-						break
-					}
+			if err := p.Err; err != nil && len(p.InvalidFiles) == 0 {
+				if _, ok := err.(*NoFilesError); ok && !(c.DataFiles && len(p.OrphanedFiles) > 0) {
 					return nil
-				default:
-					m.Err = errors.Append(m.Err, err)
 				}
 			}
 		}
@@ -261,6 +301,9 @@ func (l *loader) importPathsQuiet(patterns []string) []*match {
 			if isLocalImport(a) {
 				out = append(out, l.matchPackagesInFS(a, pkgName))
 			} else {
+				// TODO: patterns with a non-relative prefix, such as a
+				// package path inside the main module, match no packages
+				// because matchPackages is an empty stub.
 				out = append(out, l.matchPackages(a, pkgName))
 			}
 			continue
@@ -268,6 +311,19 @@ func (l *loader) importPathsQuiet(patterns []string) []*match {
 
 		var p *build.Instance
 		if isLocalImport(a) {
+			if pkgName == "" && l.cfg.Package == "" {
+				// Neither an explicit qualifier nor Config.Package was
+				// given. Choose the package to load following the same
+				// rules as appendExpandedUnqualifiedPackagePath, so
+				// that ./foo loads package foo when the directory
+				// holds multiple packages. On any error, leave the
+				// package name empty so that loading below reports
+				// errors as before.
+				if resolved, err := appendExpandedPackageArg(l.cfg, nil, a, "", l.tagger); err == nil &&
+					len(resolved) == 1 && resolved[0].packageFound {
+					pkgName = ast.ParseImportPath(resolved[0].resolvedCanonical).Qualifier
+				}
+			}
 			p = l.newRelInstance(token.NoPos, a, pkgName)
 		} else {
 			p = l.newInstance(token.NoPos, importPath(orig))
@@ -284,6 +340,10 @@ type resolvedPackageArg struct {
 	// package pattern matching code, as it is necessary to populate Instance.DisplayPath.
 	original          string
 	resolvedCanonical string
+	// packageFound reports whether the package qualifier in
+	// resolvedCanonical was confirmed by an actual package file, as
+	// opposed to carried over from the argument.
+	packageFound bool
 }
 
 func expandPackageArgs(c *Config, pkgArgs []string, pkgQual string, tg *tagger) ([]resolvedPackageArg, error) {
@@ -317,6 +377,12 @@ func appendExpandedPackageArg(c *Config, pkgPaths []resolvedPackageArg, p string
 		// Preserve leading "./".
 		ip.Path = "./" + ip.Path
 	}
+	if !ip.ExplicitQualifier {
+		// Cleaning may have changed the last path element (e.g. when
+		// the argument had a trailing slash), so re-derive the implied
+		// qualifier from the cleaned path.
+		ip.Qualifier = ast.ParseImportPath(ip.Path).Qualifier
+	}
 	isLocal := isLocalImport(ip.Path)
 	// Note that when c.Module is empty, c.ModuleRoot is sometimes,
 	// but not always, the same as c.Dir. Specifically it might point
@@ -327,8 +393,7 @@ func appendExpandedPackageArg(c *Config, pkgPaths []resolvedPackageArg, p string
 		if c.Module != "" {
 			// Make local import paths into absolute paths inside
 			// the module root.
-			absPath := path.Join(c.Dir, ip.Path)
-			pkgPath, err := importPathFromAbsDir(c, absPath, origp)
+			pkgPath, err := importPathFromAbsDir(c, c.absPath(ip.Path), origp)
 			if err != nil {
 				return nil, err
 			}
@@ -355,7 +420,7 @@ func appendExpandedPackageArg(c *Config, pkgPaths []resolvedPackageArg, p string
 				Dir: ".",
 			}, c.Module, tg)
 		}
-		return append(pkgPaths, resolvedPackageArg{origp, ip.Canonical().String()}), nil
+		return append(pkgPaths, resolvedPackageArg{original: origp, resolvedCanonical: ip.Canonical().String()}), nil
 	}
 	// Strip the module prefix, leaving only the directory relative
 	// to the module root.
@@ -393,7 +458,7 @@ func appendExpandedUnqualifiedPackagePath(pkgPaths []resolvedPackageArg, origp s
 	if err != nil {
 		// The package directory doesn't exist.
 		// Treat it like an empty directory and let later logic deal with it.
-		return append(pkgPaths, resolvedPackageArg{origp, ip.String()}), nil
+		return append(pkgPaths, resolvedPackageArg{original: origp, resolvedCanonical: ip.String()}), nil
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s is a file and not a package directory", origp)
@@ -419,7 +484,7 @@ func appendExpandedUnqualifiedPackagePath(pkgPaths []resolvedPackageArg, origp s
 			ip := ip
 			ip.Qualifier = pkgName
 			p := ip.String()
-			pkgPaths = append(pkgPaths, resolvedPackageArg{p, p})
+			pkgPaths = append(pkgPaths, resolvedPackageArg{original: p, resolvedCanonical: p, packageFound: pkgName != ""})
 		}
 		return pkgPaths, nil
 	}
@@ -447,12 +512,12 @@ func appendExpandedUnqualifiedPackagePath(pkgPaths []resolvedPackageArg, origp s
 	if foundQualifier {
 		// We found the actual package that was implied by the import path (or pkgQual == "_").
 		// This takes precedence over anything else.
-		return append(pkgPaths, resolvedPackageArg{origp, ip.String()}), nil
+		return append(pkgPaths, resolvedPackageArg{original: origp, resolvedCanonical: ip.String(), packageFound: true}), nil
 	}
 	if len(files) == 0 {
 		// 6. if there are no package files in the directory, it just appends the import path as is,
 		// leaving it to later logic to produce an error in this case.
-		return append(pkgPaths, resolvedPackageArg{origp, ip.String()}), nil
+		return append(pkgPaths, resolvedPackageArg{original: origp, resolvedCanonical: ip.String()}), nil
 	}
 	pkgName := files[0].Syntax.PackageName()
 	for _, f := range files[1:] {
@@ -470,7 +535,7 @@ func appendExpandedUnqualifiedPackagePath(pkgPaths []resolvedPackageArg, origp s
 	}
 	// 4. if there's exactly one package in the directory it will choose that.
 	ip.Qualifier = pkgName
-	return append(pkgPaths, resolvedPackageArg{origp, ip.String()}), nil
+	return append(pkgPaths, resolvedPackageArg{original: origp, resolvedCanonical: ip.String(), packageFound: true}), nil
 }
 
 // appendExpandedWildcardPackagePath expands the given pattern into any packages that it matches
@@ -480,19 +545,17 @@ func appendExpandedUnqualifiedPackagePath(pkgPaths []resolvedPackageArg, origp s
 // * We know that pattern contains "..."
 // * We know that pattern is relative to the module root
 //
-// Note: this logic matches the logic in [loader.loadImportPathsQuiet].
+// Note: this logic matches the logic in [loader.importPathsQuiet].
 // TODO de-duplicate the logic so wildcards are expanded exactly once using a single piece of logic.
 func appendExpandedWildcardPackagePath(pkgPaths []resolvedPackageArg, pattern ast.ImportPath, pkgQual string, mainModRoot module.SourceLoc, mainModPath string, tg *tagger) ([]resolvedPackageArg, error) {
 	modIpath := ast.ParseImportPath(mainModPath)
 	// Find directory to begin the scan.
 	// Could be smarter but this one optimization is enough for now,
 	// since ... is usually at the end of a path.
-	//
-	// TODO this logic entirely ignores the pattern that's
-	// after the "...". See cuelang.org/issue/3212
 	i := strings.Index(pattern.Path, "...")
 	dir, _ := path.Split(pattern.Path[:i])
 	dir = path.Join(mainModRoot.Dir, dir)
+	match := matchPattern(pattern.Path)
 	if pattern.ExplicitQualifier {
 		pkgQual = pattern.Qualifier
 	}
@@ -520,9 +583,15 @@ func appendExpandedWildcardPackagePath(pkgPaths []resolvedPackageArg, pattern as
 
 	var prevFile modimports.ModuleFile
 	var prevImportPath ast.ImportPath
-	for f, err := range modimports.AllModuleFiles(mainModRoot.FS, dir) {
+	for f, err := range modimports.AllModuleFiles(mainModRoot.FS, dir, modimports.WalkOptions{}) {
 		if err != nil {
-			break
+			// Skip just this entry; stopping would leave every package
+			// after it unloaded, and their imports unresolved.
+			continue
+		}
+		fileDir := path.Dir(f.FilePath)
+		if !match(fileDir) {
+			continue
 		}
 		if err := shouldBuildFile(f.Syntax, tg.tagIsSet); err != nil {
 			// Later build logic should pick up and report the same error.
@@ -536,7 +605,7 @@ func appendExpandedWildcardPackagePath(pkgPaths []resolvedPackageArg, pattern as
 			pkgName = "_"
 		}
 		ip := ast.ImportPath{
-			Path:      path.Join(modIpath.Path, path.Dir(f.FilePath)),
+			Path:      path.Join(modIpath.Path, fileDir),
 			Qualifier: pkgName,
 			Version:   modIpath.Version,
 		}
@@ -558,7 +627,7 @@ func appendExpandedWildcardPackagePath(pkgPaths []resolvedPackageArg, pattern as
 				// A wildcard isn't currently allowed to match multiple packages
 				// in a single directory.
 				return nil, &MultiplePackageError{
-					Dir:      path.Dir(f.FilePath),
+					Dir:      fileDir,
 					Packages: []string{prevImportPath.Qualifier, ip.Qualifier},
 					Files: []string{
 						path.Base(prevFile.FilePath),
@@ -567,7 +636,7 @@ func appendExpandedWildcardPackagePath(pkgPaths []resolvedPackageArg, pattern as
 				}
 			}
 		}
-		pkgPaths = append(pkgPaths, resolvedPackageArg{ip.String(), ip.String()})
+		pkgPaths = append(pkgPaths, resolvedPackageArg{original: ip.String(), resolvedCanonical: ip.String(), packageFound: true})
 		prevFile, prevImportPath = f, ip
 	}
 	return pkgPaths, nil

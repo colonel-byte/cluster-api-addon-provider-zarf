@@ -52,8 +52,8 @@ type Config struct {
 	// the empty string is returned.
 	DescriptionFunc func(v cue.Value) string
 
-	// SelfContained causes all non-expanded external references to be included
-	// in this document.
+	// Deprecated: SelfContained has no effect; all non-expanded external
+	// references are always included in the generated document.
 	SelfContained bool
 
 	// OpenAPI version to use. Supported as of v3.0.0.
@@ -106,6 +106,8 @@ func Gen(inst cue.InstanceOrValue, c *Config) ([]byte, error) {
 //
 // Note: only a limited number of top-level types are supported so far.
 func Generate(inst cue.InstanceOrValue, c *Config) (*ast.File, error) {
+	// TODO(v0.19): enable the openapiv2 experiment by default,
+	// and deprecate Generate and Gen in favor of GenerateV2.
 	if c == nil {
 		c = defaultConfig
 	}

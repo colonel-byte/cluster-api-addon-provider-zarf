@@ -18,6 +18,7 @@ import (
 	"slices"
 
 	"cuelang.org/go/cue/ast"
+	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 )
@@ -34,9 +35,6 @@ func ExtractDoc(v *adt.Vertex) (docs []*ast.CommentGroup) {
 }
 
 func extractDocs(v *adt.Vertex) (docs []*ast.CommentGroup) {
-	fields := []*ast.Field{}
-
-	// Collect docs directly related to this Vertex.
 	for x := range v.LeafConjuncts() {
 		// TODO: Is this still being used?
 		if v, ok := x.Elem().(*adt.Vertex); ok {
@@ -45,12 +43,24 @@ func extractDocs(v *adt.Vertex) (docs []*ast.CommentGroup) {
 
 		switch f := x.Field().Source().(type) {
 		case *ast.Field:
-			if hasShorthandValue(f) {
-				continue
+			// ast.DocComments resolves the field-chain convention from
+			// the (parse-resolved) source AST, so a doc syntactically
+			// attached to a field-chain head is reported on the leaf
+			// field it documents. This works regardless of whether v has
+			// a parent, which is why it is also correct for the
+			// synthetic vertices built in the expr export path.
+			for _, cg := range ast.DocComments(f) {
+				if !containsDoc(docs, cg) {
+					docs = append(docs, cg)
+				}
 			}
-			fields = append(fields, f)
+			// DocComments returns only comments that document the field
+			// (Position 0). A field can also carry trailing or dangling
+			// doc comments (e.g. a comment at the end of a struct); those
+			// do not document the field, but we carry them through so the
+			// exported form preserves them in place.
 			for _, cg := range ast.Comments(f) {
-				if !containsDoc(docs, cg) && cg.Doc {
+				if cg.Doc && cg.Position != 0 && !containsDoc(docs, cg) {
 					docs = append(docs, cg)
 				}
 			}
@@ -60,65 +70,52 @@ func extractDocs(v *adt.Vertex) (docs []*ast.CommentGroup) {
 			docs = append(docs, fdocs...)
 		}
 	}
+	return docs
+}
 
-	// Collect docs from parent scopes in collapsed fields.
-	for p := v.Parent; p != nil; p = p.Parent {
+// setComments sets the comments of dst to copies of cgs, which belong to the
+// source syntax tree and must not be shared with the output: the output may
+// be edited in place, such as by [cuelang.org/go/cue/format.NodeInPlace].
+func setComments(dst ast.Node, cgs []*ast.CommentGroup) {
+	ast.SetComments(dst, cloneComments(cgs))
+}
 
-		newFields := []*ast.Field{}
+// cloneComments returns copies of cgs; see [setComments].
+func cloneComments(cgs []*ast.CommentGroup) []*ast.CommentGroup {
+	if len(cgs) == 0 {
+		return nil
+	}
+	a := make([]*ast.CommentGroup, len(cgs))
+	for i, cg := range cgs {
+		a[i] = ast.Clone(cg)
+	}
+	return a
+}
 
-		for x := range p.LeafConjuncts() {
-			f, ok := x.Source().(*ast.Field)
-			if !ok || !hasShorthandValue(f) {
-				continue
+// leadingDocComments returns copies of the doc-position comment groups
+// in cgs, in order; see [setComments]. When non-doc comment groups that
+// the exporter discards precede the first doc comment, that first doc
+// comment inherits the leading RelPos of cgs[0].
+func leadingDocComments(cgs []*ast.CommentGroup) []*ast.CommentGroup {
+	var docs []*ast.CommentGroup
+	for i, cg := range cgs {
+		if cg.Doc {
+			cg = ast.Clone(cg)
+			if i > 0 && len(docs) == 0 {
+				setLeadingRelPos(cg, cgs[0].Pos().RelPos())
 			}
-
-			nested := nestedField(f)
-			for _, child := range fields {
-				if nested == child {
-					newFields = append(newFields, f)
-					for _, cg := range ast.Comments(f) {
-						if !containsDoc(docs, cg) && cg.Doc {
-							docs = append(docs, cg)
-						}
-					}
-				}
-			}
+			docs = append(docs, cg)
 		}
-
-		fields = newFields
 	}
 	return docs
 }
 
-// hasShorthandValue reports whether this field has a struct value that will
-// be rendered as a shorthand, for instance:
-//
-//	f: g: 2
-func hasShorthandValue(f *ast.Field) bool {
-	if f = nestedField(f); f == nil {
-		return false
+// setLeadingRelPos sets the RelPos of the first comment of cg, which
+// must belong to the output, to rel.
+func setLeadingRelPos(cg *ast.CommentGroup, rel token.RelPos) {
+	if len(cg.List) > 0 {
+		cg.List[0].Slash = cg.List[0].Slash.WithRel(rel)
 	}
-
-	// Not a regular field, but shorthand field.
-	// TODO: Should we return here? For now mimic old implementation.
-	if _, _, err := ast.LabelName(f.Label); err != nil {
-		return false
-	}
-
-	return true
-}
-
-// nestedField returns the child field of a field shorthand.
-func nestedField(f *ast.Field) *ast.Field {
-	s, _ := f.Value.(*ast.StructLit)
-	if s == nil || len(s.Elts) != 1 ||
-		s.Lbrace.IsValid() ||
-		s.Rbrace.IsValid() {
-		return nil
-	}
-
-	f, _ = s.Elts[0].(*ast.Field)
-	return f
 }
 
 func containsDoc(a []*ast.CommentGroup, cg *ast.CommentGroup) bool {
@@ -171,7 +168,13 @@ func extractDeclAttrs(attrs []*ast.Attribute, n ast.Node) []*ast.Attribute {
 	switch x := n.(type) {
 	case nil:
 	case *ast.File:
-		attrs = appendDeclAttrs(attrs, x.Decls[len(x.Preamble()):])
+		decls := x.Decls[len(x.Preamble()):]
+		// A @version attribute declares the version of the source file,
+		// not of the exported value, which targets the instance's version.
+		if v := internal.VersionAttr(x); v != nil {
+			decls = slices.DeleteFunc(slices.Clone(decls), func(d ast.Decl) bool { return d == v })
+		}
+		attrs = appendDeclAttrs(attrs, decls)
 	case *ast.StructLit:
 		attrs = appendDeclAttrs(attrs, x.Elts)
 	}
@@ -194,4 +197,23 @@ func containsAttr(a []*ast.Attribute, x *ast.Attribute) bool {
 		}
 	}
 	return false
+}
+
+// exportAttrs returns the attributes to export out of attrs, which it
+// modifies. Those are copies, as attrs belong to the source syntax tree and
+// the output may be edited in place.
+//
+// Attributes consumed by an injection, such as @embed, are dropped. The
+// injected value is already part of the output, which does not carry the
+// file-level @extern declaration that the attribute requires.
+func (e *exporter) exportAttrs(attrs []*ast.Attribute) []*ast.Attribute {
+	if e.isInjectionKind != nil {
+		attrs = slices.DeleteFunc(attrs, func(a *ast.Attribute) bool {
+			return e.isInjectionKind(a.Name())
+		})
+	}
+	for i, a := range attrs {
+		attrs[i] = ast.Clone(a)
+	}
+	return attrs
 }

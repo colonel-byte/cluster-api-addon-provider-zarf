@@ -88,25 +88,6 @@ func (d *envYield) addEnv(env *Environment) {
 	d.envs = append(d.envs, env)
 }
 
-// ValueClause represents a wrapper Environment in a chained clause list
-// to account for the unwrapped struct. It is never created by the compiler
-// and serves as a dynamic element only.
-//
-// The type is still referenced by walk/dep/export/debug for type-switching
-// over Yielders, but in the dependency-tracking comprehension flow the yield
-// method is not reached: clauses are walked statically and ValueClause never
-// appears in a Comprehension.Clauses chain. The empty body documents that no
-// yield action is needed; if a future change reintroduces dynamic ValueClause
-// chaining, restore `s.yield(s.ctx.spawn(v.arc))`.
-type ValueClause struct {
-	Node
-
-	// The node in which to resolve lookups in the comprehension's value struct.
-	arc *Vertex
-}
-
-func (v *ValueClause) yield(s *compState) {}
-
 // insertComprehension registers a comprehension with a node, possibly pushing
 // down its evaluation to the node's children. It will only evaluate one level
 // of fields at a time.
@@ -242,20 +223,20 @@ func (n *nodeContext) processComprehension(d *envYield, state vertexStatus) *Bot
 }
 
 // pushDownDeps does a static analysis of the processed values and adjusts
-// dependencies and types.
-// Normally, a task of a current node is a requirement of that node to complete.
-// However, if we have a comprehension, we may push that dependency down to
-// the literal fields of that comprehension. This allows for more fine-grained
-// dependency analysis and can help breaking cycles that should be naturally
-// broken to the user.
+// dependencies. Normally, a task of a current node is a requirement of that
+// node to complete. However, if we have a comprehension, we may push that
+// dependency down to the literal fields of its body and else clause. This
+// allows for more fine-grained dependency analysis and can help breaking
+// cycles that should be naturally broken to the user.
 func pushDownDeps(n *nodeContext, t *task, x Node) condition {
-	kind := allKinds
-
 	var completes condition
 
 	switch x := x.(type) {
 	case *Comprehension:
 		completes = pushDownDeps(n, t, x.Value)
+		if x.Fallback != nil {
+			completes |= pushDownDeps(n, t, x.Fallback)
+		}
 
 	case *StructLit:
 		// StructLits are mostly handled when they are a value of a
@@ -287,19 +268,11 @@ func pushDownDeps(n *nodeContext, t *task, x Node) condition {
 					pushDownDeps(arcState, t, x.Value)
 				}
 
-				if x.Label.IsString() {
-					kind &= StructKind
-				}
-				if x.Label.IsInt() {
-					kind &= ListKind
-				}
-
 			case *BulkOptionalField, *Ellipsis:
 				completes |= fieldConjunctsKnown
 				// TODO: does not add fields, but may add field conjuncts;
 				// confirm whether tracking dependencies here would yield
 				// any additional precision.
-				kind &= StructKind | ListKind
 
 			case *LetField:
 				completes |= fieldConjunctsKnown
@@ -312,11 +285,9 @@ func pushDownDeps(n *nodeContext, t *task, x Node) condition {
 			case *DynamicField:
 				// Depending on arc type, may not contribute to concrete value.
 				completes |= fieldConjunctsKnown
-				kind &= StructKind | ListKind
 
 			case Value:
 				completes |= valueKnown
-				kind &= x.Kind()
 
 			default:
 				// Embeddings, other comprehensions.
@@ -333,4 +304,13 @@ func pushDownDeps(n *nodeContext, t *task, x Node) condition {
 	}
 
 	return completes | allTasksCompleted
+}
+
+// isPushedDownComp reports whether t is a comprehension task whose body and
+// else clause were fully pushed down: [pushDownDeps] returns bare
+// allTasksCompleted exactly when both consist of literal fields only. Such a
+// task contributes conjuncts solely to the arcs it pre-created at scheduling
+// time, registering itself in their parentTasks.
+func (t *task) isPushedDownComp() bool {
+	return t.run == handleComprehension && t.completes == allTasksCompleted
 }

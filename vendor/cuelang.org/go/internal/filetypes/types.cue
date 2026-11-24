@@ -33,20 +33,21 @@ package build
 
 // A FileInfo defines how a file is encoded and interpreted.
 #FileInfo: {
-	#File
+	// #File is spread as the fields below extend it rather than restrict it.
+	#File...
 
 	// For each of these fields it is explained what a true value means
 	// for encoding/decoding.
 
 	data:          *true | false // include/allow regular fields
-	references:    *true | false // don't resolve/allow references
+	references:    *true | false // include/allow references
 	cycles:        *true | false // cycles are permitted
 	definitions?:  bool          // include/allow definition fields
-	optional?:     bool          // include/allow definition fields
+	optional?:     bool          // include/allow optional fields
 	constraints?:  bool          // include/allow constraints
 	keepDefaults?: bool          // select/allow default values
 	incomplete?:   bool          // permit incomplete values
-	imports?:      bool          // don't expand/allow imports
+	imports?:      bool          // include/allow imports
 	stream?:       bool          // permit streaming
 	docs?:         bool          // show/allow docs
 	attributes?:   bool          // include/allow attributes
@@ -92,9 +93,11 @@ modes: input: {
 		attributes: *true | false
 	}
 	// encodings is unified to the file value when interpretation is empty.
-	encodings: cue: {
-		*forms.schema | _
-	}
+	//
+	// Note: deliberately not wrapped in a struct literal — the
+	// generator's disjunction extraction (generate.go findDisjunction)
+	// sees through conjunctions but not through struct embeddings.
+	encodings: cue: *forms.schema | _
 	extensions: "-": encoding:           *"cue" | _
 	extensions: ".json": interpretation: *"auto" | _
 	extensions: ".yaml": interpretation: *"auto" | _
@@ -172,6 +175,7 @@ modes: [string]: {
 		".yaml":      tagInfo.yaml
 		".yml":       tagInfo.yaml
 		".toml":      tagInfo.toml
+		".ini":       tagInfo.ini
 		".xml":       tagInfo.xml
 		".txt":       tagInfo.text
 		".go":        tagInfo.go
@@ -222,6 +226,11 @@ modes: [string]: {
 		stream: false
 	}
 
+	encodings: ini: {
+		forms.data
+		stream: false
+	}
+
 	encodings: xml: {
 		forms.data
 		stream: false
@@ -251,7 +260,7 @@ modes: [string]: {
 }
 
 // forms defines schema for all forms. It does not include the form ID.
-forms: [Name=string]: #FileInfo
+forms: [string]~(Name,_): #FileInfo
 
 forms: schema: {
 	form: *"schema" | "final" | "graph"
@@ -303,7 +312,7 @@ forms: data: {
 	optional:    false
 }
 
-interpretations: [Name=string]: #FileInfo & {
+interpretations: [string]~(Name,_): #FileInfo & {
 	interpretation: Name
 }
 
@@ -328,6 +337,13 @@ interpretations: openapi: {
 		strict:         *false | bool
 		strictKeywords: *strict | bool
 		strictFeatures: *strict | bool
+		// allSchemas causes an entry to be generated in
+		// components.schemas for every top-level schema (definition),
+		// even when unreferenced. We default this to false, which will
+		// include in components.schemas only the schemas that are
+		// actually used by the OpenAPI spec. We can revisit that
+		// decision if it seems less than useful.
+		allSchemas: *false | bool
 	}
 }
 
@@ -345,11 +361,42 @@ tagInfo: {
 	dag: form:    "dag"
 	data: form:   "data"
 
-	cue: encoding:   "cue"
-	json: encoding:  "json"
+	cue: {
+		encoding: "cue"
+		boolTags: {
+			// compact causes CUE to be printed more compactly,
+			// avoiding newlines and eliding comments.
+			compact: *false | bool
+		}
+	}
+	json: {
+		encoding: "json"
+		boolTags: {
+			// compact causes the JSON to be emitted without whitespace.
+			compact: *false | bool
+		}
+	}
 	jsonl: encoding: "jsonl"
-	yaml: encoding:  "yaml"
-	toml: encoding:  "toml"
+	yaml: {
+		encoding: "yaml"
+		boolTags: {
+			// indentSequences controls whether sequence (list) elements are indented
+			// relative to their enclosing mapping key when encoding to YAML.
+			//
+			// TODO(mvdan): consider turning this to "false" by default in the future,
+			// as the YAML project maintainers say that go-yaml v4 and other libraries
+			// will stop indenting by default. See: https://cuelang.org/issue/4177
+			indentSequences: *true | bool
+		}
+	}
+	toml: encoding: "toml"
+	ini: {
+		encoding: "ini"
+		// The flavor tag names an encoding/ini flavor, so that
+		// "ini+flavor=git" reads a file as git-config does. Empty is the
+		// generic flavor.
+		tags: flavor: *"" | "git" | "python" | "systemd" | "windows"
+	}
 	xml: {
 		encoding: "xml"
 		boolTags: {

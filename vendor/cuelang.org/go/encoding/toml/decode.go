@@ -21,7 +21,6 @@ package toml
 import (
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,7 +40,7 @@ import (
 func NewDecoder(filename string, r io.Reader) *Decoder {
 	// Note that we don't consume the reader here,
 	// as there's no need, and we can't return an error either.
-	return &Decoder{r: r, filename: filename, seenTableKeys: make(map[string]bool)}
+	return &Decoder{r: r, filename: filename, seenTableKeys: make(map[rootedKey]keyKind)}
 }
 
 // Decoder implements the decoding state.
@@ -56,9 +55,9 @@ type Decoder struct {
 	decoded bool // whether [Decoder.Decoded] has been called already
 	parser  toml.Parser
 
-	// seenTableKeys tracks which rooted keys we have already decoded as tables,
-	// as duplicate table keys in TOML are not allowed.
-	seenTableKeys map[rootedKey]bool
+	// seenTableKeys tracks how each rooted key was declared,
+	// as duplicate keys in TOML are not allowed.
+	seenTableKeys map[rootedKey]keyKind
 
 	// topFile is the top-level CUE file we are decoding into.
 	// TODO(mvdan): make an *ast.File once the decoder returns ast.Node rather than ast.Expr.
@@ -101,14 +100,39 @@ type Decoder struct {
 // particularly since a table key can be any string.
 // However, we just need these keys to detect duplicates,
 // and a path cannot be both an array and table, so it's OK.
+//
+// Any key inside a table array includes the index of its element,
+// like "arr.3.tbl.key", so that the keys of each element are kept apart.
+// The exception is [openTableArray.rkey], which matches keys as written in headers.
 type rootedKey = string
+
+// keyKind describes how a rooted key was declared, if at all.
+type keyKind uint8
+
+const (
+	keyUndeclared keyKind = iota
+
+	// keyImplicitTable is a table only declared via its subkeys,
+	// such as "a" by [a.b], [[a.b]], or a.b = 1.
+	// It may still be declared as a table, but not as a table array.
+	keyImplicitTable
+
+	keyDeclared   // a table or a value
+	keyTableArray // a table array
+)
 
 // openTableArray records information about a declared table array.
 type openTableArray struct {
-	rkey      rootedKey
-	level     int // the level of nesting, 1 or higher, e.g. 2 for key="foo.bar"
+	rkey      rootedKey // without any element indices, like "foo.bar"
+	seenKey   rootedKey // with the element indices of parent table arrays, like "foo.3.bar"
+	level     int       // the level of nesting, 1 or higher, e.g. 2 for key="foo.bar"
 	list      *ast.ListLit
 	lastTable *ast.StructLit
+}
+
+// lastElemKey returns the rooted key for the last element in the table array.
+func (arr *openTableArray) lastElemKey() rootedKey {
+	return arr.seenKey + "." + strconv.Itoa(len(arr.list.Elts)-1)
 }
 
 // TODO(mvdan): support decoding comments
@@ -142,29 +166,27 @@ func (d *Decoder) Decode() (ast.Expr, error) {
 	}
 	if err := d.parser.Error(); err != nil {
 		if err, ok := err.(*toml.ParserError); ok {
-			shape := d.parser.Shape(d.parser.Range(err.Highlight))
-			return nil, d.posErrf(shape.Start, "%s", err.Message)
+			offset := int(d.parser.Range(err.Highlight).Offset)
+			return nil, errors.Newf(d.tokenFile.Pos(offset, token.NoRelPos), "%s", err.Message)
 		}
 		return nil, err
 	}
 	return d.topFile, nil
 }
 
-func (d *Decoder) shape(tnode *toml.Node) toml.Shape {
+// nodePos returns the position at which a node starts in the input.
+// We avoid [toml.Parser.Shape], which scans the input from its start.
+func (d *Decoder) nodePos(tnode *toml.Node) token.Pos {
 	if tnode.Raw.Length == 0 {
-		// Otherwise the Shape method call below happily returns a position like 1:1,
+		// Otherwise we would return offset 0, i.e. 1:1,
 		// which is worse than no position information as it confuses the user.
 		panic("Decoder.nodePos was given an empty toml.Node as position")
 	}
-	return d.parser.Shape(tnode.Raw)
+	return d.tokenFile.Pos(int(tnode.Raw.Offset), token.NoRelPos)
 }
 
 func (d *Decoder) nodeErrf(tnode *toml.Node, format string, args ...any) error {
-	return d.posErrf(d.shape(tnode).Start, format, args...)
-}
-
-func (d *Decoder) posErrf(pos toml.Position, format string, args ...any) error {
-	return errors.Newf(d.tokenFile.Pos(pos.Offset, token.NoRelPos), format, args...)
+	return errors.Newf(d.nodePos(tnode), format, args...)
 }
 
 // nextRootNode is called for every top-level expression from the TOML parser.
@@ -205,13 +227,19 @@ func (d *Decoder) nextRootNode(tnode *toml.Node) error {
 
 	case toml.Table:
 		// Tables always begin a new line.
-		key, keyElems := d.decodeKey("", tnode.Key())
+		keyElems := d.decodeKey(tnode.Key())
+		key := rootKey("", keyElems)
+		array := d.findArrayPrefix(key)
+		if array != nil && array.rkey == key {
+			return d.nodeErrf(tnode.Child(), "cannot redeclare table array %q as a table", key)
+		}
 
 		// All table keys must be unique, including for the top-level table.
-		if d.seenTableKeys[key] {
+		seenKey := d.headerKey(array, keyElems)
+		if d.seenTableKeys[seenKey] == keyDeclared {
 			return d.nodeErrf(tnode.Child(), "duplicate key: %s", key)
 		}
-		d.seenTableKeys[key] = true
+		d.seenTableKeys[seenKey] = keyDeclared
 
 		// We want a multi-line struct with curly braces,
 		// just like TOML's tables are on multiple lines.
@@ -220,11 +248,7 @@ func (d *Decoder) nextRootNode(tnode *toml.Node) error {
 			Lbrace: token.NoPos.WithRel(token.Blank),
 			Rbrace: token.NoPos.WithRel(token.Newline),
 		}
-		array := d.findArrayPrefix(key)
 		if array != nil { // [last_array.new_table]
-			if array.rkey == key {
-				return d.nodeErrf(tnode.Child(), "cannot redeclare table array %q as a table", key)
-			}
 			subKeyElems := keyElems[array.level:]
 			topField, leafField := d.inlineFields(subKeyElems, token.Newline)
 			array.lastTable.Elts = append(array.lastTable.Elts, topField)
@@ -234,14 +258,12 @@ func (d *Decoder) nextRootNode(tnode *toml.Node) error {
 			d.topFile.Elts = append(d.topFile.Elts, topField)
 			leafField.Value = d.currentTable
 		}
-		d.currentTableKey = key
+		d.currentTableKey = seenKey
 
 	case toml.ArrayTable:
 		// Table array elements always begin a new line.
-		key, keyElems := d.decodeKey("", tnode.Key())
-		if d.seenTableKeys[key] {
-			return d.nodeErrf(tnode.Child(), "cannot redeclare key %q as a table array", key)
-		}
+		keyElems := d.decodeKey(tnode.Key())
+		key := rootKey("", keyElems)
 		// Each struct inside a table array sits on separate lines.
 		d.currentTable = &ast.StructLit{
 			// No positions, as TOML doesn't have table delimiters.
@@ -250,11 +272,17 @@ func (d *Decoder) nextRootNode(tnode *toml.Node) error {
 		}
 		if array := d.findArrayPrefix(key); array != nil && array.level == len(keyElems) {
 			// [[last_array]] - appending to an existing array.
-			d.currentTableKey = key + "." + strconv.Itoa(len(array.list.Elts))
 			array.lastTable = d.currentTable
 			array.list.Elts = append(array.list.Elts, d.currentTable)
+			d.currentTableKey = array.lastElemKey()
 		} else {
 			// Creating a new array via either [[new_array]] or [[last_array.new_array]].
+			// The key must not be declared already, not even implicitly as a table.
+			seenKey := d.headerKey(array, keyElems)
+			if d.seenTableKeys[seenKey] != keyUndeclared {
+				return d.nodeErrf(tnode.Child(), "cannot redeclare key %q as a table array", key)
+			}
+			d.seenTableKeys[seenKey] = keyTableArray
 			// We want a multi-line list with square braces,
 			// since TOML's table arrays are on multiple lines.
 			list := &ast.ListLit{
@@ -275,10 +303,11 @@ func (d *Decoder) nextRootNode(tnode *toml.Node) error {
 				leafField.Value = list
 			}
 
-			d.currentTableKey = key + ".0"
+			d.currentTableKey = seenKey + ".0"
 			list.Elts = append(list.Elts, d.currentTable)
 			d.openTableArrays = append(d.openTableArrays, openTableArray{
 				rkey:      key,
+				seenKey:   seenKey,
 				level:     len(keyElems),
 				list:      list,
 				lastTable: d.currentTable,
@@ -293,16 +322,17 @@ func (d *Decoder) nextRootNode(tnode *toml.Node) error {
 
 // decodeField decodes a single table key and its value as a struct field.
 func (d *Decoder) decodeField(rkey rootedKey, tnode *toml.Node, relPos token.RelPos) (*ast.Field, error) {
-	rkey, keyElems := d.decodeKey(rkey, tnode.Key())
-	if d.findArray(rkey) != nil {
+	keyElems := d.decodeKey(tnode.Key())
+	rkey = d.declareKey(rkey, keyElems)
+	switch d.seenTableKeys[rkey] {
+	case keyTableArray:
 		return nil, d.nodeErrf(tnode.Child().Next(), "cannot redeclare table array %q as a table", rkey)
-	}
-	topField, leafField := d.inlineFields(keyElems, relPos)
-	// All table keys must be unique, including inner table ones.
-	if d.seenTableKeys[rkey] {
+	case keyDeclared:
+		// All table keys must be unique, including inner table ones.
 		return nil, d.nodeErrf(tnode.Child().Next(), "duplicate key: %s", rkey)
 	}
-	d.seenTableKeys[rkey] = true
+	d.seenTableKeys[rkey] = keyDeclared
+	topField, leafField := d.inlineFields(keyElems, relPos)
 	value, err := d.decodeExpr(rkey, tnode.Value())
 	if err != nil {
 		return nil, err
@@ -321,27 +351,21 @@ func (d *Decoder) findArray(rkey rootedKey) *openTableArray {
 	return nil
 }
 
-// findArray returns an existing table array if one exists at exactly the given key
+// findArrayPrefix returns an existing table array if one exists at exactly the given key
 // or as a prefix to the given key.
 func (d *Decoder) findArrayPrefix(rkey rootedKey) *openTableArray {
 	// TODO(mvdan): see the performance TODO on [Decoder.openTableArrays].
 
 	// Prefer an exact match over a relative prefix match.
-	if arr := d.findArray(rkey); arr != nil {
-		// TODO: the fact that we need to delete from both structures below
-		// strongly hints towards merging the two structures in some way.
-		// We already have a TODO about making openTableArrays a more efficient structure.
-
+	if d.findArray(rkey) != nil {
 		// When we find an exact match, we must forget about its subkeys
 		// because we're starting an entirely new array element.
+		// The seen keys include the index of the previous element, so they can stay.
 		d.openTableArrays = slices.DeleteFunc(d.openTableArrays, func(arr openTableArray) bool {
 			return strings.HasPrefix(arr.rkey, rkey+".")
 		})
-		// We also need to forget about seen table keys.
-		maps.DeleteFunc(d.seenTableKeys, func(seenRkey rootedKey, _ bool) bool {
-			return strings.HasPrefix(seenRkey, rkey+".")
-		})
-		return arr
+		// Deleting may have moved the exact match within the slice.
+		return d.findArray(rkey)
 	}
 	// The longest relative key match wins.
 	maxLevel := 0
@@ -361,25 +385,57 @@ func (d *Decoder) findArrayPrefix(rkey rootedKey) *openTableArray {
 // tomlKey represents a name with a position which forms part of a TOML dotted key,
 // such as "foo" from "[foo.bar.baz]".
 type tomlKey struct {
-	name  string
-	shape toml.Shape
+	name string
+	pos  token.Pos
 }
 
-// decodeKey extracts a rootedKey from a TOML node key iterator,
-// appending to the given parent key and returning the unquoted string elements.
-func (d *Decoder) decodeKey(rkey rootedKey, iter toml.Iterator) (rootedKey, []tomlKey) {
+// decodeKey returns the unquoted string elements of a TOML node key iterator.
+func (d *Decoder) decodeKey(iter toml.Iterator) []tomlKey {
 	var elems []tomlKey
 	for iter.Next() {
 		node := iter.Node()
-		name := string(node.Data)
-		// TODO(mvdan): use an append-like API once we have benchmarks
-		if len(rkey) > 0 {
-			rkey += "."
-		}
-		rkey += quoteLabelIfNeeded(name)
-		elems = append(elems, tomlKey{name, d.shape(node)})
+		elems = append(elems, tomlKey{string(node.Data), d.nodePos(node)})
 	}
-	return rkey, elems
+	return elems
+}
+
+// appendKey returns the rooted key for a key element under a parent key.
+func appendKey(rkey rootedKey, elem tomlKey) rootedKey {
+	// TODO(mvdan): use an append-like API once we have benchmarks
+	if rkey == "" {
+		return quoteLabelIfNeeded(elem.name)
+	}
+	return rkey + "." + quoteLabelIfNeeded(elem.name)
+}
+
+// rootKey returns the rooted key for the given key elements under a parent key.
+func rootKey(rkey rootedKey, elems []tomlKey) rootedKey {
+	for _, elem := range elems {
+		rkey = appendKey(rkey, elem)
+	}
+	return rkey
+}
+
+// declareKey is like [rootKey], but it also records
+// the undeclared keys in between as implicitly declared tables.
+func (d *Decoder) declareKey(rkey rootedKey, elems []tomlKey) rootedKey {
+	for i, elem := range elems {
+		rkey = appendKey(rkey, elem)
+		if i < len(elems)-1 && d.seenTableKeys[rkey] == keyUndeclared {
+			d.seenTableKeys[rkey] = keyImplicitTable
+		}
+	}
+	return rkey
+}
+
+// headerKey returns the rooted key for a table or table array header with the given
+// key elements, which is in the last element of the given table array, if any.
+// The undeclared keys in between are recorded as implicitly declared tables.
+func (d *Decoder) headerKey(array *openTableArray, elems []tomlKey) rootedKey {
+	if array == nil {
+		return d.declareKey("", elems)
+	}
+	return d.declareKey(array.lastElemKey(), elems[array.level:])
 }
 
 // inlineFields constructs a single-line chain of CUE fields joined with structs,
@@ -422,9 +478,8 @@ func quoteLabelIfNeeded(name string) string {
 // as well as for any keys beginning with an underscore, as we don't want to hide any fields.
 // cue/format knows how to quote any other identifiers correctly.
 func (d *Decoder) label(tkey tomlKey, relPos token.RelPos) ast.Label {
-	pos := d.tokenFile.Pos(tkey.shape.Start.Offset, relPos)
 	label := ast.NewStringLabel(tkey.name)
-	ast.SetPos(label, pos)
+	ast.SetPos(label, tkey.pos.WithRel(relPos))
 	return label
 }
 
@@ -507,10 +562,10 @@ func (d *Decoder) decodeExpr(rkey rootedKey, tnode *toml.Node) (ast.Expr, error)
 	default:
 		return nil, fmt.Errorf("encoding/toml.Decoder.decodeExpr: unknown %s %#v", tnode.Kind, tnode)
 	}
-	// TODO(mvdan): some go-toml nodes such as Kind=toml.Bool do not seem to have a Raw Range
+	// TODO(mvdan): go-toml nodes of Kind=toml.Array do not have a Raw Range
 	// which would let us grab their position information; fix this upstream.
 	if tnode.Raw.Length > 0 {
-		ast.SetPos(expr, d.tokenFile.Pos(d.shape(tnode).Start.Offset, token.NoRelPos))
+		ast.SetPos(expr, d.nodePos(tnode))
 	}
 	return expr, nil
 }

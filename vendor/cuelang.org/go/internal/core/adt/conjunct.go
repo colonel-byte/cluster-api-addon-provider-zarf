@@ -59,6 +59,19 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 
 	env := c.Env
 
+	// A function-call argument pins the caller's cycle-reference chain: when
+	// the stored conjunct is re-scheduled from within the callee's body (an
+	// argument is evaluated lazily, on first use of the parameter), the
+	// body's ambient chain must not leak into the argument's evaluation. See
+	// the [CycleInfo.IsFuncArg] documentation. The ambient CycleType is
+	// deliberately kept: whether the consuming context is cyclic governs
+	// evidence bookkeeping (markNonCyclic) and thus the bounding of genuine
+	// recursion.
+	if c.CloseInfo.IsFuncArg {
+		id.Refs = c.CloseInfo.Refs
+		id.IsFuncArg = true
+	}
+
 	n.markNonCyclic(id)
 
 	switch x := c.Elem().(type) {
@@ -75,7 +88,11 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 			n.insertValueConjunct(env, x, id)
 		} else {
 			if x.ClosedNonRecursive {
-				n.node.ClosedNonRecursive = true
+				// A closed value closes the node it is unified with,
+				// unless a spread opens it.
+				if !id.Opened && !id.ConjunctOpened {
+					n.node.ClosedNonRecursive = true
+				}
 				id = n.addResolver(x, x, id, false)
 			}
 			n.scheduleVertexConjuncts(c, x, id)
@@ -128,6 +145,9 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 
 	case *StructLit:
 		n.unshare()
+		if isClosedLiteral(x) {
+			id = n.closeLiteral(x, id)
+		}
 		n.scheduleStruct(env, x, id)
 
 	case *ListLit:
@@ -144,7 +164,14 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 		n.scheduleTask(handleListLit, env, x, id)
 
 	case *DisjunctionExpr:
-		n.unshare()
+		// The disjuncts are cloned with any sharing and each keeps or ends
+		// it on its own, so a settled, single value stays shared when a
+		// disjunct refers to it and may add nothing. A shared disjunction
+		// is replayed, as its defaults combine differently in the disjuncts.
+		keep := n.isShared && hasResolver(x) && n.sharesSingleValue()
+		if !keep {
+			n.unshare()
+		}
 		id := id
 		id.setOptional(n)
 
@@ -177,6 +204,14 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 	case Evaluator:
 		n.unshare()
 
+		call, isCall := x.(*CallExpr)
+		if isCall {
+			if lit, closes, reclose := closedLiteral(call); lit != nil {
+				n.scheduleClosedLiteral(env, lit, closes, reclose, id)
+				return
+			}
+		}
+
 		// Call expressions may end up in an infinite recursion if we do not
 		// ensure that there is non-cyclic data to propagate the evaluation.
 		// We therefore postpone call expressions until we have evidence that
@@ -189,7 +224,7 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 		//
 		// TODO: this is rather hacky. We probably need a better solution
 		// in a future iteration of the evaluator.
-		if call, ok := x.(*CallExpr); ok && id.CycleType == IsCyclic && !n.hasNonCycle && !n.hasNonCyclic {
+		if isCall && id.CycleType == IsCyclic && !n.hasNonCycle && !n.hasNonCyclic {
 			if slices.ContainsFunc(call.Args, exprHasResolver) {
 				n.hasAncestorCycle = true
 				n.cyclicConjuncts = append(n.cyclicConjuncts, cyclicConjunct{c: c})
@@ -204,6 +239,83 @@ func (n *nodeContext) scheduleConjunct(c Conjunct, id CloseInfo) {
 	}
 
 	n.ctx.stats.Conjuncts++
+}
+
+// closedLiteral returns the struct literal a call closes, when it applies a
+// builtin marked [Builtin.Closes] to a struct literal directly, and how.
+// For __reclose, which may wrap a close call or be wrapped in one, reclose
+// is true and closes is the closing the literal has before the values it
+// embeds are known.
+func closedLiteral(call *CallExpr) (lit *StructLit, closes Closing, reclose bool) {
+	b := closingBuiltin(call)
+	if b == nil {
+		return nil, NoClosing, false
+	}
+	closes = b.Closes
+	arg := call.Args[0]
+	if inner, ok := arg.(*CallExpr); ok {
+		// close nests with __reclose either way around, and around
+		// __closeAll, as the explicitopen rewrite emits them.
+		ib := closingBuiltin(inner)
+		if ib == nil {
+			return nil, NoClosing, false
+		}
+		switch {
+		case closes == ClosesOnce && ib.Closes == ClosesByEmbedding:
+			closes, reclose = ClosesOnce, true
+		case closes == ClosesByEmbedding && ib.Closes == ClosesOnce:
+			closes, reclose = ClosesOnce, true
+		case closes == ClosesOnce && ib.Closes == ClosesRecursively:
+			closes = ClosesRecursively
+		default:
+			return nil, NoClosing, false
+		}
+		arg = inner.Args[0]
+	} else if closes == ClosesByEmbedding {
+		closes, reclose = NoClosing, true
+	}
+	lit, ok := arg.(*StructLit)
+	if !ok {
+		return nil, NoClosing, false
+	}
+	// Outside the explicitopen experiment, __closeAll and __reclose are
+	// errors, which the builtins themselves report.
+	if (reclose || closes == ClosesRecursively) && !Pos(lit).Experiment().ExplicitOpen {
+		return nil, NoClosing, false
+	}
+	return lit, closes, reclose
+}
+
+// closingBuiltin returns the builtin marked [Builtin.Closes] which call
+// applies to a single positional argument, or nil.
+func closingBuiltin(call *CallExpr) *Builtin {
+	b, ok := call.Fun.(*Builtin)
+	if !ok || b.Closes == NoClosing || len(call.Args) != 1 || call.Partial || call.hasArgLabels() {
+		return nil
+	}
+	return b
+}
+
+// scheduleClosedLiteral unifies lit, the struct literal a call to close,
+// __closeAll or __reclose closes, as that call's result: a struct scope
+// which is checked, like a closed struct literal, #{...}, with the node
+// marked closed. The literal is not evaluated on its own first, as a
+// builtin's argument otherwise is, so a comprehension in it reads the fields
+// unified with it here, just as it does without the call.
+//
+// The literal of __reclose is closed only as the values it embeds through a
+// spread are closed, which [nodeContext.recloseEmbedded] applies as they are
+// scheduled; closes is then the closing of a close call it wraps, if any.
+func (n *nodeContext) scheduleClosedLiteral(env *Environment, lit *StructLit, closes Closing, reclose bool, id CloseInfo) {
+	// A spread of the call, close({...})..., opens the literal again, but
+	// it closes an enclosing __reclose literal as the call would.
+	if id.Opened || id.ConjunctOpened {
+		n.embedClosed(id, closes)
+	} else {
+		n.node.markClosed(closes)
+	}
+	id = n.closedScope(lit, id, closes, reclose)
+	n.scheduleStruct(env, lit, id)
 }
 
 // exprHasResolver checks if an expression contains a Resolver (reference).
@@ -237,7 +349,7 @@ func exprHasResolver(x Expr) bool {
 func (n *nodeContext) scheduleStruct(env *Environment,
 	s *StructLit,
 	ci CloseInfo) {
-	n.updateCyclicStatus(ci)
+	n.overrideCyclicConjuncts(ci)
 	n.updateConjunctInfo(StructKind, ci, cHasStruct)
 
 	// NOTE: This is a crucial point in the code:
@@ -250,7 +362,6 @@ func (n *nodeContext) scheduleStruct(env *Environment,
 		Vertex: n.node,
 	}
 
-	hasEmbed := false
 	hasEllipsis := false
 
 	n.hasStruct = true
@@ -269,17 +380,9 @@ func (n *nodeContext) scheduleStruct(env *Environment,
 		}
 	}
 	// TODO: do we still need to AddStruct?
-	n.node.AddStruct(s, compID)
+	n.node.AddStruct(s, compID, ci.FromDef)
 
-	// TODO(perf): precompile whether struct has embedding.
-loop1:
-	for _, d := range s.Decls {
-		switch d.(type) {
-		case *Comprehension, Expr:
-			hasEmbed = true
-			break loop1
-		}
-	}
+	hasEmbed := s.hasEmbed()
 
 	// When inserting a replace that is a definition, flip the ignore.
 	if hasEmbed { // only if more than one decl.
@@ -295,8 +398,7 @@ loop1:
 		switch x := d.(type) {
 		case *Field:
 			if x.Label.IsString() && x.ArcType == ArcMember {
-				n.aStruct = true
-				n.updateNodeType(StructKind, s, ci)
+				n.markStructLit(s, ci)
 			}
 			ci := n.ctx.subField(ci)
 			if x.ArcType == ArcOptional {
@@ -314,7 +416,6 @@ loop1:
 		case *Comprehension:
 			ci := n.injectEmbedNode(x, ci)
 			n.insertComprehension(childEnv, x, ci)
-			hasEmbed = true
 
 		case *Ellipsis:
 			// Can be added unconditionally to patterns.
@@ -323,8 +424,7 @@ loop1:
 		case *DynamicField:
 			ci := n.ctx.subField(ci)
 			if x.ArcType == ArcMember {
-				n.aStruct = true
-				n.updateNodeType(StructKind, s, ci)
+				n.markStructLit(s, ci)
 			}
 			n.scheduleTask(handleDynamic, childEnv, x, ci)
 
@@ -339,7 +439,6 @@ loop1:
 			ci := n.injectEmbedNode(x, ci)
 			ec := MakeConjunct(childEnv, x, ci)
 			n.scheduleConjunct(ec, ci)
-			hasEmbed = true
 		}
 	}
 	if hasEllipsis {
@@ -347,14 +446,38 @@ loop1:
 		n.updateConjunctInfo(TopKind, ci, cHasEllipsis)
 	}
 	if !hasEmbed {
-		n.aStruct = true
-		n.updateNodeType(StructKind, s, ci)
+		n.markStructLit(s, ci)
 	}
+}
+
+// markStructLit records that struct literal s makes the node a struct: it has
+// a regular field, or no embedding that could make it a scalar. Such a literal
+// is a value of its own and so breaks a reference cycle through the node,
+// unlike one whose kind is whatever its embeddings yield, as in `a: {a + 1}`.
+// See [OpContext.evalStateCI].
+func (n *nodeContext) markStructLit(s *StructLit, ci CloseInfo) {
+	n.aStruct = true
+	n.hasFieldValue = true
+	n.updateNodeType(StructKind, s, ci)
 }
 
 // scheduleVertexConjuncts injects the conjuncst of src n. If src was not fully
 // evaluated, it subscribes dst for future updates.
 func (n *nodeContext) scheduleVertexConjuncts(c Conjunct, arc *Vertex, closeInfo CloseInfo) {
+	// A function call reference carries its payload on the reference itself:
+	// the anchor arc it resolves to exists only to give the structural cycle
+	// detector a stable identity per function and deliberately has no
+	// conjuncts. Dispatching here, rather than at the call sites of this
+	// function, guarantees that every path consuming a scheduled or parked
+	// (resolver, arc) pair — task processing as well as cyclic-conjunct
+	// revival — schedules the call payload consistently. None of the
+	// struct-oriented logic below (sharing, closedness, arc dedup,
+	// notifications) applies to the conjunct-less anchor.
+	if ref, ok := c.Elem().(*FuncCallRef); ok {
+		n.scheduleFuncCall(ref, c.Env, closeInfo)
+		return
+	}
+
 	// We should not "activate" an enclosing struct for typo checking if it is
 	// derived from an embedded, inlined value:
 	//
@@ -375,13 +498,14 @@ func (n *nodeContext) scheduleVertexConjuncts(c Conjunct, arc *Vertex, closeInfo
 		closeInfo.FromDef = false
 	}
 	if c.CloseInfo.Opened || c.CloseInfo.ConjunctOpened {
-		n.setEmbedClosedness(arc)
+		n.embedClosed(closeInfo, arc.closing())
 	}
 
 	// disjunctions, we need to dereference he underlying node.
 	if deref(n.node) == deref(arc) {
+		n.linkCyclicResolver(arc, closeInfo)
 		if n.isShared {
-			n.addShared(closeInfo)
+			n.addShared(c, arc, closeInfo)
 		}
 		return
 	}
@@ -391,18 +515,51 @@ func (n *nodeContext) scheduleVertexConjuncts(c Conjunct, arc *Vertex, closeInfo
 		return
 	}
 
+	// A definition the shared vertex was already directly unified with adds
+	// nothing: unification is idempotent, so keep sharing rather than replay
+	// the vertex for it. Not so through an opened reference, which the
+	// definition re-closes.
+	if n.isShared && !n.node.OpenedShared &&
+		!closeInfo.Opened && !closeInfo.ConjunctOpened &&
+		n.sharedClosedBy(arc) {
+		n.addShared(c, arc, closeInfo)
+		return
+	}
+
 	// Also check arc.Label: definitions themselves do not have the FromDef to
 	// reflect their closedness. This means that if we are structure sharing, we
 	// may end up with a Vertex that is a definition without the reference
 	// reflecting that. We need to handle this case here. Note that if an
 	// intermediate node refers to a definition, things are evaluated at least
 	// once.
-	switch isDef, _ := IsDef(c.Expr()); {
-	case isDef || arc.Label.IsDef() || closeInfo.TopDef:
-		if c.CloseInfo.Opened || c.CloseInfo.ConjunctOpened {
+	//
+	// A reference may also reach a recursively closed value without naming a
+	// definition, by selecting from a regular field that holds one:
+	//
+	//	#D: a: {b: 1}
+	//	x: #D
+	//	y: x.a & {c: 2} // c is not allowed: x.a is closed by #D
+	//
+	// Such a value is closed like the definition it came from, so its
+	// closedness must carry over to the referring node as well.
+	//
+	// The same holds for a field of such a shared definition, reached from
+	// outside the definition through a regular field that holds it:
+	//
+	//	#D: s: {a: 1}
+	//	d: #D
+	//	h: d.s & {b: 2} // b is not allowed: d.s is #D.s
+	//
+	// The conjuncts of #D.s carry no FromDef either, so the reference must
+	// supply it, as it does for #D.s. A reference from within the definition
+	// itself, such as a sibling field referring to _a, does not close.
+	x := c.Expr()
+	if namesDefinition(x, closeInfo) || arc.Label.IsDef() || crossesDefinition(n.ctx, c.Env, x, arc) {
+		if (c.CloseInfo.Opened || c.CloseInfo.ConjunctOpened) && !arc.ClosedRecursive {
 			// Definitions are always recursively closed, even if arc
-			// doesn't have ClosedRecursive set yet at this point.
-			n.embedClosedness = embedRecursivelyClosed
+			// doesn't have ClosedRecursive set yet at this point; when it
+			// is set, the call above already recorded it.
+			n.embedClosed(closeInfo, ClosesRecursively)
 		}
 		n.isDef = true
 		// n.node.ClosedRecursive = true // TODO: should we set this here?
@@ -410,7 +567,7 @@ func (n *nodeContext) scheduleVertexConjuncts(c Conjunct, arc *Vertex, closeInfo
 		closeInfo.TopDef = false
 
 		closeInfo = n.addResolver(c.x, arc, closeInfo, false)
-	default:
+	} else {
 		closeInfo = n.addResolver(c.x, arc, closeInfo, true)
 	}
 	if closeInfo.defID != 0 && closeInfo.opID == n.ctx.opID {
@@ -442,6 +599,8 @@ func (n *nodeContext) scheduleVertexConjuncts(c Conjunct, arc *Vertex, closeInfo
 		return
 	}
 	n.arcMap = append(n.arcMap, arc)
+
+	closeInfo = n.splitPackage(arc, closeInfo)
 
 	if arc.Parent != nil && (!n.node.nonRooted || n.node.IsDynamic) {
 		// If the arc has a parent that for which the field conjuncts are not
@@ -510,20 +669,22 @@ func (n *nodeContext) insertValueConjunct(env *Environment, v Value, id CloseInf
 
 	switch x := v.(type) {
 	case *Vertex:
-		if x.ClosedNonRecursive {
-			n.node.ClosedNonRecursive = true
-
-			// If this is a definition, it will be repeated in the evaluation.
-			if !x.IsFromDisjunction() {
-				id = n.addResolver(v, x, id, false)
+		// A closed value closes the node it is unified with, unless a
+		// spread opens it.
+		if !id.Opened && !id.ConjunctOpened {
+			if x.ClosedNonRecursive {
+				n.node.ClosedNonRecursive = true
+			} else if x.ClosedRecursive {
+				n.node.ClosedRecursive = true
 			}
-		} else if x.ClosedRecursive {
-			n.node.ClosedRecursive = true
-
-			// If this is a definition, it will be repeated in the evaluation.
-			if !x.IsFromDisjunction() {
-				id = n.addResolver(v, x, id, false)
-			}
+		}
+		// A vertex which holds a disjunction adds no resolver of its own:
+		// its disjuncts do so as they are processed, each carrying its
+		// closing. A disjunct closed by a builtin (see [Builtin.PerDisjunct])
+		// carries that closing as a flag alone, so it needs the resolver
+		// here like any other closed vertex.
+		if (x.ClosedNonRecursive || x.ClosedRecursive) && disjunctionOf(x) == nil {
+			id = n.addResolver(v, x, id, false)
 		}
 		if _, ok := x.BaseValue.(*StructMarker); ok {
 			n.aStruct = true
@@ -552,8 +713,13 @@ func (n *nodeContext) insertValueConjunct(env *Environment, v Value, id CloseInf
 			return
 
 		case *StructMarker:
+			// A vertex converted to data stands for its regular fields alone.
+			// Any other vertex without conjuncts, such as a disjunct of a
+			// finalized disjunction (see the TODO in finalizeDisjunctions),
+			// stands for its evaluated value as a whole, declarations
+			// included.
 			for _, a := range x.Arcs {
-				if a.ArcType != ArcMember {
+				if a.ArcType > ArcOptional || (x.isData && a.ArcType != ArcMember) {
 					continue
 				}
 				// TODO(errors): report error when this is a regular field.
@@ -561,6 +727,21 @@ func (n *nodeContext) insertValueConjunct(env *Environment, v Value, id CloseInf
 				n.insertArc(a.Label, a.ArcType, c, id, true)
 			}
 			n.node.Structs = append(n.node.Structs, x.Structs...)
+			if x.isData {
+				return
+			}
+			if pcs := x.PatternConstraints; pcs != nil {
+				for _, pc := range pcs.Pairs {
+					for c := range pc.Constraint.LeafConjuncts() {
+						c.CloseInfo = id
+						n.insertPattern(pc.Pattern, c)
+					}
+				}
+			}
+			if x.HasEllipsis {
+				n.node.HasEllipsis = true
+				n.updateConjunctInfo(TopKind, id, cHasEllipsis)
+			}
 
 		case Value:
 			n.insertValueConjunct(env, v, id)
@@ -738,7 +919,107 @@ func (n *nodeContext) insertValueConjunct(env *Environment, v Value, id CloseInf
 	case *Vertex:
 	// handled above.
 
-	case Value: // *NullLit, *BoolLit, *NumLit, *StringLit, *BytesLit, *Builtin
+	case *FuncValue:
+		n.unshare()
+		n.updateCyclicStatus(id)
+
+		if y, ok := n.scalar.(*FuncValue); ok {
+			z, b := mergeFuncValues(ctx, y, x, n.scalarID, id.posInfo)
+			if b != nil {
+				if err, ok := b.Err.(*ValueError); ok {
+					err.AddPosition(y)
+					err.AddPosition(x)
+				}
+				n.addBottom(b)
+				break
+			}
+			if z == nil {
+				// Distinct partial applications conflict, like any scalars.
+				n.reportConflict(x, y, x.Kind(), y.Kind(), n.scalarID, id.posInfo)
+				break
+			}
+			n.scalar = z
+			break
+		}
+		if y, ok := n.scalar.(*Builtin); ok {
+			// A builtin satisfies a compatible function type.
+			z, b := mergeBuiltinFunc(ctx, y, x)
+			if b != nil {
+				if err, ok := b.Err.(*ValueError); ok {
+					err.AddPosition(y)
+					err.AddPosition(x)
+				}
+				n.addBottom(b)
+				break
+			}
+			if z == nil {
+				// A builtin conflicts with a proper function value.
+				n.reportConflict(x, y, x.Kind(), y.Kind(), n.scalarID, id.posInfo)
+				break
+			}
+			n.scalar = z
+			break
+		}
+		if y := n.scalar; y != nil {
+			// A function cannot unify with a scalar of any other kind.
+			n.reportConflict(x, y, x.Kind(), y.Kind(), n.scalarID, id.posInfo)
+			break
+		}
+		n.scalar = x
+		n.scalarID = id.posInfo
+		n.signal(scalarKnown)
+
+	case *Builtin:
+		n.unshare()
+		n.updateCyclicStatus(id)
+
+		switch y := n.scalar.(type) {
+		case *FuncValue:
+			// A builtin satisfies a compatible function type.
+			z, b := mergeBuiltinFunc(ctx, x, y)
+			if b != nil {
+				if err, ok := b.Err.(*ValueError); ok {
+					err.AddPosition(y)
+					err.AddPosition(x)
+				}
+				n.addBottom(b)
+				break
+			}
+			if z == nil {
+				// A builtin conflicts with a proper function value.
+				n.reportConflict(x, y, x.Kind(), y.Kind(), n.scalarID, id.posInfo)
+				break
+			}
+			n.scalar = z
+
+		case *Builtin:
+			z, b := mergeBuiltins(ctx, x, y)
+			if b != nil {
+				if err, ok := b.Err.(*ValueError); ok {
+					err.AddPosition(y)
+					err.AddPosition(x)
+				}
+				n.addBottom(b)
+				break
+			}
+			if z == nil {
+				// Two distinct builtins conflict, like any scalars.
+				n.reportConflict(x, y, x.Kind(), y.Kind(), n.scalarID, id.posInfo)
+				break
+			}
+			n.scalar = z
+
+		case nil:
+			n.scalar = x
+			n.scalarID = id.posInfo
+			n.signal(scalarKnown)
+
+		default:
+			// A builtin cannot unify with a scalar of any other kind.
+			n.reportConflict(x, y, x.Kind(), y.Kind(), n.scalarID, id.posInfo)
+		}
+
+	case Value: // *NullLit, *BoolLit, *NumLit, *StringLit, *BytesLit
 		n.unshare()
 		if p, isData := Pos(v).Priority(); isData {
 			id.Priority = p
@@ -779,6 +1060,83 @@ func (n *nodeContext) insertValueConjunct(env *Environment, v Value, id CloseInf
 			n.lowerBound = nil
 			n.upperBound = nil
 			n.insertValueConjunct(env, u, id)
+		}
+	}
+}
+
+// namesDefinition reports whether the reference x, with CloseInfo id, names
+// a definition, which closes the node holding the reference.
+func namesDefinition(x Expr, id CloseInfo) bool {
+	isDef, _ := IsDef(x)
+	return isDef || id.TopDef
+}
+
+// crossesDefinition reports whether arc lies within a definition that does
+// not enclose the vertex against which the reference x to it is resolved:
+// the reference then reaches the definition's value from outside, and must
+// close like a reference to the definition. A reference resolved within the
+// definition does not close, such as b in #D: {a: {}, b: a}, wherever it is
+// evaluated: the environment chain of x says where the enclosing structs are
+// evaluated, not where x is looked up. Only a definition vertex bounds the
+// definition; https://cuelang.org/issue/4501 is about a regular field
+// holding one without sharing its vertex.
+//
+// A reference resolved against an inline struct, such as in.foo in
+// (f & {in: #D}).out with f: {in: _, out: in.foo}, does not close either:
+// selecting from an inline struct opens definition closedness, as it did in
+// the previous evaluator. Only a value with no path from the root opens in
+// this way: a comprehension body is written at a path and closes like the
+// struct around it. See cue/testdata/eval/openinline.txtar,
+// cue/testdata/eval/issue3672.txtar and cue/testdata/cycle/issue4228.txtar;
+// https://cuelang.org/issue/4502 proposes to retire this opening.
+func crossesDefinition(ctx *OpContext, env *Environment, x Expr, arc *Vertex) bool {
+	def := enclosingDef(arc.Parent)
+	if def == nil {
+		return false
+	}
+	scope := refScope(ctx, env, x)
+	if scope == nil {
+		// An import reference: the package root is outside every
+		// definition of this package.
+		return true
+	}
+	for s := scope; s != nil; s = s.Parent {
+		if s == def {
+			return false
+		}
+	}
+	return !scope.IsDetached()
+}
+
+// refScope returns the vertex against which the reference x is resolved, as
+// the resolve methods choose it. A let bound to a reference takes the scope
+// of that reference, as [Vertex.DerefNonRooted] sees through such a let on
+// the arc side; any other let is a value of the struct declaring it. A
+// non-reference is scoped to the environment vertex, and an import
+// reference to nil.
+//
+// TODO: merge with [IsDef], which walks the same selector spine right before
+// this is called, and ultimately with resolve, as the TODO on IsDef says.
+func refScope(ctx *OpContext, env *Environment, x Expr) *Vertex {
+	for {
+		switch r := x.(type) {
+		case *SelectorExpr:
+			x = r.X
+		case *IndexExpr:
+			x = r.X
+		case *LetReference:
+			env = env.up(ctx, r.UpCount)
+			x = r.X
+		case *FieldReference:
+			return env.up(ctx, r.UpCount).DerefVertex(ctx)
+		case *DynamicReference:
+			return env.up(ctx, r.UpCount).DerefVertex(ctx)
+		case *ValueReference:
+			return env.up(ctx, max(r.UpCount-1, 0)).DerefVertex(ctx)
+		case *ImportReference:
+			return nil
+		default:
+			return env.DerefVertex(ctx)
 		}
 	}
 }

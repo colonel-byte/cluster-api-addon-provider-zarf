@@ -15,6 +15,10 @@
 // Package cuecontext creates [cue.Context] values,
 // which are needed for creating [cue.Value] values
 // and using the core API in the [cue] package.
+//
+// The cuenotemplate build tag leaves out the text/template builtin package,
+// whose method lookup by name stops the linker from discarding unused methods.
+// The tag is temporary; see https://go.dev/issue/82062.
 package cuecontext
 
 import (
@@ -25,7 +29,6 @@ import (
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/runtime"
 	"cuelang.org/go/internal/cuedebug"
-	"cuelang.org/go/internal/envflag"
 
 	_ "cuelang.org/go/pkg"
 )
@@ -107,8 +110,8 @@ func EvaluatorVersion(v EvalVersion) Option {
 // the context with the relevant debug options. It panics for unknown or
 // malformed options.
 func CUE_DEBUG(s string) Option {
-	var c cuedebug.Config
-	if err := envflag.Parse(&c, s); err != nil {
+	c, err := cuedebug.Parse(s)
+	if err != nil {
 		panic(fmt.Errorf("cuecontext.CUE_DEBUG: %v", err))
 	}
 

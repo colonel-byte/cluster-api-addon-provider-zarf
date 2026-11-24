@@ -18,6 +18,7 @@ import (
 	"cmp"
 	"fmt"
 	"math/bits"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -144,6 +145,8 @@ func (t SelectorType) IsDefinition() bool {
 
 // A Selector is a component of a path.
 type Selector struct {
+	// TODO: the zero Selector is undefined and most methods panic on it,
+	// much like the zero [Value].
 	sel selector
 }
 
@@ -237,11 +240,15 @@ func (sel Selector) Compare(other Selector) int {
 	return compareSel(sel.sel, other.sel)
 }
 
-// PkgPath reports the package path associated with a hidden label or "" if
-// this is not a hidden label.
+// PkgPath reports the package scope associated with a hidden label, in the form
+// described by [Hid], or "" if this is not a hidden label.
 func (sel Selector) PkgPath() string {
-	s, _ := sel.sel.(scopedSelector)
-	return s.pkg
+	s := sel.sel
+	if c, ok := s.(constraintSelector); ok {
+		s = c.selector
+	}
+	h, _ := s.(scopedSelector)
+	return h.pkg
 }
 
 // Index returns the index of the selector.
@@ -258,11 +265,6 @@ func (sel Selector) Index() int {
 }
 
 var (
-	// AnyDefinition is a [Selector] which can be used to ask for any definition.
-	//
-	// In paths it is used to select constraints that apply to all elements.
-	// AnyDefinition = anyDefinition
-	anyDefinition = Selector{sel: anySelector(adt.AnyDefinition)}
 	// AnyIndex is a [Selector] which can be used to ask for any index.
 	//
 	// In paths it is used to select constraints that apply to all elements.
@@ -310,6 +312,8 @@ type Path struct {
 }
 
 // MakePath creates a Path from a sequence of selectors.
+// The path retains the selectors slice without copying it,
+// so the caller must not modify the slice afterwards.
 func MakePath(selectors ...Selector) Path {
 	return Path{path: selectors}
 }
@@ -335,9 +339,13 @@ func (p Path) Compare(other Path) int {
 	return cmp.Compare(len(p.path), len(other.path))
 }
 
-// Append adds sel as a path component to p.
+// Append returns a path made of the selectors of p followed by sel.
+// Unlike the builtin append, it does not modify p, and the result does not
+// share storage with p, so the same path can be appended to any number of times.
+// Each call copies the selectors, so to build a long path one selector at a time,
+// collect the selectors in a slice and use [MakePath] instead.
 func (p Path) Append(sel ...Selector) Path {
-	return Path{path: append(p.path, sel...)}
+	return Path{path: slices.Concat(p.path, sel)}
 }
 
 // ParsePath parses a CUE expression into a Path. Any error resulting from
@@ -368,8 +376,10 @@ func ParsePath(s string) Path {
 }
 
 // Selectors reports the individual selectors of a path.
+// The result shares storage with p and must not be modified;
+// appending to it is safe, as it does not write into p.
 func (p Path) Selectors() []Selector {
-	return p.path
+	return slices.Clip(p.path)
 }
 
 // String reports the CUE representation of p.
@@ -454,7 +464,7 @@ func appendSelector(a []Selector, sel Selector) []Selector {
 	if len(a) == 1 {
 		if p, ok := a[0].sel.(pathError); ok {
 			if isErr {
-				p.Error = errors.Append(p.Error, err.Error)
+				a[0] = Selector{pathError{errors.Append(p.Error, err.Error)}}
 			}
 			return a
 		}
@@ -538,8 +548,20 @@ func (p Path) Err() error {
 }
 
 // Hid returns a selector for a hidden field. It panics if pkg is empty.
-// Hidden fields are scoped by package, and pkg indicates for which package
-// the hidden field must apply. For anonymous packages, it must be set to "_".
+//
+// Hidden fields are scoped by package, and pkg indicates for which package the
+// hidden field must apply. It must be the identifier of that package as
+// reported by [cuelang.org/go/cue/build.Instance.ID], which documents the forms
+// it takes. Note that it is not in general an import path; for source compiled
+// outside of any module declaring "package b" it is ":b".
+//
+// For a value which represents a package, the identifier is available via
+// [Value.BuildInstance], and it also scopes the hidden fields nested within
+// that value:
+//
+//	v.LookupPath(MakePath(Hid("_a", v.BuildInstance().ID())))
+//
+// The [ImportPath] build option sets the identifier directly.
 func Hid(name, pkg string) Selector {
 	if !ast.IsValidIdent(name) {
 		panic(fmt.Sprintf("invalid identifier %s", name))
@@ -711,7 +733,10 @@ func (s constraintSelector) constraintType() SelectorType {
 
 func wrapConstraint(s Selector, t SelectorType) Selector {
 	sel := s.sel
-	if c, ok := sel.(constraintSelector); ok {
+	switch c := sel.(type) {
+	case pathError:
+		return s
+	case constraintSelector:
 		if c.constraint == t {
 			return s
 		}
@@ -772,7 +797,7 @@ func valueToSel(v adt.Value) Selector {
 	case *adt.Num:
 		i, err := x.X.Int64()
 		if err != nil {
-			return Selector{&pathError{errors.Promote(err, "invalid number")}}
+			return Selector{pathError{errors.Promote(err, "invalid number")}}
 		}
 		return Index(i)
 	case *adt.String:
