@@ -19,8 +19,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
+
+	"github.com/cayleygraph/quad"
+	"github.com/cayleygraph/quad/nquads"
 )
 
 // NQuadRDFSerializer parses and serializes N-Quads.
@@ -39,8 +41,8 @@ func (s *NQuadRDFSerializer) SerializeTo(w io.Writer, dataset *RDFDataset) error
 			graphName = ""
 		}
 		for _, triple := range triples {
-			quad := toNQuad(triple, graphName)
-			if _, err := fmt.Fprint(w, quad); err != nil {
+			q := toNQuad(triple, graphName)
+			if _, err := fmt.Fprint(w, q); err != nil {
 				return NewJsonLdError(IOError, err)
 			}
 		}
@@ -63,58 +65,49 @@ func toNQuad(triple *Quad, graphName string) string {
 	p := triple.Predicate
 	o := triple.Object
 
-	quad := ""
+	q := ""
 
 	// subject is an IRI or bnode
 	if IsIRI(s) {
-		quad += "<" + escape(s.GetValue()) + ">"
+		q += "<" + escape(s.GetValue()) + ">"
 	} else {
-		quad += s.GetValue()
+		q += s.GetValue()
 	}
 
 	if IsIRI(p) {
-		quad += " <" + escape(p.GetValue()) + "> "
+		q += " <" + escape(p.GetValue()) + "> "
 	} else {
-		quad += " " + escape(p.GetValue()) + " "
+		q += " " + escape(p.GetValue()) + " "
 	}
 
 	// object is IRI, bnode or literal
 	if IsIRI(o) {
-		quad += "<" + escape(o.GetValue()) + ">"
+		q += "<" + escape(o.GetValue()) + ">"
 	} else if IsBlankNode(o) {
-		quad += o.GetValue()
+		q += o.GetValue()
 	} else {
 		literal := o.(Literal)
 		escaped := escape(literal.GetValue())
-		quad += "\"" + escaped + "\""
+		q += "\"" + escaped + "\""
 		if literal.Datatype == RDFLangString {
-			quad += "@" + literal.Language
+			q += "@" + literal.Language
 		} else if literal.Datatype != XSDString {
-			quad += "^^<" + escape(literal.Datatype) + ">"
+			q += "^^<" + escape(literal.Datatype) + ">"
 		}
 	}
 
 	// graph
 	if graphName != "" {
 		if strings.Index(graphName, "_:") != 0 {
-			quad += " <" + escape(graphName) + ">"
+			q += " <" + escape(graphName) + ">"
 		} else {
-			quad += " " + graphName
+			q += " " + graphName
 		}
 	}
 
-	quad += " .\n"
+	q += " .\n"
 
-	return quad
-}
-
-func unescape(str string) string {
-	str = strings.ReplaceAll(str, "\\\\", "\\")
-	str = strings.ReplaceAll(str, "\\\"", "\"")
-	str = strings.ReplaceAll(str, "\\n", "\n")
-	str = strings.ReplaceAll(str, "\\r", "\r")
-	str = strings.ReplaceAll(str, "\\t", "\t")
-	return str
+	return q
 }
 
 func escape(str string) string {
@@ -125,66 +118,6 @@ func escape(str string) string {
 	str = strings.ReplaceAll(str, "\t", "\\t")
 	return str
 }
-
-const (
-	wso = "[ \\t]*"
-	iri = "(?:<([^:]+:[^>]*)>)"
-
-	// https://www.w3.org/TR/turtle/#grammar-production-BLANK_NODE_LABEL
-
-	pnCharsBase = "A-Z" + "a-z" +
-		"\u00C0-\u00D6" +
-		"\u00D8-\u00F6" +
-		"\u00F8-\u02FF" +
-		"\u0370-\u037D" +
-		"\u037F-\u1FFF" +
-		"\u200C-\u200D" +
-		"\u2070-\u218F" +
-		"\u2C00-\u2FEF" +
-		"\u3001-\uD7FF" +
-		"\uF900-\uFDCF" +
-		"\uFDF0-\uFFFD"
-	// TODO:
-	//"\u10000-\uEFFFF"
-
-	pnCharsU = pnCharsBase + "_"
-
-	pnChars = pnCharsU +
-		"0-9" +
-		"-" +
-		"\u00B7" +
-		"\u0300-\u036F" +
-		"\u203F-\u2040"
-
-	blankNodeLabel = "(_:" +
-		"(?:[" + pnCharsU + "0-9])" +
-		"(?:(?:[" + pnChars + ".])*(?:[" + pnChars + "]))?" +
-		")"
-
-	//   '(_:' +
-	//     '(?:[' + PN_CHARS_U + '0-9])' +
-	//     '(?:(?:[' + PN_CHARS + '.])*(?:[' + PN_CHARS + ']))?' +
-	//   ')';
-
-	bnode = blankNodeLabel
-
-	plain    = "\"([^\"\\\\]*(?:\\\\.[^\"\\\\]*)*)\""
-	datatype = "(?:\\^\\^" + iri + ")"
-	language = "(?:@([a-z]+(?:-[a-zA-Z0-9]+)*))"
-	literal  = "(?:" + plain + "(?:" + datatype + "|" + language + ")?)"
-	ws       = "[ \\t]+"
-
-	subject  = "(?:" + iri + "|" + bnode + ")" + ws
-	property = iri + ws
-	object   = "(?:" + iri + "|" + bnode + "|" + literal + ")" + wso
-	graph    = "(?:\\.|(?:(?:" + iri + "|" + bnode + ")" + wso + "\\.))"
-)
-
-var regexEmpty = regexp.MustCompile("^" + wso + "$")
-
-// full quad regex
-
-var regexQuad = regexp.MustCompile("^" + wso + subject + property + object + graph + wso + "$") //nolint:gocritic
 
 type lineScanner interface {
 	Bytes() []byte
@@ -239,6 +172,7 @@ func ParseNQuadsFrom(o interface{}) (*RDFDataset, error) {
 
 	// maintain a set of triples for each graph to check for duplicates
 	triplesByGraph := make(map[string]map[Quad]struct{})
+	dataset.parsedWithoutDuplicates = true // the following code ensures that no duplicate quads are added
 
 	scanner, err := newScannerFor(o)
 	if err != nil {
@@ -252,53 +186,63 @@ func ParseNQuadsFrom(o interface{}) (*RDFDataset, error) {
 		lineNumber++
 
 		// skip empty lines
-		if regexEmpty.Match(line) {
+		if isEmpty(line) {
 			continue
 		}
 
 		// parse quad
-		if !regexQuad.Match(line) {
-			return nil, NewJsonLdError(SyntaxError, fmt.Errorf("error while parsing N-Quads; invalid quad. line: %d", lineNumber))
+		q, err := nquads.ParseRaw(string(line))
+		if err != nil {
+			return nil, NewJsonLdError(SyntaxError, fmt.Errorf("error while parsing N-Quads; invalid quad. line: %d. reason: %w", lineNumber, err))
 		}
-		match := regexQuad.FindStringSubmatch(string(line))
 
 		// get subject
 		var subject Node
-		if match[1] != "" {
-			subject = NewIRI(unescape(match[1]))
-		} else {
-			subject = NewBlankNode(unescape(match[2]))
+		switch v := q.Subject.(type) {
+		case quad.IRI:
+			subject = NewIRI(string(v))
+		case quad.BNode:
+			subject = NewBlankNode(v.String())
+		default:
+			return nil, fmt.Errorf("invalid subject: %s", q.Subject.String())
 		}
 
 		// get predicate
-		predicate := NewIRI(unescape(match[3]))
+		var predicate Node
+		if iri, ok := q.Predicate.(quad.IRI); ok {
+			predicate = NewIRI(string(iri))
+		} else {
+			return nil, fmt.Errorf("invalid predicate: %s", q.Predicate.String())
+		}
 
 		// get object
 		var object Node
-		if match[4] != "" {
-			object = NewIRI(unescape(match[4]))
-		} else if match[5] != "" {
-			object = NewBlankNode(unescape(match[5]))
-		} else {
-			language := unescape(match[8])
-			var datatype string
-			if match[7] != "" {
-				datatype = unescape(match[7])
-			} else if match[8] != "" {
-				datatype = RDFLangString
-			} else {
-				datatype = XSDString
-			}
-			unescaped := unescape(match[6])
-			object = NewLiteral(unescaped, datatype, language)
+		switch obj := q.Object.(type) {
+		case quad.IRI:
+			object = NewIRI(string(obj))
+		case quad.BNode:
+			object = NewBlankNode(obj.String())
+		case quad.TypedString:
+			object = NewLiteral(string(obj.Value), string(obj.Type), "")
+		case quad.LangString:
+			object = NewLiteral(string(obj.Value), RDFLangString, obj.Lang)
+		case quad.String:
+			object = NewLiteral(string(obj), XSDString, "")
+		default:
+			return nil, fmt.Errorf("invalid object: %s", q.Object.String())
 		}
 
 		// get graph name ('@default' is used for the default graph)
 		name := "@default"
-		if match[9] != "" {
-			name = unescape(match[9])
-		} else if match[10] != "" {
-			name = unescape(match[10])
+		if label := q.Label; label != nil {
+			switch label := label.(type) {
+			case quad.IRI:
+				name = string(label)
+			case quad.BNode:
+				name = label.String()
+			default:
+				return nil, fmt.Errorf("invalid label: %s", q.Label.String())
+			}
 		}
 
 		triple := NewQuad(subject, predicate, object, name)
@@ -329,4 +273,13 @@ func ParseNQuadsFrom(o interface{}) (*RDFDataset, error) {
 // ParseNQuads parses RDF in the form of N-Quads.
 func ParseNQuads(input string) (*RDFDataset, error) {
 	return ParseNQuadsFrom(input)
+}
+
+func isEmpty(line []byte) bool {
+	for _, b := range line {
+		if b != ' ' && b != '\t' {
+			return false
+		}
+	}
+	return true
 }
