@@ -999,8 +999,8 @@ github.com/containerd/cgroups/v3/cgroup1/stats
 # github.com/containerd/console v1.0.5
 ## explicit; go 1.13
 github.com/containerd/console
-# github.com/containerd/containerd/api v1.11.1
-## explicit; go 1.24.0
+# github.com/containerd/containerd/api v1.12.0
+## explicit; go 1.25.0
 github.com/containerd/containerd/api/runtime/sandbox/v1
 github.com/containerd/containerd/api/services/containers/v1
 github.com/containerd/containerd/api/services/content/v1
@@ -1114,7 +1114,7 @@ github.com/containerd/plugin
 # github.com/containerd/ttrpc v1.2.10
 ## explicit; go 1.25.0
 github.com/containerd/ttrpc
-# github.com/containerd/typeurl/v2 v2.2.3
+# github.com/containerd/typeurl/v2 v2.3.0
 ## explicit; go 1.21
 github.com/containerd/typeurl/v2
 # github.com/coreos/go-oidc/v3 v3.21.0
@@ -1572,9 +1572,6 @@ github.com/goccy/go-yaml/token
 # github.com/gofrs/flock v0.13.2
 ## explicit; go 1.26.0
 github.com/gofrs/flock
-# github.com/gogo/protobuf v1.3.2
-## explicit; go 1.15
-github.com/gogo/protobuf/proto
 # github.com/gohugoio/hashstructure v0.6.0
 ## explicit; go 1.20
 github.com/gohugoio/hashstructure
