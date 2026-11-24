@@ -1202,7 +1202,7 @@ github.com/dsnet/compress/internal/prefix
 # github.com/dustin/go-humanize v1.0.1
 ## explicit; go 1.16
 github.com/dustin/go-humanize
-# github.com/dylibso/observe-sdk/go v0.0.0-20240819160327-2d926c5d788a
+# github.com/dylibso/observe-sdk/go v0.0.0-20240828172851-9145d8ad07e1
 ## explicit; go 1.21
 github.com/dylibso/observe-sdk/go
 # github.com/elliotchance/phpserialize v1.4.0
