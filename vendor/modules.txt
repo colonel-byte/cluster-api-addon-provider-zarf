@@ -462,7 +462,7 @@ github.com/alibabacloud-go/endpoint-util/service
 # github.com/alibabacloud-go/openapi-util v0.1.2
 ## explicit; go 1.14
 github.com/alibabacloud-go/openapi-util/service
-# github.com/alibabacloud-go/tea v1.5.3
+# github.com/alibabacloud-go/tea v1.5.4
 ## explicit; go 1.14
 github.com/alibabacloud-go/tea/dara
 github.com/alibabacloud-go/tea/tea
