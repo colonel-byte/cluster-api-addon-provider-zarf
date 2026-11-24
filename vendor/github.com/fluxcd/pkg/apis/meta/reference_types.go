@@ -126,6 +126,10 @@ const (
 	KubeConfigKeyCACert = "ca.crt"
 	// KubeConfigKeyAudiences is the key in the ConfigMap that contains the audiences
 	// for the Kubernetes ServiceAccount token.
+	//
+	// This API is now considered legacy as per RFC-0014, which introduces the ServiceAccount
+	// annotation replacement. Downstream consumers should prevent forward compatibility with
+	// new features to encourage migration to the annotation-based approach.
 	KubeConfigKeyAudiences = "audiences"
 	// KubeConfigKeyServiceAccountName is the key in the ConfigMap that contains the
 	// name of the Kubernetes ServiceAccount in the same namespace that should be used
@@ -135,8 +139,7 @@ const (
 
 // KubeConfigReference contains enough information build a kubeconfig
 // in memory for connecting to remote Kubernetes clusters.
-// +kubebuilder:validation:XValidation:rule="has(self.configMapRef) || has(self.secretRef)", message="exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.configMapRef) || !has(self.secretRef)", message="exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified"
+// +kubebuilder:validation:XValidation:rule="has(self.configMapRef) != has(self.secretRef)", message="exactly one of spec.kubeConfig.configMapRef or spec.kubeConfig.secretRef must be specified"
 type KubeConfigReference struct {
 	// ConfigMapRef holds an optional name of a ConfigMap that contains
 	// the following keys:
@@ -156,15 +159,15 @@ type KubeConfigReference struct {
 	// - `ca.crt`: the optional PEM-encoded CA certificate for the
 	//    Kubernetes API server. If not set, the controller will use the
 	//    CA certificate from the cluster resource.
-	// - `audiences`: the optional audiences as a list of
-	//    line-break-separated strings for the Kubernetes ServiceAccount
-	//    token. Defaults to the `address` for the `generic` provider, or
-	//    to specific values for the other providers depending on the
-	//    provider.
 	// -  `serviceAccountName`: the optional name of the Kubernetes
 	//    ServiceAccount in the same namespace that should be used
 	//    for authentication. If not specified, the controller
 	//    ServiceAccount will be used.
+	// - `audiences`: the optional audiences as a list of string separated by
+	//    commas and/or whitespaces/newlines for the Kubernetes ServiceAccount
+	//    token. Defaults to the `address` for the `generic` provider, or
+	//    to specific values for the other providers depending on the
+	//    provider.
 	//
 	// Mutually exclusive with SecretRef.
 	//
