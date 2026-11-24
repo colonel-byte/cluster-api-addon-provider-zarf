@@ -404,7 +404,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.74.0 // indirect
-	github.com/prometheus/procfs v0.22.0 // indirect
+	github.com/prometheus/procfs v0.23.0 // indirect
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20261116065023-f6f26894e769 // indirect
 	github.com/pterm/pterm v0.12.84 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
