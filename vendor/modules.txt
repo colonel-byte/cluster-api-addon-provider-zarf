@@ -511,7 +511,7 @@ github.com/anchore/go-rpmdb/pkg/bdb
 github.com/anchore/go-rpmdb/pkg/db
 github.com/anchore/go-rpmdb/pkg/ndb
 github.com/anchore/go-rpmdb/pkg/sqlite3
-# github.com/anchore/go-struct-converter v0.2.0-rc2
+# github.com/anchore/go-struct-converter v0.2.1
 ## explicit; go 1.23.0
 github.com/anchore/go-struct-converter
 # github.com/anchore/go-sync v0.1.2
