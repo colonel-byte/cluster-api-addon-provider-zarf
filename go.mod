@@ -76,16 +76,16 @@ require (
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/agext/levenshtein v1.2.3 // indirect
 	github.com/agnivade/levenshtein v1.2.2 // indirect
-	github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4 // indirect
-	github.com/alibabacloud-go/cr-20160607 v1.0.1 // indirect
-	github.com/alibabacloud-go/cr-20181201 v1.0.10 // indirect
-	github.com/alibabacloud-go/darabonba-openapi v0.2.1 // indirect
+	github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5 // indirect
+	github.com/alibabacloud-go/cr-20160607/v2 v2.0.0 // indirect
+	github.com/alibabacloud-go/cr-20181201/v3 v3.2.3 // indirect
+	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.4 // indirect
 	github.com/alibabacloud-go/debug v1.0.1 // indirect
 	github.com/alibabacloud-go/endpoint-util v1.1.1 // indirect
 	github.com/alibabacloud-go/openapi-util v0.1.0 // indirect
 	github.com/alibabacloud-go/tea v1.5.3 // indirect
 	github.com/alibabacloud-go/tea-utils v1.4.5 // indirect
-	github.com/alibabacloud-go/tea-xml v1.1.3 // indirect
+	github.com/alibabacloud-go/tea-utils/v2 v2.0.9 // indirect
 	github.com/aliyun/credentials-go v1.4.14 // indirect
 	github.com/anchore/clio v0.1.2 // indirect
 	github.com/anchore/fangs v0.1.1 // indirect
@@ -363,7 +363,8 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00 // indirect
 	github.com/morikuni/aec v1.1.0 // indirect
-	github.com/mozillazg/docker-credential-acr-helper v0.4.0 // indirect
+	github.com/mozillazg/docker-credential-acr-helper v0.4.2 // indirect
+	github.com/mozillazg/docker-credential-acr-helper/pkg/acr v0.2.3 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/natefinch/atomic v1.0.1 // indirect
@@ -388,6 +389,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/phsym/console-slog v0.3.1 // indirect
+	github.com/phuslu/lru v1.0.18 // indirect
 	github.com/pierrec/lz4/v4 v4.1.34 // indirect
 	github.com/piprate/json-gold v0.7.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
