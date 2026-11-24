@@ -2658,8 +2658,8 @@ github.com/sigstore/sigstore/pkg/signature/kms/gcp
 # github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.11.4
 ## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/hashivault
-# github.com/sigstore/timestamp-authority/v2 v2.2.0
-## explicit; go 1.27
+# github.com/sigstore/timestamp-authority/v2 v2.2.2
+## explicit; go 1.27.0
 github.com/sigstore/timestamp-authority/v2/pkg/verification
 github.com/sigstore/timestamp-authority/v2/pkg/x509
 # github.com/sirupsen/logrus v1.10.2
