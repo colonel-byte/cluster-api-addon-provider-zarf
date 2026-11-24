@@ -210,7 +210,7 @@ require (
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/fgprof v0.9.5 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
-	github.com/fluxcd/cli-utils v1.2.2 // indirect
+	github.com/fluxcd/cli-utils v1.4.0 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.10.0 // indirect
 	github.com/fluxcd/pkg/apis/meta v1.31.0 // indirect
 	github.com/fluxcd/source-controller/api v1.9.6 // indirect
@@ -402,8 +402,8 @@ require (
 	github.com/pquerna/cachecontrol v0.1.0 // indirect
 	github.com/prometheus/client_golang v1.24.1 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
-	github.com/prometheus/common v0.70.1 // indirect
-	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/prometheus/common v0.71.0 // indirect
+	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20261116065023-f6f26894e769 // indirect
 	github.com/pterm/pterm v0.12.84 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
@@ -514,7 +514,7 @@ require (
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.53.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
-	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
+	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
 	gonum.org/v1/gonum v0.17.0 // indirect
 	google.golang.org/api v0.312.0 // indirect
 	google.golang.org/genproto v0.0.0-20261123191846-1e707ab9fbc2 // indirect
@@ -536,7 +536,7 @@ require (
 	k8s.io/component-helpers v0.37.2 // indirect
 	k8s.io/gengo/v2 v2.0.0-20260408192533-25e2208e0dc3 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
-	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
+	k8s.io/kube-openapi v0.0.0-20260821135717-be32def86098 // indirect
 	k8s.io/kubectl v0.37.2 // indirect
 	k8s.io/streaming v0.37.2 // indirect
 	sigs.k8s.io/cli-utils v0.37.2 // indirect
