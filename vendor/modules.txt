@@ -2934,7 +2934,7 @@ github.com/zarf-dev/zarf/src/pkg/variables
 github.com/zarf-dev/zarf/src/pkg/wait
 github.com/zarf-dev/zarf/src/pkg/zoci
 github.com/zarf-dev/zarf/src/types
-# github.com/zclconf/go-cty v1.19.0
+# github.com/zclconf/go-cty v1.20.0
 ## explicit; go 1.25
 github.com/zclconf/go-cty/cty
 github.com/zclconf/go-cty/cty/convert
