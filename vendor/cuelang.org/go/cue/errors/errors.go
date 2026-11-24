@@ -29,7 +29,6 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal/core/format"
 )
 
 // New is a convenience wrapper for [errors.New] in the core library.
@@ -111,7 +110,7 @@ type Error interface {
 
 	// InputPositions reports positions that contributed to an error, including
 	// the expressions resulting in the conflict, as well as values that were
-	// the input to this expression.
+	// the input to this expression. The result must not be modified.
 	InputPositions() []token.Pos
 
 	// Error reports the error message without position information.
@@ -129,8 +128,8 @@ type Error interface {
 // Positions returns the printable positions returned by an error,
 // sorted by relevance when possible and with duplicates removed.
 func Positions(err error) []token.Pos {
-	e := Error(nil)
-	if !errors.As(err, &e) {
+	e, ok := errors.AsType[Error](err)
+	if !ok {
 		return nil
 	}
 
@@ -171,7 +170,7 @@ func comparePosWithNoPosFirst(a, b token.Pos) int {
 
 // Path returns the path of an Error if err is of that type.
 func Path(err error) []string {
-	if e := Error(nil); errors.As(err, &e) {
+	if e, ok := errors.AsType[Error](err); ok {
 		return e.Path()
 	}
 	return nil
@@ -250,7 +249,8 @@ func (e *wrapped) Path() []string {
 }
 
 func (e *wrapped) InputPositions() []token.Pos {
-	return append(e.main.InputPositions(), Positions(e.wrap)...)
+	// Do not append to the parent's positions, which other errors share.
+	return slices.Concat(e.main.InputPositions(), Positions(e.wrap))
 }
 
 func (e *wrapped) Position() token.Pos {
@@ -311,7 +311,7 @@ func Append(a, b Error) Error {
 // Errors reports the individual errors associated with an error, which is
 // the error itself if there is only one or, if the underlying type is list,
 // its individual elements. If the given error is not an Error, it will be
-// promoted to one.
+// promoted to one. The result must not be modified.
 func Errors(err error) []Error {
 	if err == nil {
 		return nil
@@ -322,7 +322,7 @@ func Errors(err error) []Error {
 	case As(err, &listErr):
 		// TODO if err itself wraps a list, then the wrapping
 		// error information will be lost here.
-		return listErr
+		return slices.Clip(listErr)
 	case As(err, &errorErr):
 		// TODO similar error loss here.
 		return []Error{errorErr}
@@ -355,22 +355,14 @@ func appendToList(a list, err Error) list {
 // The zero value for an list is an empty list ready to use.
 type list []Error
 
-func (p list) Is(target error) bool {
-	for _, e := range p {
-		if errors.Is(e, target) {
-			return true
-		}
+// Unwrap returns the errors in the list, so that [errors.Is] and
+// [errors.As] look at each of them.
+func (p list) Unwrap() []error {
+	errs := make([]error, len(p))
+	for i, e := range p {
+		errs[i] = e
 	}
-	return false
-}
-
-func (p list) As(target interface{}) bool {
-	for _, e := range p {
-		if errors.As(e, target) {
-			return true
-		}
-	}
-	return false
+	return errs
 }
 
 // Sanitize sorts multiple errors and removes duplicates on a best effort basis.
@@ -542,7 +534,10 @@ type Config struct {
 	OmitPath bool
 
 	// Printer is used internally to detect printing cycles.
-	Printer format.Printer
+	// ReplaceArg may replace an argument to an error message.
+	Printer interface {
+		ReplaceArg(x any) (r any, wasReplaced bool)
+	}
 }
 
 var zeroConfig = &Config{}

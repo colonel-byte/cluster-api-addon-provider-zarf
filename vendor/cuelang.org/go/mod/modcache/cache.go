@@ -53,7 +53,7 @@ func (c *Cache) readDiskCache(mv module.Version, suffix string) (file string, da
 
 // writeDiskCache is the generic "write to a cache file" implementation.
 // The file must have been returned by a previous call to readDiskCache.
-func (c *Cache) writeDiskCache(ctx context.Context, file string, data []byte) error {
+func (c *Cache) writeDiskCache(ctx context.Context, file string, data []byte) (err error) {
 	if file == "" {
 		return nil
 	}
@@ -78,16 +78,14 @@ func (c *Cache) writeDiskCache(ctx context.Context, file string, data []byte) er
 		}
 	}()
 
-	if _, err := f.Write(data); err != nil {
+	// Assign to the named result, which the deferred cleanup inspects.
+	if _, err = f.Write(data); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		return err
 	}
-	if err := robustio.Rename(f.Name(), file); err != nil {
-		return err
-	}
-	return nil
+	return robustio.Rename(f.Name(), file)
 }
 
 // downloadDir returns the directory for storing.
@@ -120,11 +118,16 @@ func (c *Cache) downloadDir(m module.Version) (string, error) {
 
 	// Check if a .partial file exists. This is created at the beginning of
 	// a download and removed after the zip is extracted.
+	//
+	// Stat via robustio: on Windows, statting a just-removed .partial file
+	// can transiently fail with ERROR_ACCESS_DENIED while an antivirus
+	// scanner holds the delete-pending file open.
+	// See https://cuelang.org/issue/3413.
 	partialPath, err := c.cachePath(m, "partial")
 	if err != nil {
 		return dir, err
 	}
-	if _, err := os.Stat(partialPath); err == nil {
+	if _, err := robustio.Stat(partialPath); err == nil {
 		return dir, &downloadDirPartialError{dir, errors.New("not completely extracted")}
 	} else if !os.IsNotExist(err) {
 		return dir, err

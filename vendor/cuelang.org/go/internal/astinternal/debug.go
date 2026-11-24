@@ -28,6 +28,9 @@ import (
 // AppendDebug writes a multi-line Go-like representation of a syntax tree node,
 // including node position information and any relevant Go types.
 func AppendDebug(dst []byte, node ast.Node, config DebugConfig) []byte {
+	if config.Filename == nil {
+		config.Filename = func(name string) string { return name }
+	}
 	d := &debugPrinter{
 		cfg: config,
 		buf: dst,
@@ -64,6 +67,10 @@ type DebugConfig struct {
 	// AllPositions causes all [ast.Node] implementions to emit their start
 	// and end positions.
 	AllPositions bool
+
+	// Filename, if set, rewrites [ast.File.Filename]
+	// and the filenames in positions before they are printed.
+	Filename func(string) string
 }
 
 type debugPrinter struct {
@@ -99,7 +106,7 @@ func (d *debugPrinter) value0(v reflect.Value, impliedType reflect.Type) {
 		}
 		if v.IsNil() {
 			if !d.cfg.OmitEmpty {
-				d.printf("nil")
+				d.buf = append(d.buf, "nil"...)
 			}
 			return
 		}
@@ -123,23 +130,32 @@ func (d *debugPrinter) value0(v reflect.Value, impliedType reflect.Type) {
 		return
 	}
 
+	// The cases below append directly rather than use fmt,
+	// and use TypeAssert to avoid the copies that Interface makes,
+	// as this printer is used on large syntax trees.
 	t := v.Type()
-	switch v := v.Interface().(type) {
 	// Simple types which can stringify themselves.
-	case token.Pos:
-		d.printf("%s(%q", t, v)
+	if p, ok := reflect.TypeAssert[token.Pos](v); ok {
+		d.buf = append(d.buf, t.String()...)
+		d.buf = append(d.buf, '(')
+		d.buf = strconv.AppendQuote(d.buf, d.position(p).String())
 		// Show relative positions too, if there are any, as they affect formatting.
-		if v.HasRelPos() {
-			d.printf(", %v", v.RelPos())
+		if p.HasRelPos() {
+			d.buf = append(d.buf, ", "...)
+			d.buf = append(d.buf, p.RelPos().String()...)
 		}
-		d.printf(")")
+		d.buf = append(d.buf, ')')
 		return
-	case token.Token:
-		if d.cfg.OmitEmpty && v == token.ILLEGAL {
+	}
+	if tok, ok := reflect.TypeAssert[token.Token](v); ok {
+		if d.cfg.OmitEmpty && tok == token.ILLEGAL {
 			// ILLEGAL is the zero value, meaning "no token".
 			return
 		}
-		d.printf("%s(%q)", t, v)
+		d.buf = append(d.buf, t.String()...)
+		d.buf = append(d.buf, '(')
+		d.buf = strconv.AppendQuote(d.buf, tok.String())
+		d.buf = append(d.buf, ')')
 		return
 	}
 
@@ -148,16 +164,19 @@ func (d *debugPrinter) value0(v reflect.Value, impliedType reflect.Type) {
 		// We assume all other kinds are basic in practice, like string or bool.
 		if t.PkgPath() != "" {
 			// Mention defined and non-predeclared types, for clarity.
-			d.printf("%s(%#v)", t, v)
+			d.buf = append(d.buf, t.String()...)
+			d.buf = append(d.buf, '(')
+			d.basicValue(v)
+			d.buf = append(d.buf, ')')
 		} else {
-			d.printf("%#v", v)
+			d.basicValue(v)
 		}
 
 	case reflect.Slice, reflect.Struct:
 		valueStart := d.pos()
 		// We print the concrete type when it differs from an implied type.
 		if concreteType != impliedType {
-			d.printf("%s", concreteType)
+			d.buf = append(d.buf, concreteType.String()...)
 		}
 		if d.cfg.IncludePointers {
 			if ptrVal != 0 {
@@ -167,9 +186,9 @@ func (d *debugPrinter) value0(v reflect.Value, impliedType reflect.Type) {
 			d.printf("@%s", refName)
 		}
 		if d.cfg.AllPositions && startPos.IsValid() {
-			d.printf("[%v]", positionRange(startPos, endPos))
+			d.printf("[%v]", d.positionRange(startPos, endPos))
 		}
-		d.printf("{")
+		d.buf = append(d.buf, '{')
 		d.level++
 		var anyElems bool
 		if t.Kind() == reflect.Slice {
@@ -184,19 +203,30 @@ func (d *debugPrinter) value0(v reflect.Value, impliedType reflect.Type) {
 			if anyElems {
 				d.newline()
 			}
-			d.printf("}")
+			d.buf = append(d.buf, '}')
 		}
+	}
+}
+
+func (d *debugPrinter) basicValue(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.String:
+		d.buf = strconv.AppendQuote(d.buf, v.String())
+	case reflect.Bool:
+		d.buf = strconv.AppendBool(d.buf, v.Bool())
+	default:
+		d.printf("%#v", v.Interface())
 	}
 }
 
 // positionRange returns a string representing the range
 // of positions between p0 and p1, as returned
 // by [ast.Node.Pos] and [ast.Node.End] respectively.
-func positionRange(p0, p1 token.Pos) string {
+func (d *debugPrinter) positionRange(p0, p1 token.Pos) string {
 	if !p1.IsValid() {
-		return p0.String()
+		return d.position(p0).String()
 	}
-	pos0, pos1 := p0.Position(), p1.Position()
+	pos0, pos1 := d.position(p0), d.position(p1)
 	if pos1.Filename != pos0.Filename {
 		return fmt.Sprintf("%v,%v", pos0, pos1)
 	}
@@ -207,6 +237,12 @@ func positionRange(p0, p1 token.Pos) string {
 	}
 	fmt.Fprintf(&buf, "%d:%d,%d:%d", pos0.Line, pos0.Column, pos1.Line, pos1.Column)
 	return buf.String()
+}
+
+func (d *debugPrinter) position(p token.Pos) token.Position {
+	pos := p.Position()
+	pos.Filename = d.cfg.Filename(pos.Filename)
+	return pos
 }
 
 func (d *debugPrinter) sliceElems(v reflect.Value, elemType reflect.Type) (anyElems bool) {
@@ -227,14 +263,12 @@ func (d *debugPrinter) sliceElems(v reflect.Value, elemType reflect.Type) (anyEl
 }
 
 func (d *debugPrinter) structFields(v reflect.Value) (anyElems bool) {
-	t := v.Type()
-	for i := range v.NumField() {
-		f := t.Field(i)
+	for f, fv := range v.Fields() {
 		if !gotoken.IsExported(f.Name) {
 			continue
 		}
 		if f.Name == "Node" {
-			nodeVal := v.Field(i)
+			nodeVal := fv
 			if (!d.cfg.IncludeNodeRefs && !d.cfg.IncludePointers) || nodeVal.IsNil() {
 				continue
 			}
@@ -254,10 +288,14 @@ func (d *debugPrinter) structFields(v reflect.Value) (anyElems bool) {
 		case "Scope", "Unresolved":
 			continue
 		}
+		if f.Name == "Filename" && v.Type() == reflect.TypeFor[ast.File]() {
+			fv = reflect.ValueOf(d.cfg.Filename(fv.String()))
+		}
 		elemStart := d.pos()
 		d.newline()
-		d.printf("%s: ", f.Name)
-		if d.value(v.Field(i), nil) {
+		d.buf = append(d.buf, f.Name...)
+		d.buf = append(d.buf, ": "...)
+		if d.value(fv, nil) {
 			anyElems = true
 		} else {
 			d.truncate(elemStart)
@@ -281,7 +319,10 @@ func (d *debugPrinter) printf(format string, args ...any) {
 }
 
 func (d *debugPrinter) newline() {
-	d.buf = fmt.Appendf(d.buf, "\n%s", strings.Repeat("\t", d.level))
+	d.buf = append(d.buf, '\n')
+	for range d.level {
+		d.buf = append(d.buf, '\t')
+	}
 }
 
 func (d *debugPrinter) pos() int {
@@ -325,9 +366,7 @@ func (d *debugPrinter) addNodeRefs(v reflect.Value) {
 			d.addNodeRefs(v.Index(i))
 		}
 	case reflect.Struct:
-		t := v.Type()
-		for i := range v.NumField() {
-			f := t.Field(i)
+		for f, fv := range v.Fields() {
 			if !gotoken.IsExported(f.Name) {
 				continue
 			}
@@ -336,7 +375,7 @@ func (d *debugPrinter) addNodeRefs(v reflect.Value) {
 			case "Scope", "Node", "Unresolved":
 				continue
 			}
-			d.addNodeRefs(v.Field(i))
+			d.addNodeRefs(fv)
 		}
 	}
 }
@@ -435,12 +474,18 @@ func DebugStr(x interface{}) (out string) {
 
 	case *ast.StructLit:
 		out := "{"
+		if v.Hash.IsValid() {
+			out = "#{"
+		}
 		out += DebugStr(v.Elts)
 		out += "}"
 		return out
 
 	case *ast.ListLit:
 		out := "["
+		if v.Hash.IsValid() {
+			out = "#["
+		}
 		out += DebugStr(v.Elts)
 		out += "]"
 		return out
@@ -510,7 +555,22 @@ func DebugStr(x interface{}) (out string) {
 	case *ast.CallExpr:
 		out := DebugStr(v.Fun)
 		out += "("
-		out += DebugStr(v.Args)
+		for i, arg := range v.Args {
+			if i > 0 {
+				out += sep
+			}
+			if i < len(v.ArgLabels) && v.ArgLabels[i] != nil {
+				out += DebugStr(v.ArgLabels[i])
+				out += ": "
+			}
+			out += DebugStr(arg)
+		}
+		if v.Ellipsis != token.NoPos {
+			if len(v.Args) > 0 {
+				out += sep
+			}
+			out += "..."
+		}
 		out += ")"
 		return out
 
@@ -584,7 +644,64 @@ func DebugStr(x interface{}) (out string) {
 		return out
 
 	case *ast.Func:
-		return fmt.Sprintf("func(%v): %v", DebugStr(v.Args), DebugStr(v.Ret))
+		params := DebugStr(v.Parameters())
+		if v.Ellipsis != token.NoPos {
+			if params != "" {
+				params += ", "
+			}
+			params += "..."
+		}
+		out := fmt.Sprintf("func(%v)", params)
+		if v.Ret != nil {
+			out += fmt.Sprintf(" -> %v", DebugStr(v.Ret))
+		}
+		if v.Body != nil {
+			out += fmt.Sprintf(": %v", DebugStr(v.Body))
+		}
+		return out
+
+	case *ast.FuncParam:
+		var out string
+		if v.Label != nil {
+			out = DebugStr(v.Label)
+			if v.Alias != nil {
+				out += "~"
+				if v.Alias.Label != nil {
+					out += "("
+					out += DebugStr(v.Alias.Label)
+					out += ","
+					out += DebugStr(v.Alias.Field)
+					out += ")"
+				} else {
+					out += DebugStr(v.Alias.Field)
+				}
+			}
+			if t := v.Constraint; t != token.ILLEGAL {
+				out += t.String()
+			}
+			out += ": "
+		}
+		out += DebugStr(v.Value)
+		if v.Default != nil {
+			out += " = "
+			out += DebugStr(v.Default)
+		}
+		for _, a := range v.Attrs {
+			out += " "
+			out += DebugStr(a)
+		}
+		return out
+
+	case []*ast.FuncParam:
+		if len(v) == 0 {
+			return ""
+		}
+		out := ""
+		for _, d := range v {
+			out += DebugStr(d)
+			out += sep
+		}
+		return out[:len(out)-len(sep)]
 
 	case []ast.Decl:
 		if len(v) == 0 {

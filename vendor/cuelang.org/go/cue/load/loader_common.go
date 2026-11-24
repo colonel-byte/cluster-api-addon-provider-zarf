@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
@@ -55,9 +56,7 @@ type excludeError struct {
 
 func (e excludeError) Is(err error) bool { return err == errExclude }
 
-func rewriteFiles(p *build.Instance, root string, isLocal bool, os pkgpath.OS) {
-	p.Root = root
-
+func rewriteFiles(p *build.Instance, os pkgpath.OS) {
 	normalizeFiles(p.BuildFiles, os)
 	normalizeFiles(p.IgnoredFiles, os)
 	normalizeFiles(p.OrphanedFiles, os)
@@ -70,9 +69,7 @@ func rewriteFiles(p *build.Instance, root string, isLocal bool, os pkgpath.OS) {
 // maps Dir/Root to display paths.
 //
 // Dir/Root must hold loader-internal paths when this is called.
-// DirLoc is only set on the first call (Dir is set once and not
-// overwritten). RootLoc is always updated because rewriteFiles
-// may reset Root between calls.
+// setFSLoc is idempotent: locations already set are left untouched.
 func setFSLoc(c *Config, p *build.Instance) {
 	if c.FS != nil {
 		if p.DirLoc.IsZero() {
@@ -81,16 +78,18 @@ func setFSLoc(c *Config, p *build.Instance) {
 				p.Dir = c.FromFSPath(p.Dir)
 			}
 		}
-		p.RootLoc = makeFSLoc(c.FS, p.Root, c.FromFSPath)
-		if c.FromFSPath != nil {
-			p.Root = c.FromFSPath(p.Root)
+		if p.RootLoc.IsZero() {
+			p.RootLoc = makeFSLoc(c.FS, p.Root, c.FromFSPath)
+			if c.FromFSPath != nil {
+				p.Root = c.FromFSPath(p.Root)
+			}
 		}
 	} else {
 		ov, _ := c.fileSystem.(*overlayFileSystem)
 		if p.DirLoc.IsZero() && p.Dir != "" {
 			p.DirLoc = makeOSFSLoc(p.Dir, c.pathOS, ov)
 		}
-		if p.Root != "" {
+		if p.RootLoc.IsZero() && p.Root != "" {
 			p.RootLoc = makeOSFSLoc(p.Root, c.pathOS, ov)
 		}
 	}
@@ -248,8 +247,7 @@ func (fp *fileProcessor) finalize(p *build.Instance) errors.Error {
 	if countCUEFiles(fp.c, p) == 0 &&
 		!fp.c.DataFiles &&
 		(p.PkgName != "_" || !fp.allPackages) {
-		fp.err = errors.Append(fp.err, &NoFilesError{Package: p, pathOS: fp.c.pathOS, ignored: len(p.IgnoredFiles) > 0})
-		return fp.err
+		return &NoFilesError{Package: p, pathOS: fp.c.pathOS, ignored: len(p.IgnoredFiles) > 0}
 	}
 
 	p.ImportPaths = slices.Sorted(maps.Keys(fp.imported))
@@ -339,15 +337,14 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) boo
 	// Note: when path is "-" (stdin), it will already have
 	// been read and file.Source set to the resulting data
 	// by setFileSource.
-	pf, perr := fp.c.fileSystem.getCUESyntax(file, fp.c.parserConfig)
+	pf, perr := fp.c.fileSystem.getCUESyntax(file, fp.c.parserConfigForFile(p, file, fullPath))
 	if perr != nil {
 		badFile(errors.Promote(perr, "add failed"))
 		return false
 	}
-	if !file.FilenameLoc.IsZero() {
-		if tokFile := pf.Pos().File(); tokFile != nil {
-			tokFile.SetFSLoc(file.FilenameLoc)
-		}
+	if err := fp.c.checkVersionAttr(fullPath, pf); err != nil {
+		badFile(err)
+		return false
 	}
 
 	pkg := pf.PackageName()
@@ -496,7 +493,8 @@ func warnUnmatched(matches []*match) {
 
 // cleanPatterns returns the patterns to use for the given
 // command line. It canonicalizes the patterns but does not
-// evaluate any matches.
+// evaluate any matches. It preserves any package qualifier,
+// as well as any version for patterns which are not local paths.
 func cleanPatterns(patterns []string, os pkgpath.OS) []string {
 	if len(patterns) == 0 {
 		return []string{"."}
@@ -510,16 +508,28 @@ func cleanPatterns(patterns []string, os pkgpath.OS) []string {
 			a = strings.Replace(a, `\`, `/`, -1)
 		}
 
-		// Put argument in canonical form, but preserve leading "./".
-		if strings.HasPrefix(a, "./") {
-			a = "./" + pathpkg.Clean(a)
-			if a == "./." {
-				a = "."
-			}
-		} else if a != "" {
-			a = pathpkg.Clean(a)
+		// Only clean the path, so that "./foo/:pkg" becomes "./foo:pkg".
+		// Local paths may contain '@', so only the qualifier is split off.
+		p, suffix := a, ""
+		if i := strings.LastIndexAny(p, "/:"); i >= 0 && p[i] == ':' {
+			p, suffix = p[:i], p[i:]
 		}
-		out = append(out, a)
+		if !isLocalImport(p) {
+			if prefix, vers, ok := ast.SplitPackageVersion(p); ok {
+				p, suffix = prefix, "@"+vers+suffix
+			}
+		}
+
+		// Put argument in canonical form, but preserve leading "./".
+		if strings.HasPrefix(p, "./") {
+			p = "./" + pathpkg.Clean(p)
+			if p == "./." {
+				p = "."
+			}
+		} else if p != "" {
+			p = pathpkg.Clean(p)
+		}
+		out = append(out, p+suffix)
 	}
 	return out
 }

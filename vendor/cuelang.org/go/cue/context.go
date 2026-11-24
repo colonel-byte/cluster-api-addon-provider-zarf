@@ -26,7 +26,6 @@ import (
 	"cuelang.org/go/internal/core/compile"
 	"cuelang.org/go/internal/core/convert"
 	"cuelang.org/go/internal/core/debug"
-	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/core/runtime"
 )
 
@@ -95,6 +94,9 @@ func Filename(filename string) BuildOption {
 // ImportPath defines the import path to use for building CUE. The import path
 // influences the scope in which identifiers occurring in the input CUE are
 // defined. Passing the empty string is equal to not specifying this option.
+//
+// The import path also becomes the identifier of the resulting package, and so
+// the scope of its hidden fields; see [Hid].
 //
 // This option is typically not necessary when building using a build.Instance,
 // but takes precedence otherwise.
@@ -324,6 +326,14 @@ func NilIsAny(isAny bool) EncodeOption {
 // encoding if the field has an empty value, defined as false, 0, a nil pointer,
 // a nil interface value, and any empty array, slice, map, or string.
 //
+// The "omitzero" option specifies that the field should be omitted from the
+// encoding if the field has a zero value, according to these rules:
+//
+// 1) If the field type has an "IsZero() bool" method, that will be used to
+// determine whether the value is zero.
+//
+// 2) Otherwise, the value is zero if it is the zero value for its type.
+//
 // See the documentation for Go's json.Marshal for more details on the field
 // tags and their meaning.
 //
@@ -451,7 +461,7 @@ func newContext(idx *runtime.Runtime) *adt.OpContext {
 	if idx == nil {
 		return nil
 	}
-	return eval.NewContext(idx, nil)
+	return adt.NewContext(idx, nil)
 }
 
 func debugStr(ctx *adt.OpContext, v adt.Node) string {
@@ -469,8 +479,7 @@ func (v Value) eval(ctx *adt.OpContext) adt.Value {
 	if v.v == nil {
 		panic("undefined value")
 	}
-	x := manifest(ctx, v.v)
-	return x.Value()
+	return manifest(ctx, v.v).DerefValue().Value()
 }
 
 // TODO: change from Vertex to Vertex.

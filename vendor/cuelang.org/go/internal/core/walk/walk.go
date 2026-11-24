@@ -21,15 +21,6 @@ import (
 	"cuelang.org/go/internal/core/adt"
 )
 
-// Features calls f for all features used in x and indicates whether the
-// feature is used as a reference or not.
-func Features(x adt.Expr, f func(label adt.Feature, src adt.Node)) {
-	w := Visitor{
-		Feature: f,
-	}
-	w.Elem(x)
-}
-
 // A Visitor walks over all elements in an ADT, recursively.
 type Visitor struct {
 	// Feature is invoked for all field names.
@@ -135,6 +126,37 @@ func (w *Visitor) node(n adt.Node) {
 			w.node(arg)
 		}
 
+	case *adt.Function:
+		// Parameter binding names are local to the body and surface as
+		// references while walking it; here we only descend into the
+		// expressions that may reference outer features: parameter
+		// types/defaults, the return type, and the body.
+		for i := range x.Params {
+			if v := x.Params[i].Value; v != nil {
+				w.node(v)
+			}
+			if d := x.Params[i].Default; d != nil {
+				w.node(d)
+			}
+		}
+		if x.Ret != nil {
+			w.node(x.Ret)
+		}
+		if x.Body != nil {
+			w.node(x.Body)
+		}
+
+	case *adt.FuncCallRef:
+		// A call reference schedules the referenced function's expressions,
+		// so features used by those expressions are reachable through it.
+		// The signatures the called value was tightened with contribute
+		// their parameter and result constraints to every call as well, so
+		// their expressions are equally reachable.
+		w.node(x.Func())
+		for _, t := range x.Types() {
+			w.node(t.Fn)
+		}
+
 	case *adt.DisjunctionExpr:
 		for _, d := range x.Values {
 			w.node(d.Val)
@@ -192,8 +214,6 @@ func (w *Visitor) node(n adt.Node) {
 			w.node(x.Expr)
 		}
 		// Struct form: body is in Comprehension.Value, walked separately
-
-	case *adt.ValueClause:
 
 	default:
 		panic(fmt.Sprintf("unknown field %T", x))

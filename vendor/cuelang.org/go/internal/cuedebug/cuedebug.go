@@ -1,9 +1,9 @@
 package cuedebug
 
 import (
+	"fmt"
+	"os"
 	"sync"
-
-	"cuelang.org/go/internal/envflag"
 )
 
 // Flags holds the set of global CUE_DEBUG flags. It is initialized by Init.
@@ -11,8 +11,9 @@ var Flags Config
 
 // Config holds the set of known CUE_DEBUG flags.
 //
-// When adding, deleting, or modifying entries below,
-// update cmd/cue/cmd/help.go as well for `cue help environment`.
+// The field doc comments below are the source of truth for the CUE_DEBUG
+// section of `cue help environment`; run
+// "go generate cuelang.org/go/cmd/cue/cmd" after changing them.
 type Config struct {
 	// HTTP enables JSON logging per HTTP request and response made
 	// when interacting with module registries.
@@ -24,8 +25,6 @@ type Config struct {
 	// allowed environment variables to be known.
 
 	// Strict sets whether extra aggressive checking should be done.
-	// This should typically default to true for pre-releases and default to
-	// false otherwise.
 	Strict bool
 
 	// LogEval sets the log level for the evaluator.
@@ -36,7 +35,7 @@ type Config struct {
 	LogEval int
 
 	// Sharing enables structure sharing.
-	Sharing bool `envflag:"default:true"`
+	Sharing bool `cuedebug:"default:true"`
 
 	// SortFields forces fields in a struct to be sorted
 	// lexicographically.
@@ -57,10 +56,21 @@ type Config struct {
 // called when running "cue help"), and also because we want the failure
 // mode to be one of error not panic, which would be the only option if
 // it was a top level init function.
+//
+// TODO: only the cue command reports the error; Go API users such as
+// [cuelang.org/go/cue/cuecontext.New] and [cuelang.org/go/cue/format] ignore it.
 func Init() error {
+	// Read CUE_DEBUG on every call so go test records it as a cache input;
+	// see the matching note in internal/cueexperiment.
+	os.Getenv("CUE_DEBUG")
 	return initOnce()
 }
 
 var initOnce = sync.OnceValue(func() error {
-	return envflag.Init(&Flags, "CUE_DEBUG")
+	var err error
+	Flags, err = Parse(os.Getenv("CUE_DEBUG"))
+	if err != nil {
+		return fmt.Errorf("error in CUE_DEBUG: %w", err)
+	}
+	return nil
 })

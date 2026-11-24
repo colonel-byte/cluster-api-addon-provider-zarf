@@ -132,7 +132,7 @@ func Unmarshal(b []byte) (ast.Expr, error) {
 
 // Validate validates JSON and confirms it matches the constraints
 // specified by v.
-func Validate(b []byte, v pkg.Schema) (bool, error) {
+func Validate(b []byte, v pkg.Schema) (pkg.Validator, error) {
 	c := value.OpContext(v)
 	return validate(c, b, v)
 }
@@ -142,7 +142,7 @@ func validate(c *adt.OpContext, b []byte, v pkg.Schema) (bool, error) {
 	if !json.Valid(b) {
 		return false, fmt.Errorf("json: invalid JSON")
 	}
-	v2 := v.Context().CompileBytes(b, cue.Filename("json.Validate"))
+	v2 := value.Context(v).CompileBytes(b, cue.Filename("json.Validate"))
 	if err := v2.Err(); err != nil {
 		return false, err
 	}

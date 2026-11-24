@@ -15,20 +15,22 @@
 // Package openapi provides OpenAPI encoding and decoding functionality.
 //
 // This is an EXPERIMENTAL API.
+//
+//cue:pure
 package openapi
 
 import (
 	"cuelang.org/go/cue"
 	"cuelang.org/go/encoding/openapi"
 	"cuelang.org/go/internal/core/adt"
+	internaljson "cuelang.org/go/internal/encoding/json"
 	"cuelang.org/go/internal/pkg"
 	"cuelang.org/go/internal/value"
 )
 
 var (
-	selfContainedPath    = cue.ParsePath("selfContained")
-	expandReferencesPath = cue.ParsePath("expandReferences")
-	infoPath             = cue.ParsePath("info")
+	expandReferencesPath = cue.MakePath(cue.Str("expandReferences"))
+	infoPath             = cue.MakePath(cue.Str("info"))
 )
 
 // Marshal returns the OpenAPI encoding of schema for the given OpenAPI version.
@@ -43,8 +45,8 @@ var (
 //	  // Currently only "3.0.0" is supported.
 //	  version!: "3.0.0" // currently "3.0.0" only
 //
-//	  // selfContained causes all non-expanded external references
-//	  // to be included//
+//	  // selfContained has no effect; all non-expanded external
+//	  // references are always included.
 //	  selfContained?: bool
 //
 //	  // expandReferences replaces references with actual objects when generating
@@ -68,7 +70,6 @@ func MarshalSchema(config cue.Value, schema pkg.Schema) (string, error) {
 }
 
 func marshalSchema(_ *adt.OpContext, config cue.Value, schema pkg.Schema) (string, error) {
-	selfContained, _ := config.LookupPath(selfContainedPath).Bool()
 	expandReferences, _ := config.LookupPath(expandReferencesPath).Bool()
 
 	version, err := config.LookupPath(cue.ParsePath("version")).String()
@@ -78,7 +79,6 @@ func marshalSchema(_ *adt.OpContext, config cue.Value, schema pkg.Schema) (strin
 
 	c := &openapi.Config{
 		Version:          version,
-		SelfContained:    selfContained,
 		ExpandReferences: expandReferences,
 	}
 
@@ -86,9 +86,17 @@ func marshalSchema(_ *adt.OpContext, config cue.Value, schema pkg.Schema) (strin
 		c.Info = info
 	}
 
-	b, err := openapi.Gen(schema, c)
+	f, err := openapi.Generate(schema, c)
 	if err != nil {
 		return "", err
 	}
-	return string(b), err
+	v := value.Context(schema).BuildFile(f)
+	if err := v.Err(); err != nil {
+		return "", err
+	}
+	b, err := internaljson.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

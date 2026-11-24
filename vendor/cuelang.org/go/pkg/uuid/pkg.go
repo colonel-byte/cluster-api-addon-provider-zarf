@@ -71,7 +71,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			x := c.String(0)
 			if c.Do() {
-				c.Ret = ToInt(x)
+				c.Ret, c.Err = ToInt(x)
 			}
 		},
 	}, {
@@ -125,18 +125,27 @@ var p = &pkg.Package{
 			}
 		},
 	}},
-	CUE: `{
-	ns: {
-		DNS:  "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-		URL:  "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
-		OID:  "6ba7b812-9dad-11d1-80b4-00c04fd430c8"
-		X500: "6ba7b814-9dad-11d1-80b4-00c04fd430c8"
-		Nil:  "00000000-0000-0000-0000-000000000000"
-	}
-	variants: Invalid:   0
-	variants: RFC4122:   1
-	variants: Reserved:  2
-	variants: Microsoft: 3
-	variants: Future:    4
-}`,
+	CUE: `
+@experiment(functions)
+@pure()
+Parse:   func(s: string) -> string
+URN:     func(x: string) -> string
+FromInt: func(i: int) -> string
+ToInt:   func(x: string) -> int
+Variant: func(x: string) -> int
+Version: func(x: string) -> int
+SHA1:    func(space: string, data: bytes | string) -> string
+MD5:     func(space: string, data: bytes | string) -> string
+ns: {
+	DNS:  "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	URL:  "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
+	OID:  "6ba7b812-9dad-11d1-80b4-00c04fd430c8"
+	X500: "6ba7b814-9dad-11d1-80b4-00c04fd430c8"
+	Nil:  "00000000-0000-0000-0000-000000000000"
+}
+variants: Invalid:   0
+variants: RFC4122:   1
+variants: Reserved:  2
+variants: Microsoft: 3
+variants: Future:    4`,
 }

@@ -42,17 +42,12 @@ import (
 // could get by with only copying arcs to that are modified in the copy.
 
 func newOverlayContext(ctx *OpContext) *overlayContext {
-	// Reuse the map from the overlays stack if one exists at this depth.
-	var m vertexMap
-	if i := len(ctx.overlays); i < cap(ctx.overlays) {
-		m = ctx.overlays[:cap(ctx.overlays)][i].vertexMap
-	}
-	if m == nil {
-		m = make(map[*Vertex]*Vertex)
-	}
+	// Note that this map cannot be reused across overlayContexts: cloneRoot
+	// stores it on the cloned nodeContext, where it seeds the vertexMap of
+	// any later disjunct that uses the clone as its basis. See cloneRoot.
 	return &overlayContext{
 		ctx:       ctx,
-		vertexMap: m,
+		vertexMap: make(map[*Vertex]*Vertex),
 	}
 }
 
@@ -83,8 +78,6 @@ type vertexMap map[*Vertex]*Vertex
 //
 // TODO(perf): right now this is only used for resolving vertices in
 // comprehensions. We could also use this for resolving environments, though.
-// Furthermore, we could used the "cleared" vertexMaps on this stack to avoid
-// allocating memory.
 //
 // NOTE: using a stack globally in OpContext is not very principled, as we
 // may be evaluating nested evaluations of different disjunctions. However,
@@ -101,39 +94,26 @@ func (c *OpContext) pushOverlay(v *Vertex, m vertexMap) {
 
 func (c *OpContext) popOverlay() {
 	i := len(c.overlays) - 1
-	// TODO(mvdan): unfortunately, clearing maps with large capacities
-	// is fairly slow as of Go 1.25, and most uses only need few entries.
-	// Do not reuse large maps to avoid this pitfall for now.
-	// See: https://github.com/golang/go/issues/70617
-	if l := len(c.overlays[i].vertexMap); l > 512 {
-		c.overlays[i].vertexMap = nil
-	} else {
-		clear(c.overlays[i].vertexMap)
-	}
+	// The map may still be referenced as the vertexMap of the cloned
+	// nodeContext, so it must not be cleared or reused; only drop the
+	// stack's own reference.
+	c.overlays[i] = overlayFrame{}
 	c.overlays = c.overlays[:i]
 }
 
-func (c *OpContext) deref(v *Vertex) *Vertex {
-	for i := len(c.overlays) - 1; i >= 0; i-- {
-		f := c.overlays[i]
-		if f.root == v {
-			continue
-		}
-		if x, ok := f.vertexMap[v]; ok {
-			return x
-		}
-	}
-	return v
-}
-
-// derefRoot is like deref, but also dereferences the root vertex of each overlay
-// frame. This is needed for environment vertex resolution, where the root
-// vertex must be mapped to its clone during disjunction evaluation.
+// derefRoot returns the most recent overlay clone of v, including the root
+// vertex of each overlay frame. This is needed for environment vertex
+// resolution, where the root vertex must be mapped to its clone during
+// disjunction evaluation.
 func (c *OpContext) derefRoot(v *Vertex) *Vertex {
 	for i := len(c.overlays) - 1; i >= 0; i-- {
 		f := c.overlays[i]
+		// Dereference transitively: when disjuncts are chained across
+		// multiple disjunctions, the map contains a chain from each
+		// intermediate cross product to the most recent clone, and only
+		// the most recent clone is being evaluated.
 		if x, ok := f.vertexMap[v]; ok {
-			return x
+			return f.vertexMap.deref(x)
 		}
 	}
 	return v
@@ -166,7 +146,11 @@ func (m vertexMap) deref(v *Vertex) *Vertex {
 // cloneRoot clones the Vertex in which disjunctions are defined to allow
 // inserting selected disjuncts into a new Vertex.
 func (ctx *overlayContext) cloneRoot(root *nodeContext) *nodeContext {
-	maps.Copy(ctx.vertexMap, root.vertexMap)
+	// ctx.vertexMap is still empty, and cloning is much cheaper than
+	// inserting each entry into it.
+	if len(root.vertexMap) > 0 {
+		ctx.vertexMap = maps.Clone(root.vertexMap)
+	}
 
 	// Clone all vertices that need to be cloned to support the overlay.
 	v := ctx.cloneVertex(root.node)
@@ -197,11 +181,7 @@ func (ctx *overlayContext) cloneRoot(root *nodeContext) *nodeContext {
 				if before == after {
 					continue
 				}
-				s := &after.state.scheduler
-				t.blockedOn = s
-				s.blocking = append(s.blocking, t)
-				s.ctx.blocking = append(s.ctx.blocking, t)
-				s.needs |= t.blockCondition
+				after.state.scheduler.addBlocking(t)
 			}
 		}
 	}
@@ -241,6 +221,7 @@ func (ctx *overlayContext) cloneVertex(x *Vertex) *Vertex {
 	// TODO(mem-mgmt): use free list for Vertex allocation.
 	v := &Vertex{}
 	*v = *x
+	v.arcMap = nil // do not share x's arc index; the clone rebuilds its own
 	ctx.vertexMap[x] = v
 	x.overlay = v
 
@@ -303,7 +284,7 @@ func (ctx *overlayContext) cloneNodeContext(n *nodeContext) *nodeContext {
 
 	d.arcMap = append(d.arcMap, n.arcMap...)
 	d.checks = append(d.checks, n.checks...)
-	d.sharedIDs = append(d.sharedIDs, n.sharedIDs...)
+	d.shared = append(d.shared, n.shared...)
 
 	d.reqDefIDs = append(d.reqDefIDs, n.reqDefIDs...)
 	d.replaceIDs = append(d.replaceIDs, n.replaceIDs...)
@@ -331,7 +312,7 @@ func (ctx *overlayContext) cloneScheduler(dst, src *nodeContext) {
 	ss := &src.scheduler
 	ds := &dst.scheduler
 
-	ds.state = ss.state
+	ds.running = ss.running
 	ds.completed = ss.completed
 	ds.needs = ss.needs
 	ds.provided = ss.provided
@@ -377,7 +358,6 @@ func (ctx *overlayContext) cloneTask(t *task, dst, src *scheduler) *task {
 	d.run = t.run
 	d.state = t.state
 	d.completes = t.completes
-	d.unblocked = t.unblocked
 	d.blockCondition = t.blockCondition
 	d.blockedOn = t.blockedOn // will be rewritten later
 	d.err = t.err

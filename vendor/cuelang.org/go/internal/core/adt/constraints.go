@@ -42,27 +42,6 @@ type PatternConstraint struct {
 	Constraint *Vertex
 }
 
-// insertListEllipsis inserts the given list ellipsis as a pattern constraint on
-// n, applying it to all elements at indexes >= offset.
-func (n *nodeContext) insertListEllipsis(offset int, ellipsis Conjunct) {
-	ctx := n.ctx
-
-	var p Value
-	if offset == 0 {
-		p = &BasicType{
-			Src: ellipsis.Field().Source(),
-			K:   IntKind,
-		}
-	} else {
-		p = &BoundValue{
-			Src:   nil, // TODO: field source.
-			Op:    GreaterEqualOp,
-			Value: ctx.NewInt64(int64(offset)),
-		}
-	}
-	n.insertConstraint(p, ellipsis)
-}
-
 // insertConstraint ensures a given pattern constraint is present in the
 // constraints of n and reports whether the pair was added newly.
 //
@@ -100,7 +79,10 @@ func (n *nodeContext) insertConstraint(pattern Value, c Conjunct) bool {
 	} else {
 		for x := range constraint.LeafConjuncts() {
 			if x.x == c.x && x.Env.Equal(ctx, c.Env) {
-				if c.CloseInfo.opID == n.ctx.opID {
+				// Both defIDs must stem from the current OpContext: x may
+				// predate it, in which case its defID indexes another
+				// context's containments table.
+				if c.CloseInfo.opID == n.ctx.opID && x.CloseInfo.opID == n.ctx.opID {
 					// TODO: do we need this replacement?
 					src := x.CloseInfo.defID
 					dst := c.CloseInfo.defID
@@ -135,6 +117,8 @@ func matchPattern(ctx *OpContext, pattern Value, f Feature) bool {
 // This is an optimization an intended to be faster than regular CUE evaluation
 // for the majority of cases where pattern constraints are used.
 func matchPatternValue(ctx *OpContext, pattern Value, f Feature) (result bool) {
+	// Normally completePatternValue has already evaluated the pattern at
+	// registration time; this finalize remains as a backstop.
 	if v, ok := pattern.(*Vertex); ok {
 		v.unify(ctx, Flags{condition: scalarKnown, mode: finalize, checkTypos: false})
 	}
@@ -144,29 +128,14 @@ func matchPatternValue(ctx *OpContext, pattern Value, f Feature) (result bool) {
 	if f.IsString() {
 		k = StringKind
 	}
+	// This also rejects a *Bottom pattern, as its kind is BottomKind.
+	// Its error was already added to the node by the task evaluating it.
 	if !k.IsAnyOf(pattern.Kind()) {
 		return false
 	}
 
 	// Fast track for the majority of cases.
 	switch x := pattern.(type) {
-	case *Bottom:
-		// TODO: hoist and reuse with the identical code in optional.go.
-		if x == cycle {
-			err := ctx.NewPosf(Pos(pattern), "cyclic pattern constraint")
-			for c := range ctx.vertex.LeafConjuncts() {
-				addPositions(ctx, err, c)
-			}
-			ctx.AddBottom(&Bottom{
-				Err:  err,
-				Node: ctx.vertex,
-			})
-		}
-		if ctx.errs == nil {
-			ctx.AddBottom(x)
-		}
-		return false
-
 	case *Top:
 		return true
 

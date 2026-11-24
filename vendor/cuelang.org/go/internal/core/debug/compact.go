@@ -22,10 +22,23 @@ package debug
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/internal/core/compile"
 )
+
+// numString renders n the way its kind reads back: a float always carries a
+// decimal point or an exponent, so that it is not mistaken for an integer.
+// An integer's decimal never has a fractional part, so it needs no such care.
+func numString(n *adt.Num) string {
+	s := n.X.String()
+	if n.K&adt.IntKind == 0 && !strings.ContainsAny(s, "eE.") {
+		s += ".0"
+	}
+	return s
+}
 
 func (w *printer) compactNode(n adt.Node) {
 	switch x := n.(type) {
@@ -172,9 +185,17 @@ func (w *printer) compactNode(n adt.Node) {
 	case *adt.Bottom:
 		w.string(`_|_`)
 		if x.Err != nil {
+			// An error whose message includes a value being printed, such as
+			// an enclosing struct, would repeat itself; print it as bottom.
+			start, saved := len(w.dst), w.cyclic
+			w.cyclic = false
 			w.string("(")
 			w.shortError(x.Err, false)
 			w.string(")")
+			if w.cyclic {
+				w.dst = w.dst[:start]
+			}
+			w.cyclic = saved
 		}
 
 	case *adt.Null:
@@ -184,7 +205,7 @@ func (w *printer) compactNode(n adt.Node) {
 		w.dst = strconv.AppendBool(w.dst, x.B)
 
 	case *adt.Num:
-		w.string(x.X.String())
+		w.string(numString(x))
 
 	case *adt.String:
 		w.dst = literal.String.Append(w.dst, x.Str)
@@ -294,12 +315,25 @@ func (w *printer) compactNode(n adt.Node) {
 		w.node(x.X)
 		w.string("...")
 
+	case *adt.Function:
+		w.fn(x)
+
+	case *adt.FuncValue:
+		w.funcValue(x)
+
+	case *adt.FuncCallRef:
+		w.string("call")
+
 	case *adt.CallExpr:
 		w.node(x.Fun)
 		w.string("(")
 		for i, a := range x.Args {
 			if i > 0 {
 				w.string(", ")
+			}
+			if i < len(x.ArgLabels) && x.ArgLabels[i] != adt.InvalidLabel {
+				w.string(x.ArgLabels[i].SelectorString(w.index))
+				w.string(": ")
 			}
 			w.arg(a)
 		}
@@ -339,7 +373,7 @@ func (w *printer) compactNode(n adt.Node) {
 
 	case *adt.Conjunction:
 		if w.compactBuiltins {
-			if name := adt.MatchBuiltinRange(x); name != "" {
+			if name := compile.MatchBuiltinRange(x); name != "" {
 				w.string(name)
 				break
 			}
@@ -411,8 +445,6 @@ func (w *printer) compactNode(n adt.Node) {
 			w.string(" ")
 		}
 		// Struct form has no Ident/Expr - body is in Comprehension.Value
-
-	case *adt.ValueClause:
 
 	default:
 		panic(fmt.Sprintf("unknown type %T", x))

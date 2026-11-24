@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/cockroachdb/apd/v3"
@@ -40,7 +41,6 @@ import (
 	"cuelang.org/go/internal/core/subsume"
 	internaljson "cuelang.org/go/internal/encoding/json"
 	"cuelang.org/go/internal/iterutil"
-	"cuelang.org/go/internal/types"
 )
 
 // Kind determines the underlying type of a Value.
@@ -463,15 +463,12 @@ func (v Value) Int64() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if !n.X.Coeff.IsInt64() {
+	i, ok := n.Int64()
+	if !ok {
 		if n.X.Negative {
 			return math.MinInt64, ErrAbove
 		}
 		return math.MaxInt64, ErrBelow
-	}
-	i := n.X.Coeff.Int64()
-	if n.X.Negative {
-		i = -i
 	}
 	return i, nil
 }
@@ -488,21 +485,25 @@ func (v Value) Uint64() (uint64, error) {
 	if n.X.Negative {
 		return 0, ErrAbove
 	}
-	if !n.X.Coeff.IsUint64() {
+	i, ok := n.Uint64()
+	if !ok {
 		return math.MaxUint64, ErrBelow
 	}
-	i := n.X.Coeff.Uint64()
 	return i, nil
 }
 
+// The bounds of float64 used by [Value.Float64].
+// They are built on first use, as parsing them is costly at init time.
 var (
+	float64BoundsOnce sync.Once
+
 	smallestPosFloat64 *apd.Decimal
 	smallestNegFloat64 *apd.Decimal
 	maxPosFloat64      *apd.Decimal
 	maxNegFloat64      *apd.Decimal
 )
 
-func init() {
+func initFloat64Bounds() {
 	const (
 		// math.SmallestNonzeroFloat64: 1 / 2**(1023 - 1 + 52)
 		smallest = "4.940656458412465441765687928682213723651e-324"
@@ -562,9 +563,10 @@ func (v Value) Float64() (float64, error) {
 	if n.X.IsZero() {
 		return 0.0, nil
 	}
+	float64BoundsOnce.Do(initFloat64Bounds)
 	if n.X.Negative {
 		if n.X.Cmp(smallestNegFloat64) == 1 {
-			return -0, ErrAbove
+			return math.Copysign(0, -1), ErrAbove
 		}
 		if n.X.Cmp(maxNegFloat64) == -1 {
 			return math.Inf(-1), ErrBelow
@@ -587,6 +589,9 @@ func (v Value) Float64() (float64, error) {
 //
 // A Value is considered immutable: methods may be called concurrently.
 type Value struct {
+	// TODO: the zero Value is undefined and most methods panic on it.
+	// See https://cuelang.org/issue/3175.
+
 	idx *runtime.Runtime
 	v   *adt.Vertex
 	// Parent keeps track of the parent if the value corresponding to v.Parent
@@ -605,7 +610,7 @@ type parent struct {
 func (v Value) parent() Value {
 	switch {
 	case v.v == nil:
-		return Value{}
+		return Value{idx: v.idx}
 	case v.parent_ != nil:
 		return Value{v.idx, v.parent_.v, v.parent_.p}
 	default:
@@ -627,8 +632,8 @@ func (v valueScope) Parent() compile.Scope {
 type hiddenValue = Value
 
 // Core is for internal use only.
-func (v hiddenValue) Core() types.Value {
-	return types.Value{V: v.v, R: v.idx}
+func (v hiddenValue) Core() runtime.Value {
+	return runtime.Value{V: v.v, R: v.idx}
 }
 
 func newErrValue(v Value, b *adt.Bottom) Value {
@@ -673,6 +678,11 @@ func newChildValue(o *structValue, i int) Value {
 
 // Dereference reports the value v refers to if v is a reference or v itself
 // otherwise.
+//
+// A disjunction is not a reference, even one such as "*1 | a" whose default
+// is dropped by [Value.Expr] and which [Value.ReferencePath] reports as a
+// reference to a: following it would lose the default. To resolve such a
+// reference, look up the path reported by ReferencePath in its root.
 func Dereference(v Value) Value {
 	n := v.v
 	if n == nil {
@@ -779,7 +789,7 @@ func (v Value) Default() (Value, bool) {
 	}
 
 	x := v.v.DerefValue()
-	d := x.Default()
+	d := x.ConcreteDefault()
 	isDefault := d != x
 	if d == v.v {
 		return v, false
@@ -823,7 +833,12 @@ func (v Value) IncompleteKind() Kind {
 
 // MarshalJSON marshalls this value into valid JSON.
 func (v Value) MarshalJSON() (b []byte, err error) {
-	b, err = v.appendJSON(v.ctx(), nil)
+	if v.v == nil {
+		return []byte("null"), nil
+	}
+	ctx := v.ctx()
+	defer adt.AddStats(ctx)
+	b, err = v.appendJSON(ctx, nil)
 	if err != nil {
 		return nil, unwrapJSONError(err)
 	}
@@ -885,6 +900,10 @@ func (v Value) appendJSON(ctx *adt.OpContext, b []byte) ([]byte, error) {
 
 // Syntax converts the possibly partially evaluated value into syntax. This
 // can use used to print the value with package format.
+//
+// It honors the [All], [Attributes], [Concrete], [Definitions], [Docs],
+// [ErrorsAsValues], [Final], [Hidden], [InlineImports], [Optional], and [Raw]
+// options.
 func (v Value) Syntax(opts ...Option) ast.Node {
 	// TODO: the default should ideally be simplified representation that
 	// exactly represents the value. The latter can currently only be
@@ -894,8 +913,12 @@ func (v Value) Syntax(opts ...Option) ast.Node {
 	}
 	o := getOptions(opts)
 
+	inst := v.instance()
+
 	p := export.Profile{
 		Simplify:         !o.raw,
+		Final:            o.concrete,
+		Concrete:         o.concrete,
 		TakeDefaults:     o.final,
 		ShowOptional:     !o.omitOptional && !o.concrete,
 		ShowDefinitions:  !o.omitDefinitions && !o.concrete,
@@ -906,9 +929,13 @@ func (v Value) Syntax(opts ...Option) ast.Node {
 		InlineImports:    o.inlineImports,
 		Fragment:         o.raw,
 		ExpandReferences: o.concrete,
+
+		// Syntax that a module cannot parse is of no use to it, so target
+		// the language version the value itself was written at.
+		TargetLanguageVersion: inst.languageVersion(),
 	}
 
-	pkgID := v.instance().ID()
+	pkgID := inst.ID()
 
 	bad := func(name string, err error) ast.Node {
 		const format = `"%s: internal error
@@ -1011,7 +1038,7 @@ func (v Value) BuildInstance() *build.Instance {
 	return v.idx.GetInstanceFromNode(v.v)
 }
 
-// Err returns the error represented by v or nil v is not an error.
+// Err returns the error represented by v, or nil if v is not an error.
 func (v Value) Err() error {
 	if err := v.checkKind(v.ctx(), adt.BottomKind); err != nil {
 		return v.toErr(err)
@@ -1125,7 +1152,13 @@ func (v Value) IsConcrete() bool {
 	return true
 }
 
-// Exists reports whether this value existed in the configuration.
+// Exists reports whether the configuration holds a value at this path.
+//
+// A value which fails to evaluate still exists; use [Value.Err] to check for
+// an error. A required or optional field is a constraint rather than a value
+// of its own, so an ordinary selector does not reach it until a value is
+// supplied; a selector made with [Selector.Required] or [Selector.Optional]
+// matches the constraint itself, which exists either way.
 func (v Value) Exists() bool {
 	if v.v == nil {
 		return false
@@ -1199,7 +1232,7 @@ func (v Value) Len() Value {
 			if x.IsList() {
 				n := &adt.Num{K: adt.IntKind}
 				n.X.SetInt64(int64(iterutil.Count(x.Elems())))
-				if x.IsClosedList() {
+				if m, _ := x.BaseValue.(*adt.ListMarker); x.IsClosedList() || m != nil && m.NoEllipsis {
 					return remakeFinal(v, n)
 				}
 				// Note: this HAS to be a Conjunction value and cannot be
@@ -1495,6 +1528,9 @@ func (s *hiddenStruct) Fields(opts ...Option) *Iterator {
 
 // Fields creates an iterator over v's fields if v is a struct or an error
 // otherwise.
+//
+// It honors the [All], [Concrete], [Definitions], [Final], [Hidden],
+// [Optional], and [Patterns] options.
 func (v Value) Fields(opts ...Option) (*Iterator, error) {
 	o := options{
 		omitDefinitions: true,
@@ -1794,6 +1830,8 @@ func (v hiddenValue) Template() func(label string) Value {
 //
 // Use the [Raw] option to do a low-level subsumption, taking defaults into
 // account.
+//
+// It honors the [Final], [Raw], and [Schema] options.
 func (v Value) Subsume(w Value, opts ...Option) error {
 	o := getOptions(opts)
 	p := subsume.CUE
@@ -1830,28 +1868,59 @@ func allowed(ctx *adt.OpContext, parent, n *adt.Vertex) *adt.Bottom {
 	return nil
 }
 
-// Unify reports the greatest lower bound of v and w.
-func (v Value) Unify(w Value) Value {
-	if v.v == nil {
-		return w
+// Unify reports the greatest lower bound of the given values, like a
+// chain of [Value.Unify] calls. Unifying the values in a single call is
+// more efficient, as intermediate results do not need to be computed.
+func Unify(vals ...Value) Value {
+	// Skip missing values, as well as values identical to the first one:
+	// unification is idempotent, and this retains the fast paths of
+	// [Value.Unify]. We do not dedupe the incoming values between each
+	// other, as that would be quadratic.
+	all := make([]adt.Value, 0, len(vals))
+	var first Value
+	for _, x := range vals {
+		switch {
+		case x.v == nil:
+		case len(all) == 0:
+			first = x
+			all = append(all, x.v)
+		case x.v != first.v:
+			all = append(all, x.v)
+		}
 	}
-	if w.v == nil || w.v == v.v {
-		return v
+	if len(all) <= 1 {
+		// Note that first is the zero Value if all values are missing.
+		return first
 	}
 
-	ctx := v.ctx()
-	defer ctx.PopArc(ctx.PushArc(v.v))
+	ctx := first.ctx()
+	defer ctx.PopArc(ctx.PushArc(first.v))
 
-	n := adt.Unify(ctx, v.v, w.v)
+	n := adt.Unify(ctx, all...)
 
-	return makeValue(v.idx, n, v.parent_)
+	return makeValue(first.idx, n, first.parent_)
 }
 
-// UnifyAccept is like [Value.Unify](w), but will disregard the closedness rules for
-// v and w, and will, instead, only allow fields that are present in accept.
+// Unify reports the greatest lower bound of v and w.
 //
-// UnifyAccept is used to piecemeal unify individual conjuncts obtained from
-// accept without violating closedness rules.
+// To unify any number of values in a single call, see [Unify].
+func (v Value) Unify(w Value) Value {
+	return Unify(v, w)
+}
+
+// UnifyAccept is like [Value.Unify], but enforces the closedness rules of
+// accept rather than those of v and w. The unification of v and w is computed
+// as if both were open, so neither rejects fields contributed by the other; a
+// field is then allowed in the result only if accept permits it. The values and
+// constraints of accept are used solely for this check and are not otherwise
+// unified into the result.
+//
+// This is used to unify the individual conjuncts of a closed schema one at a
+// time, where a single conjunct may be closed and reject fields contributed by
+// its siblings. Passing the whole schema as accept defers the closedness check
+// to the combined result.
+//
+// accept must be non-nil, or UnifyAccept panics.
 func (v Value) UnifyAccept(w Value, accept Value) Value {
 	if v.v == nil {
 		return w
@@ -1926,7 +1995,9 @@ func (v hiddenValue) Reference() (inst *Instance, path []string) {
 
 // ReferencePath returns the value and path referred to by this value such that
 // [Value.LookupPath](path) resolves to the same value, or no path if this value
-// is not a reference.
+// is not a reference. A disjunction whose default the referenced value
+// subsumes, such as "*1 | a", reports the reference to a, whose value lacks
+// the default.
 //
 // The path is absolute from root and reflects where the reference resolves,
 // not its syntax: scope-relative and absolute references may report the same
@@ -1957,6 +2028,7 @@ func (v Value) ReferencePath() (root Value, p Path) {
 		}
 	}
 
+	expr = v.unwrapDisjunction(env, expr)
 	x, path := reference(v.idx, ctx, env, expr)
 	if x == nil {
 		return Value{}, Path{}
@@ -2046,12 +2118,20 @@ type options struct {
 }
 
 // An Option defines modes of evaluation.
+//
+// Not every option is honored by every method that accepts options. Each
+// option below documents the methods it applies to; passing an option to a
+// method it does not apply to has no effect. The methods that accept options
+// are [Value.Syntax], [Value.Fields], [Value.Subsume], and [Value.Validate].
 type Option option
 
 type option func(p *options)
 
 // Final indicates a value is final. It implicitly closes all structs and lists
 // in a value and selects defaults.
+//
+// It applies to [Value.Syntax], [Value.Fields], [Value.Subsume], and
+// [Value.Validate].
 func Final() Option {
 	return func(o *options) {
 		o.final = true
@@ -2061,7 +2141,9 @@ func Final() Option {
 	}
 }
 
-// Schema specifies the input is a Schema. Used only by [Value.Subsume].
+// Schema specifies the input is a Schema.
+//
+// It applies only to [Value.Subsume].
 func Schema() Option {
 	return func(o *options) {
 		o.ignoreClosedness = true
@@ -2072,6 +2154,8 @@ func Schema() Option {
 //
 // For [Value.Validate] this means it returns an error if this is not the case.
 // In other cases a non-concrete value will be replaced with an error.
+//
+// It applies to [Value.Syntax], [Value.Fields], and [Value.Validate].
 func Concrete(concrete bool) Option {
 	return func(p *options) {
 		if concrete {
@@ -2087,12 +2171,16 @@ func Concrete(concrete bool) Option {
 
 // InlineImports causes references to values within imported packages to be
 // inlined. References to builtin packages are not inlined.
+//
+// It applies only to [Value.Syntax].
 func InlineImports(expand bool) Option {
 	return func(p *options) { p.inlineImports = expand }
 }
 
 // DisallowCycles forces validation in the presence of cycles, even if
 // non-concrete values are allowed. This is implied by [Concrete].
+//
+// It applies only to [Value.Validate].
 func DisallowCycles(disallow bool) Option {
 	return func(p *options) { p.disallowCycles = disallow }
 }
@@ -2100,7 +2188,8 @@ func DisallowCycles(disallow bool) Option {
 // ErrorsAsValues treats errors as a regular value, including them at the
 // location in the tree where they occur, instead of interpreting them as a
 // configuration-wide failure that is returned instead of root value.
-// Used by [Value.Syntax].
+//
+// It applies only to [Value.Syntax].
 func ErrorsAsValues(show bool) Option {
 	return func(p *options) { p.showErrors = show }
 }
@@ -2112,12 +2201,17 @@ func ErrorsAsValues(show bool) Option {
 //
 // The option InlineImports overrides this option with respect to ensuring the
 // output is self contained.
+//
+// It applies to [Value.Syntax] and [Value.Subsume].
 func Raw() Option {
 	return func(p *options) { p.raw = true }
 }
 
 // All indicates that all fields and values should be included in processing
 // even if they can be elided or omitted.
+//
+// It applies to [Value.Syntax] and [Value.Fields], although [Value.Fields]
+// never includes attributes.
 func All() Option {
 	return func(p *options) {
 		p.omitAttrs = false
@@ -2128,7 +2222,12 @@ func All() Option {
 }
 
 // Docs indicates whether docs should be included.
+//
+// It applies only to [Value.Syntax].
 func Docs(include bool) Option {
+	// TODO: the include argument is ignored, so Docs(false) still includes docs.
+	// Respecting it would drop comments from cue export --out cue,
+	// which passes Docs(false) by default; see https://cuelang.org/issue/1180.
 	return func(p *options) { p.docs = true }
 }
 
@@ -2136,6 +2235,8 @@ func Docs(include bool) Option {
 //
 // Definitions may still be included for certain functions if they are referred
 // to by other values.
+//
+// It applies to [Value.Syntax] and [Value.Fields].
 func Definitions(include bool) Option {
 	return func(p *options) {
 		p.hasHidden = true
@@ -2148,6 +2249,8 @@ func Definitions(include bool) Option {
 // constraints such as `[_]: int` or `[=~"^a"]: string` but
 // not the ellipsis pattern as selected by [AnyString]: that
 // can be found with [Value.LookupPath](cue.MakePath(cue.AnyString)).
+//
+// It applies only to [Value.Fields].
 func Patterns(include bool) Option {
 	// TODO we can include patterns, but there's no way
 	// of iterating over patterns _only_ which might be
@@ -2159,6 +2262,8 @@ func Patterns(include bool) Option {
 }
 
 // Hidden indicates that definitions and hidden fields should be included.
+//
+// It applies to [Value.Syntax] and [Value.Fields].
 func Hidden(include bool) Option {
 	return func(p *options) {
 		p.hasHidden = true
@@ -2168,11 +2273,16 @@ func Hidden(include bool) Option {
 }
 
 // Optional indicates that optional fields should be included.
+//
+// It applies to [Value.Syntax] and [Value.Fields].
 func Optional(include bool) Option {
 	return func(p *options) { p.omitOptional = !include }
 }
 
 // Attributes indicates that attributes should be included.
+//
+// It applies only to [Value.Syntax]. In particular, it has no effect on
+// [Value.Fields], which never includes attributes.
 func Attributes(include bool) Option {
 	return func(p *options) { p.omitAttrs = !include }
 }
@@ -2188,13 +2298,13 @@ func (o *options) updateOptions(opts []Option) {
 	}
 }
 
-// Validate reports any errors, recursively. The returned error may represent
-// more than one error, retrievable with [errors.Errors], if more than one
-// exists.
+// Validate reports errors in v, recursively. The returned error may
+// represent more than one error, retrievable with [errors.Errors].
 //
-// Note that by default not all errors are reported, unless options like
-// [Concrete] are used. The [Final] option can be used to check for missing
-// required fields.
+// By default, incomplete values such as non-concrete fields are not
+// reported; use [Concrete] for that. Use [Concrete] or [Final] to report
+// missing required fields. Definitions and hidden fields within v never
+// need to be concrete.
 func (v Value) Validate(opts ...Option) error {
 	o := options{}
 	o.updateOptions(opts)
@@ -2203,14 +2313,13 @@ func (v Value) Validate(opts ...Option) error {
 		Concrete:       o.concrete,
 		Final:          o.final,
 		DisallowCycles: o.disallowCycles,
-		AllErrors:      true,
 	}
 
-	b := adt.Validate(v.ctx(), v.v, cfg)
-	if b != nil {
-		return v.toErr(b)
+	var err errors.Error
+	for _, b := range adt.ValidateAll(v.ctx(), v.v, cfg) {
+		err = errors.Append(err, v.toErr(b))
 	}
-	return nil
+	return err
 }
 
 // Walk descends into all values of v, calling f. If f returns false, Walk
@@ -2268,11 +2377,21 @@ func (v Value) Walk(before func(Value) bool, after func(Value)) {
 // For selector and index expressions it returns the subject and then the index.
 // For selectors, the index is the string value of the identifier.
 //
+// For slice expressions it returns the subject, the low bound, and the high
+// bound, in that order. An omitted bound is the zero Value.
+//
 // For interpolations it returns a sequence of values to be concatenated, some
 // of which will be literal strings and some unevaluated expressions.
 //
 // A builtin call expression returns the value of the builtin followed by the
 // args of the call.
+//
+// For disjunctions, default arms that another arm subsumes are omitted, so
+// "*20 | int & >=1 & <=100" reports the expression of "int & >=1 & <=100"
+// alone, and "*1 | a" is a reference to a, as [Value.ReferencePath] also
+// reports. Values that are not expressions, such as a
+// struct literal without embeddings, report [NoOp] and the value itself, or
+// the surviving disjunct when it is such a value.
 func (v Value) Expr() (Op, []Value) {
 	// TODO: return v if this is complete? Yes for now
 	if v.v == nil {
@@ -2361,45 +2480,22 @@ process:
 			count++
 			a = append(a, remakeValue(v, env, disjunct))
 		}
+		if count == 1 {
+			// Report the sole remaining disjunct as the value itself.
+			return a[0].Expr()
+		}
 		if count > 1 {
 			op = OrOp
 		}
 
 	case *adt.DisjunctionExpr:
-		// Filter defaults that are subsumed by another value.
-		count := 0
-	outerExpr:
-		for _, disjunct := range x.Values {
-			if disjunct.Default {
-				for _, n := range x.Values {
-					a := adt.Vertex{
-						Label: v.v.Label,
-					}
-					b := a
-					a.AddConjunct(adt.MakeRootConjunct(env, n.Val))
-					b.AddConjunct(adt.MakeRootConjunct(env, disjunct.Val))
-
-					ctx := v.ctx()
-					a.Finalize(ctx)
-					b.Finalize(ctx)
-					if allowed(ctx, v.v, &b) != nil {
-						// Everything subsumed bottom
-						continue outerExpr
-					}
-					if allowed(ctx, v.v, &a) != nil {
-						// An error doesn't subsume anything except another error.
-						continue
-					}
-					a.Parent = v.v.Parent
-					if !n.Default && subsume.Simplify.Value(ctx, &a, &b) == nil {
-						continue outerExpr
-					}
-				}
-			}
-			count++
-			a = append(a, remakeValue(v, env, disjunct.Val))
+		for _, d := range v.survivingDisjuncts(env, x) {
+			a = append(a, remakeValue(v, env, d))
 		}
-		if count > 1 {
+		if len(a) == 1 {
+			return a[0].Expr()
+		}
+		if len(a) > 1 {
 			op = adt.OrOp
 		}
 
@@ -2432,9 +2528,13 @@ process:
 		a = append(a, remakeValue(v, env, x.Index))
 		op = IndexOp
 	case *adt.SliceExpr:
-		a = append(a, remakeValue(v, env, x.X))
-		a = append(a, remakeValue(v, env, x.Lo))
-		a = append(a, remakeValue(v, env, x.Hi))
+		a = append(a, remakeValue(v, env, x.X), Value{}, Value{})
+		if x.Lo != nil {
+			a[1] = remakeValue(v, env, x.Lo)
+		}
+		if x.Hi != nil {
+			a[2] = remakeValue(v, env, x.Hi)
+		}
 		op = SliceOp
 	case *adt.CallExpr:
 		// Interpret "and" and "or" builtin semantically.
@@ -2563,4 +2663,55 @@ process:
 		a = append(a, v)
 	}
 	return op, a
+}
+
+// survivingDisjuncts returns the disjuncts of x that remain once the default
+// disjuncts subsumed by another disjunct are dropped. A value whose disjunction
+// has a single surviving disjunct is treated as that disjunct by [Value.Expr]
+// and [Value.ReferencePath], but not by [Dereference], which would lose the
+// default.
+func (v Value) survivingDisjuncts(env *adt.Environment, x *adt.DisjunctionExpr) []adt.Expr {
+	var a []adt.Expr
+outer:
+	for _, disjunct := range x.Values {
+		if disjunct.Default {
+			for _, n := range x.Values {
+				a := adt.Vertex{
+					Label: v.v.Label,
+				}
+				b := a
+				a.AddConjunct(adt.MakeRootConjunct(env, n.Val))
+				b.AddConjunct(adt.MakeRootConjunct(env, disjunct.Val))
+
+				ctx := v.ctx()
+				a.Finalize(ctx)
+				b.Finalize(ctx)
+				if allowed(ctx, v.v, &b) != nil {
+					// Everything subsumed bottom
+					continue outer
+				}
+				if allowed(ctx, v.v, &a) != nil {
+					// An error doesn't subsume anything except another error.
+					continue
+				}
+				a.Parent = v.v.Parent
+				if !n.Default && subsume.Simplify.Value(ctx, &a, &b) == nil {
+					continue outer
+				}
+			}
+		}
+		a = append(a, disjunct.Val)
+	}
+	return a
+}
+
+// unwrapDisjunction returns the single surviving disjunct of expr if it is a
+// disjunction with one, and expr itself otherwise.
+func (v Value) unwrapDisjunction(env *adt.Environment, expr adt.Expr) adt.Expr {
+	if x, ok := expr.(*adt.DisjunctionExpr); ok {
+		if a := v.survivingDisjuncts(env, x); len(a) == 1 {
+			return a[0]
+		}
+	}
+	return expr
 }

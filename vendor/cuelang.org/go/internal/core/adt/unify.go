@@ -49,6 +49,12 @@ func (v *Vertex) getBareState(c *OpContext) *nodeContext {
 		return nil
 	}
 	if v.state == nil {
+		if v.isFinal() {
+			// A sharing vertex keeps the status its target had before it was
+			// unified. Its target is done, so there is nothing left to do,
+			// and v may be shared between goroutines, so do not mutate it.
+			return nil
+		}
 		v.state = c.newNodeContext(v)
 		v.state.initBare()
 	}
@@ -113,95 +119,6 @@ func (n *nodeContext) scheduleConjuncts() {
 		ci := c.CloseInfo
 		ci = ctx.combineCycleInfo(ci)
 		n.scheduleConjunct(c, ci)
-	}
-}
-
-// flushDeferredCyclicConjuncts re-schedules cyclic conjuncts that
-// [nodeContext.scheduleConjunct] postponed but that cannot themselves
-// trigger infinite recursion — currently those whose resolver arguments
-// are all [LabelReference]. The CallExpr deferment is a conservative
-// cycle break that waits for a non-cyclic conjunct to confirm the node
-// can terminate; when none arrives, the deferred ones would otherwise
-// stay parked in [nodeContext.cyclicConjuncts] and the node resolves to _.
-//
-// This construct is necessary after the pushdown algorithm moved from pushing
-// down fields to pushing down dependencies.
-func (n *nodeContext) flushDeferredCyclicConjuncts() {
-	if len(n.cyclicConjuncts) == 0 || len(n.scheduler.tasks) > 0 {
-		return
-	}
-
-	// Suppress further deferment on this node so dispatched conjuncts
-	// cannot re-append into n.cyclicConjuncts.
-	n.hasNonCyclic = true
-
-	// In-place two-pointer compaction: dispatch safe entries, keep
-	// unsafe ones at the front of the slice.
-	write := 0
-	for read := 0; read < len(n.cyclicConjuncts); read++ {
-		cc := n.cyclicConjuncts[read]
-		if !isSafeToFlushCyclic(cc.c.Elem()) {
-			if write != read {
-				n.cyclicConjuncts[write] = cc
-			}
-			write++
-			continue
-		}
-		ci := cc.c.CloseInfo
-		ci.CycleType = NoCycle
-		if cc.arc != nil {
-			// Unreachable today: safe entries are Evaluators, not
-			// arc-bearing Resolvers. Kept for forward compatibility.
-			n.scheduleVertexConjuncts(cc.c, cc.arc, ci)
-		} else {
-			c := cc.c
-			c.CloseInfo = ci
-			n.scheduleConjunct(c, ci)
-		}
-	}
-	n.cyclicConjuncts = n.cyclicConjuncts[:write]
-}
-
-// isSafeToFlushCyclic reports whether a conjunct's expression contains
-// only resolvers that cannot trigger a vertex re-entry — currently just
-// [LabelReference], which reads a label from the surrounding env. Other
-// resolvers (FieldReference, SelectorExpr, etc.) may indirectly re-enter
-// the same vertex being evaluated and so must remain deferred.
-func isSafeToFlushCyclic(x Elem) bool {
-	switch v := x.(type) {
-	case *LabelReference:
-		return true
-	case Value:
-		return true
-	case *BinaryExpr:
-		return isSafeToFlushCyclic(v.X) && isSafeToFlushCyclic(v.Y)
-	case *UnaryExpr:
-		return isSafeToFlushCyclic(v.X)
-	case *CallExpr:
-		for _, a := range v.Args {
-			if !isSafeToFlushCyclic(a) {
-				return false
-			}
-		}
-		return true
-	case *ListLit:
-		for _, e := range v.Elems {
-			if expr, ok := e.(Expr); ok && !isSafeToFlushCyclic(expr) {
-				return false
-			}
-		}
-		return true
-	case *Interpolation:
-		for _, p := range v.Parts {
-			if !isSafeToFlushCyclic(p) {
-				return false
-			}
-		}
-		return true
-	default:
-		// Conservatively assume anything else (Resolver, embeddings,
-		// comprehensions, etc.) may re-enter.
-		return false
 	}
 }
 
@@ -330,10 +247,6 @@ func (v *Vertex) unify(c *OpContext, flags Flags) bool {
 
 	defer n.unmarkDepth(n.markDepth())
 
-	// Recover from over-conservative CallExpr deferment that would otherwise
-	// leave the node's value unresolved.
-	n.flushDeferredCyclicConjuncts()
-
 	n.process(nodeOnlyNeeds, mode)
 
 	if n.node.ArcType != ArcPending &&
@@ -424,18 +337,7 @@ func (v *Vertex) unify(c *OpContext, flags Flags) bool {
 		}
 
 		if v := n.node.Value(); v != nil && IsConcrete(v) {
-			// Ensure that checks are not run again when this value is used
-			// in a validator.
-			checks := n.checks
-			n.checks = n.checks[:0]
-			for _, v := range checks {
-				// TODO(errors): make Validate return bottom and generate
-				// optimized conflict message. Also track and inject IDs
-				// to determine origin location.s
-				if b := c.Validate(v, n.node); b != nil {
-					n.addBottom(b)
-				}
-			}
+			n.runChecks(c)
 		}
 
 	// TODO(pushdown): remove
@@ -485,9 +387,6 @@ func (v *Vertex) unify(c *OpContext, flags Flags) bool {
 		}
 		// NOTE: setting ClosedNonRecursive is not necessary, as it is
 		// handled by scheduleValue.
-		if w.HasEllipsis {
-			v.HasEllipsis = true
-		}
 
 		v.status = w.status
 
@@ -512,6 +411,9 @@ func (v *Vertex) unify(c *OpContext, flags Flags) bool {
 		// Ensure that shared nodes comply to the same requirements as we
 		// need for the current node.
 		w.unify(c, Flags{condition: needs, mode: mode, checkTypos: checkTypos})
+
+		// Copy HasEllipsis once w had the chance to clear it.
+		v.HasEllipsis = w.HasEllipsis
 
 		return true
 	}
@@ -566,6 +468,9 @@ func (v *Vertex) unify(c *OpContext, flags Flags) bool {
 
 	if checkTypos {
 		n.checkTypos()
+		if n.node.HasEllipsis && !n.openByEllipsis() {
+			n.node.HasEllipsis = false
+		}
 	}
 
 	// After this we no longer need the defIDs of the conjuncts. By clearing
@@ -636,7 +541,63 @@ func (n *nodeContext) updateScalar() {
 			n.setBaseValue(n.scalar)
 		}
 		n.signal(scalarKnown)
+		n.validateScalar()
 	}
+}
+
+// validateScalar runs the collected validators of a scalar value as soon as
+// all its conjuncts are in, rather than once its subfields are processed, as
+// [Vertex.unify] does for any value. A scalar has no subfields to wait for, and
+// a node that is only read through a reference, such as a field of an inline
+// struct or let, may never be processed that far, so a referrer would see the
+// value but never the validation error. A dynamic vertex, such as a
+// comprehension's let clause, has no path of its own and is checked by
+// whatever created it, where its value is used.
+func (n *nodeContext) validateScalar() {
+	if len(n.checks) > 0 && !n.node.IsDynamic && allTasksFinished(n) {
+		// The value may be reached from a task of another node; the error
+		// belongs to this one.
+		c := n.ctx
+		defer c.PopArc(c.PushArc(n.node))
+		n.runChecks(c)
+	}
+}
+
+// runChecks runs the collected validators against the node's value, once:
+// they are not run again when the value is used in a validator. The errors go
+// to c, which may be a context other than the node's own when that context
+// finalizes the node, as a builtin marshaling its argument does.
+func (n *nodeContext) runChecks(c *OpContext) {
+	if len(n.checks) == 0 {
+		return
+	}
+	checks := n.checks
+	n.checks = n.checks[:0]
+	// Validators do not run on an erroneous value. Adding the error of a
+	// validator given one would replace a child error with a copy that no
+	// longer leads to the other child errors. A node with conflicting kinds
+	// is erroneous too, even if its error is only set as its value later.
+	if n.kind == BottomKind || n.node.IsErr() {
+		return
+	}
+	for _, check := range checks {
+		// TODO(errors): make Validate return bottom and generate
+		// optimized conflict message. Also track and inject IDs
+		// to determine origin location.s
+		if b := c.Validate(check, n.node); b != nil {
+			n.addBottom(b)
+		}
+	}
+}
+
+// failsDisjunct reports whether arc a of n holds a permanent error, which
+// eliminates the disjunct n is part of whatever its other arcs hold.
+func (n *nodeContext) failsDisjunct(a *Vertex) bool {
+	if !n.isDisjunct || !a.faultsParent() {
+		return false
+	}
+	b := a.Bottom()
+	return b != nil && !b.IsIncomplete()
 }
 
 func (n *nodeContext) completeAllArcs(needs condition, mode runMode, checkTypos bool) bool {
@@ -680,6 +641,12 @@ func (n *nodeContext) completeAllArcs(needs condition, mode runMode, checkTypos 
 			success = false
 		}
 
+		// TODO: leave the skipped arcs out of the error message, which now
+		// prints them as cycle errors.
+		if n.failsDisjunct(a) {
+			break
+		}
+
 		// At this point we need to ensure that all notification cycles
 		// for Arc a have been processed.
 
@@ -717,27 +684,44 @@ func (n *nodeContext) completeAllArcs(needs condition, mode runMode, checkTypos 
 		}
 	}
 
-	n.node.Arcs = slices.DeleteFunc(n.node.Arcs, func(a *Vertex) bool {
-		return a.ArcType == ArcNotPresent
-	})
+	// Do not delete in place: a caller further up the stack may be ranging
+	// over the arcs, such as a for clause whose guard finalizes this node.
+	notPresent := func(a *Vertex) bool { return a.ArcType == ArcNotPresent }
+	if slices.ContainsFunc(n.node.Arcs, notPresent) {
+		// reclaimTempBuffers does not reach a dropped arc, so reclaim it here.
+		for _, a := range n.node.Arcs {
+			if notPresent(a) {
+				n.ctx.reclaimRecursive(a)
+			}
+		}
+		n.node.Arcs = slices.DeleteFunc(slices.Clone(n.node.Arcs), notPresent)
+	}
 
+	failed := false
 	for _, a := range n.node.Arcs {
-		// Errors are allowed in let fields. Handle errors and failure to
-		// complete accordingly.
-		if !a.Label.IsLet() && a.ArcType <= ArcRequired {
-			a := a.DerefValue()
-			if err := a.Bottom(); err != nil {
+		if a.faultsParent() {
+			// The fields after the one which fails a disjunct were skipped
+			// above, so an error one of them holds must not replace its
+			// error. A custom error may, as all of those are reported.
+			//
+			// TODO: report the custom errors of the fields which were not
+			// evaluated as well.
+			if err := a.Bottom(); err != nil && (!failed || err.Code == UserError) {
 				n.AddChildError(err)
 			}
 			success = true // other arcs are irrelevant
 		}
+		failed = failed || n.failsDisjunct(a)
 	}
 
 	// TODO: perhaps this code can go once we have builtins for comparing to
 	// bottom.
 	for _, c := range n.postChecks {
 		ctx := n.ctx
-		f := ctx.PushState(c.env, c.expr.Source())
+		// Replay the check in the cycle context of the original evaluation;
+		// without it a self-referential expression is no longer recognized
+		// as cyclic and re-expands without bound.
+		f := ctx.pushConjunct(MakeConjunct(c.env, c.expr, c.ci))
 
 		v := ctx.evalState(c.expr, Flags{
 			status:    finalized,
@@ -760,7 +744,24 @@ func (n *nodeContext) completeAllArcs(needs condition, mode runMode, checkTypos 
 			})
 		}
 
-		ctx.PopState(f)
+		ctx.popConjunct(f)
+	}
+
+	// The declared parameter defaults of function literals evaluated within
+	// this node are checked now that its arcs have completed, so that
+	// nothing a default refers to is still in flight; see
+	// [Function.scheduleDefaultCheck]. An error is placed on the vertex that
+	// holds the literal, making the function value itself the error, and
+	// recorded on this node like any other child error.
+	for _, chk := range n.funcDefaultChecks {
+		b := chk.fn.checkDefaults(n.ctx, chk.env)
+		if b == nil {
+			continue
+		}
+		if chk.holder != nil && chk.holder != n.node {
+			chk.holder.AddErr(n.ctx, b)
+		}
+		n.AddChildError(b)
 	}
 
 	// This should be called after all arcs have been processed, because
@@ -851,9 +852,29 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 
 		// Drive the lookup target forward when its scheduler has not yet
 		// started everything; the !allTasksStarted guard keeps us out of
-		// nodes that are already mid-execution.
+		// nodes that are already mid-execution. Tasks completing only
+		// allTasksCompleted are not forced (see
+		// [scheduler.noTaskMayDeclareArcs]): a pushed-down comprehension
+		// contributes only to the arcs it pre-created, so running the
+		// parent tasks registered on the requested arc, as processing it
+		// would, is enough. Run them here, as the arc's counters do not
+		// reflect its parent tasks, so the caller may read a scalar whose
+		// value is already known without processing it. A missing arc
+		// that no remaining task may declare is reported as such below.
+		//
+		// TODO(cycle): this removes one trigger of a deeper problem. When a
+		// forced task resolves a disjunction, doDisjunct leaks finalize
+		// mode into vertices outside its overlay, and the freeze
+		// cycle-breaker then commits permanent incomplete errors for tasks
+		// blocked on a vertex that is merely in-flight on the evaluation
+		// stack, not semantically cyclic. A more principled fix would
+		// distinguish stack re-entrancy from value cycles in the freeze
+		// path, or keep finalize scoped to the disjunct overlay.
 		if !allTasksStarted(state) {
-			state.process(valueKnown|fieldConjunctsKnown|allTasksCompleted, attemptOnly)
+			state.process(valueKnown|fieldConjunctsKnown, attemptOnly)
+			if arc := v.LookupRaw(f); arc != nil && arc.state != nil {
+				arc.state.runReadyParentTasks(attemptOnly)
+			}
 			state.updateScalar()
 		}
 	}
@@ -892,7 +913,7 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 		}
 		arcState = arc.getState(c)
 
-	case state == nil || state.meets(needTasksDone):
+	case state == nil || state.noTaskMayDeclareArcs():
 		// This arc cannot exist.
 		v.reportFieldIndexError(c, pos, f)
 		return nil
@@ -927,20 +948,22 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 
 			if arc.ArcType == ArcPending {
 				// In ignore mode (used for comprehension clause evaluation),
-				// always return the pending arc optimistically to avoid
-				// prematurely blocking comprehension expansion.
+				// return an existing pending arc optimistically to avoid
+				// prematurely blocking comprehension expansion. An arc
+				// created above comes back as nil, without an error, so
+				// that the caller retries once more is known.
 				if runMode == ignore {
 					return arcReturn
 				}
 
-				// In attemptOnly mode, return the pending arc if the container
-				// vertex still has work that may produce this field:
+				// In attemptOnly mode, return an existing pending arc, or nil
+				// for one created above, if the container vertex still has
+				// work that may produce this field:
 				//
 				//   - it has an active parent task (e.g., a comprehension that
 				//     may dynamically add this field), OR
-				//   - it has registered tasks for allTasksCompleted that have
-				//     not yet all completed (e.g., a builtin function whose
-				//     result may include this field).
+				//   - it has an unfinished task that may declare arcs (e.g., a
+				//     builtin function whose result may include this field).
 				//
 				// If neither condition holds, the field can never become a
 				// member, so treat it as ArcNotPresent. This ensures lookups
@@ -951,8 +974,7 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 						c.lookupPendingParent = true
 						return arcReturn
 					}
-					if state.provided&allTasksCompleted != 0 &&
-						state.counters[allTasksCompletedIdx] > 0 {
+					if state.mayDeclareArcs() {
 						return arcReturn
 					}
 				}
@@ -967,7 +989,12 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 			}
 
 		case yield:
-			arcState.process(needs, yield)
+			// Nothing else unifies an arc which is not rooted, such as one of
+			// an inline struct, so the lookup would yield forever. Ask for all
+			// tasks, as a pushed-down comprehension does not otherwise run.
+			if arc.Rooted() || !arc.unify(c, Flags{condition: needs | allTasksCompleted, mode: attemptOnly, checkTypos: false}) {
+				arcState.process(needs, yield)
+			}
 			// continue processing, as successful processing may still result
 			// in an invalid field.
 
@@ -996,15 +1023,7 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 			//   optional arc to a member arc (e.g. `if raises == _|_ { ret:
 			//   a: 1 }` upgrades `ret?: {}` to a regular member).
 			if arc.ArcType == ArcPending || arc.ArcType == ArcOptional {
-				cur := c.current()
-				shouldYield := false
-				for _, pt := range arcState.parentTasks {
-					if pt.state == taskRUNNING && pt != cur {
-						shouldYield = true
-						break
-					}
-				}
-				if shouldYield {
+				if arcState.hasRunningSiblingParentTask() {
 					// A parent task is actively running in the current call
 					// chain (triggered via processAncestors), but is not our
 					// own task. Yield and wait for the arc type to be
@@ -1056,6 +1075,10 @@ func (v *Vertex) lookup(c *OpContext, pos token.Pos, f Feature, flags Flags) *Ve
 		c.AddBottom(b) // TODO: unify error mechanism.
 		return arcReturn
 	case ArcMember:
+		// The pending arc created above is the result once it is a member.
+		if arcReturn == nil {
+			arcReturn = arc
+		}
 		return arcReturn
 
 	case ArcOptional:

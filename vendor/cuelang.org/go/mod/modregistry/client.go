@@ -37,6 +37,7 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/mod/sumdb/dirhash"
 	"golang.org/x/sync/errgroup"
 
 	"cuelang.org/go/cue/ast"
@@ -79,6 +80,10 @@ var ErrRegistryNotFound = fmt.Errorf("no registry configured for module")
 type RegistryLocation struct {
 	// Registry holds the registry to use to access the module.
 	Registry ociregistry.Interface
+	// Host optionally holds the host name of the registry,
+	// to be mentioned in error messages so that the user can
+	// tell which registry was being used.
+	Host string
 	// Repository holds the repository where the module is located.
 	Repository string
 	// Tag holds the tag for the module version. If an empty version
@@ -140,7 +145,7 @@ func (src *Client) Mirror(ctx context.Context, dst *Client, mv module.Version) e
 		return src.mirrorReferrers(ctx, dst, m.loc, dstLoc, m.manifestDigest)
 	}
 	if _, err := dstLoc.Registry.PushManifest(ctx, dstLoc.Repository, dstLoc.Tag, m.manifestContents, ocispec.MediaTypeImageManifest); err != nil {
-		return nil
+		return fmt.Errorf("cannot tag %v: %v", mv, registryError(err))
 	}
 
 	// Mirror any referrers that point to this manifest
@@ -158,11 +163,11 @@ func mirrorBlob(ctx context.Context, srcLoc, dstLoc RegistryLocation, desc ocisp
 	}
 	r, err := srcLoc.Registry.GetBlob(ctx, srcLoc.Repository, desc.Digest)
 	if err != nil {
-		return err
+		return registryError(err)
 	}
 	defer r.Close()
 	if _, err := dstLoc.Registry.PushBlob(ctx, dstLoc.Repository, desc, r); err != nil {
-		return err
+		return registryError(err)
 	}
 	return nil
 }
@@ -174,7 +179,7 @@ func (src *Client) mirrorReferrers(ctx context.Context, dst *Client, srcLoc, dst
 	// Iterate through all referrers that point to this manifest
 	for referrerDesc, err := range srcLoc.Registry.Referrers(ctx, srcLoc.Repository, manifestDigest, "") {
 		if err != nil {
-			return fmt.Errorf("failed to get referrers: %w", err)
+			return fmt.Errorf("failed to get referrers: %w", registryError(err))
 		}
 
 		g.Go(func() error {
@@ -196,7 +201,7 @@ func (src *Client) mirrorReferrer(ctx context.Context, dst *Client, srcLoc, dstL
 	// Get the referrer manifest from source
 	r, err := srcLoc.Registry.GetManifest(ctx, srcLoc.Repository, referrerDesc.Digest)
 	if err != nil {
-		return fmt.Errorf("failed to get referrer manifest %s: %w", referrerDesc.Digest, err)
+		return fmt.Errorf("failed to get referrer manifest %s: %w", referrerDesc.Digest, registryError(err))
 	}
 	defer r.Close()
 
@@ -227,7 +232,7 @@ func (src *Client) mirrorReferrer(ctx context.Context, dst *Client, srcLoc, dstL
 
 	// Push the referrer manifest itself (without a tag, just by content)
 	if _, err := dstLoc.Registry.PushManifest(ctx, dstLoc.Repository, "", manifestData, r.Descriptor().MediaType); err != nil {
-		return fmt.Errorf("failed to push referrer manifest %s: %w", referrerDesc.Digest, err)
+		return fmt.Errorf("failed to push referrer manifest %s: %w", referrerDesc.Digest, registryError(err))
 	}
 
 	return nil
@@ -240,16 +245,16 @@ func (c *Client) GetModule(ctx context.Context, m module.Version) (*Module, erro
 	loc, err := c.resolve(m)
 	if err != nil {
 		if errors.Is(err, ErrRegistryNotFound) {
-			return nil, ErrNotFound
+			return nil, &ModuleError{Module: m.String(), Err: ErrNotFound}
 		}
 		return nil, err
 	}
 	rd, err := loc.Registry.GetTag(ctx, loc.Repository, loc.Tag)
 	if err != nil {
 		if isNotExist(err) {
-			return nil, fmt.Errorf("module %v: %w", m, ErrNotFound)
+			return nil, &ModuleError{Module: m.String(), Err: ErrNotFound}
 		}
-		return nil, fmt.Errorf("module %v: %w", m, err)
+		return nil, &ModuleError{Module: m.String(), Host: loc.Host, Err: registryError(err)}
 	}
 	defer rd.Close()
 	data, err := io.ReadAll(rd)
@@ -323,7 +328,7 @@ func (c *Client) ModuleVersions(ctx context.Context, m string) (_req []string, _
 	for tag, err := range loc.Registry.Tags(ctx, loc.Repository, "") {
 		if err != nil {
 			if !isNotExist(err) {
-				return nil, fmt.Errorf("module %v: %w", m, err)
+				return nil, &ModuleError{Module: m, Host: loc.Host, Err: registryError(err)}
 			}
 			continue
 		}
@@ -354,7 +359,7 @@ type checkedModule struct {
 
 // putCheckedModule is like [Client.PutModule] except that it allows the
 // caller to do some additional checks (see [CheckModule] for more info).
-func (c *Client) putCheckedModule(ctx context.Context, m *checkedModule, meta *Metadata) error {
+func (c *Client) putCheckedModule(ctx context.Context, loc RegistryLocation, m *checkedModule, meta *Metadata) error {
 	var annotations map[string]string
 	if meta != nil {
 		annotations0, err := meta.annotations()
@@ -363,19 +368,18 @@ func (c *Client) putCheckedModule(ctx context.Context, m *checkedModule, meta *M
 		}
 		annotations = annotations0
 	}
-	loc, err := c.resolve(m.mv)
-	if err != nil {
-		return err
-	}
 	selfDigest, err := digest.FromReader(io.NewSectionReader(m.blobr, 0, m.size))
 	if err != nil {
 		return fmt.Errorf("cannot read module zip file: %v", err)
 	}
 	// Upload the actual module's content
 	// TODO should we use a custom media type for this?
+	// Note: we don't wrap this error, as mentioning the scratch config
+	// is almost entirely pointless to end users; what matters is the
+	// underlying error, such as failing to authenticate to the registry.
 	configDesc, err := c.scratchConfig(ctx, loc, moduleArtifactType)
 	if err != nil {
-		return fmt.Errorf("cannot make scratch config: %v", err)
+		return err
 	}
 	manifest := &ocispec.Manifest{
 		Versioned: specs.Versioned{
@@ -396,25 +400,88 @@ func (c *Client) putCheckedModule(ctx context.Context, m *checkedModule, meta *M
 		Annotations: annotations,
 	}
 
-	if _, err := loc.Registry.PushBlob(ctx, loc.Repository, manifest.Layers[0], io.NewSectionReader(m.blobr, 0, m.size)); err != nil {
+	// A registry with immutable tags refuses to tag a different manifest,
+	// yet the same files can produce a different zip archive,
+	// for example as compress/flate output changes between Go versions.
+	// When the tag already holds the same files, refer to its archive.
+	if desc, ok := c.sameTaggedZip(ctx, m, manifest.Layers[0]); ok {
+		manifest.Layers[0] = desc
+	} else if err := pushBlob(ctx, loc, manifest.Layers[0], io.NewSectionReader(m.blobr, 0, m.size)); err != nil {
 		return fmt.Errorf("cannot push module contents: %v", err)
 	}
-	if _, err := loc.Registry.PushBlob(ctx, loc.Repository, manifest.Layers[1], bytes.NewReader(m.modFileContent)); err != nil {
+	if err := pushBlob(ctx, loc, manifest.Layers[1], bytes.NewReader(m.modFileContent)); err != nil {
 		return fmt.Errorf("cannot push cue.mod/module.cue contents: %v", err)
 	}
 	manifestData, err := json.Marshal(manifest)
 	if err != nil {
 		return fmt.Errorf("cannot marshal manifest: %v", err)
 	}
+	// TODO: if any registry with immutable tags refuses a manifest identical
+	// to the one already tagged, skip PushManifest in that case.
 	if _, err := loc.Registry.PushManifest(ctx, loc.Repository, loc.Tag, manifestData, ocispec.MediaTypeImageManifest); err != nil {
-		return fmt.Errorf("cannot tag %v: %v", m.mv, err)
+		return fmt.Errorf("cannot tag %v: %v", m.mv, registryError(err))
 	}
 	return nil
+}
+
+// sameTaggedZip reports whether the module tagged as m's version holds
+// the same files as m, whose zip archive is described by desc.
+// If so, it returns desc updated to describe the tagged archive,
+// which may differ from desc even when the files are the same.
+// Any error, such as the tag not existing, is treated as a mismatch.
+func (c *Client) sameTaggedZip(ctx context.Context, m *checkedModule, desc ocispec.Descriptor) (ocispec.Descriptor, bool) {
+	tagged, err := c.GetModule(ctx, m.mv)
+	if err != nil {
+		return desc, false
+	}
+	taggedDesc := tagged.manifest.Layers[0]
+	if taggedDesc.Digest == desc.Digest {
+		// The tag already refers to this very archive.
+		return desc, true
+	}
+	if taggedDesc.Size > modzip.MaxZipFile ||
+		tagged.manifest.Layers[1].Digest != digest.FromBytes(m.modFileContent) {
+		return desc, false
+	}
+	blob, err := tagged.GetZip(ctx)
+	if err != nil {
+		return desc, false
+	}
+	defer blob.Close()
+	data, err := io.ReadAll(io.LimitReader(blob, taggedDesc.Size))
+	if err != nil {
+		return desc, false
+	}
+	taggedZip, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return desc, false
+	}
+	taggedHash, err1 := zipHash(taggedZip)
+	hash, err2 := zipHash(m.zipr)
+	if err1 != nil || err2 != nil || hash != taggedHash {
+		return desc, false
+	}
+	desc.Digest, desc.Size = taggedDesc.Digest, taggedDesc.Size
+	return desc, true
+}
+
+// zipHash returns the [dirhash.Hash1] of the files in z.
+func zipHash(z *zip.Reader) (string, error) {
+	names := make([]string, len(z.File))
+	for i, f := range z.File {
+		names[i] = f.Name
+	}
+	return dirhash.Hash1(names, func(name string) (io.ReadCloser, error) {
+		return z.Open(name)
+	})
 }
 
 // PutModule puts a module whose contents are held as a zip archive inside f.
 // It assumes all the module dependencies are correctly resolved and present
 // inside the cue.mod/module.cue file.
+//
+// If the module's tag already refers to the same module with the same files
+// in a different zip archive, that archive is kept and r is not uploaded.
 func (c *Client) PutModule(ctx context.Context, m module.Version, r io.ReaderAt, size int64) error {
 	return c.PutModuleWithMetadata(ctx, m, r, size, nil)
 }
@@ -426,9 +493,19 @@ func (c *Client) PutModule(ctx context.Context, m module.Version, r io.ReaderAt,
 func (c *Client) PutModuleWithMetadata(ctx context.Context, m module.Version, r io.ReaderAt, size int64, meta *Metadata) error {
 	cm, err := checkModule(m, r, size)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot put module %q: %w", m, err)
 	}
-	return c.putCheckedModule(ctx, cm, meta)
+	loc, err := c.resolve(m)
+	if err != nil {
+		return fmt.Errorf("cannot put module %q: %w", m, err)
+	}
+	if err := c.putCheckedModule(ctx, loc, cm, meta); err != nil {
+		if loc.Host != "" {
+			return fmt.Errorf("cannot put module %q to registry %q: %w", m, loc.Host, err)
+		}
+		return fmt.Errorf("cannot put module %q: %w", m, err)
+	}
+	return nil
 }
 
 // checkModule checks a module's zip file before uploading it.
@@ -445,7 +522,8 @@ func checkModule(m module.Version, blobr io.ReaderAt, size int64) (*checkedModul
 	}
 	modFileContent, mf, err := checkModFile(m, modf)
 	if err != nil {
-		return nil, fmt.Errorf("module.cue file check failed: %v", err)
+		// checkModFile errors generally name cue.mod/module.cue already.
+		return nil, err
 	}
 	return &checkedModule{
 		mv:             m,
@@ -509,7 +587,7 @@ func (m *Module) Version() module.Version {
 func (m *Module) ModuleFile(ctx context.Context) ([]byte, error) {
 	r, err := m.loc.Registry.GetBlob(ctx, m.loc.Repository, m.manifest.Layers[1].Digest)
 	if err != nil {
-		return nil, err
+		return nil, registryError(err)
 	}
 	defer r.Close()
 	return io.ReadAll(r)
@@ -526,13 +604,59 @@ func (m *Module) Metadata() (*Metadata, error) {
 // and the contents should not be assumed to be correct until the close
 // error has been checked.
 func (m *Module) GetZip(ctx context.Context) (io.ReadCloser, error) {
-	return m.loc.Registry.GetBlob(ctx, m.loc.Repository, m.manifest.Layers[0].Digest)
+	r, err := m.loc.Registry.GetBlob(ctx, m.loc.Repository, m.manifest.Layers[0].Digest)
+	if err != nil {
+		return nil, registryError(err)
+	}
+	return r, nil
 }
 
 // ManifestDigest returns the digest of the manifest representing
 // the module.
 func (m *Module) ManifestDigest() ociregistry.Digest {
 	return m.manifestDigest
+}
+
+// ModuleError is an error relating to a specific module, which its
+// message identifies along with the registry host when known.
+// Code adding further context to a ModuleError should avoid repeating
+// the module that the error already names; see [WrapModuleError].
+type ModuleError struct {
+	// Module holds the module path, including its version when known.
+	Module string
+	// Host optionally holds the host name of the registry being used.
+	Host string
+	// Err holds the underlying error; it is never nil.
+	Err error
+}
+
+func (e *ModuleError) Error() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "module %v", e.Module)
+	if e.Host != "" {
+		fmt.Fprintf(&sb, " in registry %q", e.Host)
+	}
+	if e.Err == ErrNotFound {
+		// The sentinel's own text would repeat the word "module";
+		// read as a single sentence instead.
+		sb.WriteString(" not found")
+	} else {
+		fmt.Fprintf(&sb, ": %v", e.Err)
+	}
+	return sb.String()
+}
+
+func (e *ModuleError) Unwrap() error { return e.Err }
+
+// WrapModuleError returns an error with the message "<op> <m>: <err>",
+// such as "cannot fetch foo.com/bar@v0.1.0: some error".
+// As an exception, when err is or wraps a [ModuleError], which already
+// names the module, err is returned unchanged to avoid repetition.
+func WrapModuleError(op string, m module.Version, err error) error {
+	if errors.As(err, new(*ModuleError)) {
+		return err
+	}
+	return fmt.Errorf("%s %v: %w", op, m, err)
 }
 
 func (c *Client) resolve(m module.Version) (RegistryLocation, error) {
@@ -576,7 +700,7 @@ func isNotExist(err error) bool {
 	// Also, some registries return an invalid error code with a 404
 	// response (see https://cuelang.org/issue/2982), so it
 	// seems reasonable to treat that as a non-found error too.
-	if herr := ociregistry.HTTPError(nil); errors.As(err, &herr) {
+	if herr, ok := errors.AsType[ociregistry.HTTPError](err); ok {
 		statusCode := herr.StatusCode()
 		return statusCode == http.StatusForbidden ||
 			statusCode == http.StatusNotFound
@@ -605,17 +729,26 @@ func isJSON(mediaType string) bool {
 // two-byte configuration {}.
 // https://github.com/opencontainers/image-spec/blob/main/manifest.md#example-of-a-scratch-config-or-layer-descriptor
 func (c *Client) scratchConfig(ctx context.Context, loc RegistryLocation, mediaType string) (ocispec.Descriptor, error) {
-	// TODO check if it exists already to avoid push?
 	content := []byte("{}")
 	desc := ocispec.Descriptor{
 		Digest:    digest.FromBytes(content),
 		MediaType: mediaType,
 		Size:      int64(len(content)),
 	}
-	if _, err := loc.Registry.PushBlob(ctx, loc.Repository, desc, bytes.NewReader(content)); err != nil {
+	if err := pushBlob(ctx, loc, desc, bytes.NewReader(content)); err != nil {
 		return ocispec.Descriptor{}, err
 	}
 	return desc, nil
+}
+
+// pushBlob pushes a blob unless it is already present,
+// as some registries reject uploads overwriting existing content.
+func pushBlob(ctx context.Context, loc RegistryLocation, desc ocispec.Descriptor, r io.Reader) error {
+	if _, err := loc.Registry.ResolveBlob(ctx, loc.Repository, desc.Digest); err == nil {
+		return nil
+	}
+	_, err := loc.Registry.PushBlob(ctx, loc.Repository, desc, r)
+	return registryError(err)
 }
 
 // singleResolver implements Resolver by always returning R,

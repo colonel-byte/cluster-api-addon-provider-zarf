@@ -140,6 +140,7 @@ import (
 	"maps"
 	"slices"
 
+	"cuelang.org/go/cue/stats"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
 )
@@ -368,6 +369,7 @@ func (batchesPtr *structMetaBatches) appendBatch(batch structMetaBatch) {
 type vertexFeatures struct {
 	builder      *GraphBuilder
 	dynFieldsMap map[*adt.DynamicField][]adt.Feature
+	stats        *stats.Counts
 }
 
 func (vf *vertexFeatures) compareStructMeta(a, b structMeta) int {
@@ -396,6 +398,7 @@ func VertexFeatures(ctx *adt.OpContext, v *adt.Vertex) []adt.Feature {
 	vf := &vertexFeatures{
 		builder:      builder,
 		dynFieldsMap: dynFieldsMap,
+		stats:        ctx.Stats(),
 	}
 
 	slices.SortFunc(roots, vf.compareStructMeta)
@@ -436,21 +439,31 @@ func VertexFeatures(ctx *adt.OpContext, v *adt.Vertex) []adt.Feature {
 	batches.appendBatch(batch)
 	debug("batches: %v\n", batches)
 
+	// The frontier is the set of features which must precede whichever
+	// feature is added next. Its order does not reach the result, as
+	// the sort below orders its candidates by name, so it is kept
+	// sorted to drop duplicates.
 	var previous, next []adt.Feature
 	var previousBatch structMetaBatch
 	for _, batch := range batches {
 		explicit := batch.isExplicit()
 		if len(previousBatch) != 0 &&
 			previousBatch[0].pos.Filename() != batch[0].pos.Filename() {
-			previous = nil
+			previous = previous[:0]
 		}
 		for _, root := range batch {
 			root.isExplicit = explicit
 			debug("starting root. Explicit unification? %v\n", explicit)
-			next = append(next, vf.addEdges(previous, root)...)
+			if last := vf.addEdges(previous, root); last != adt.InvalidLabel {
+				next = append(next, last)
+			} else {
+				// A struct without fields leaves previous in place.
+				next = append(next, previous...)
+			}
 		}
-		previous = next
-		next = nil
+		slices.Sort(next)
+		next = slices.Compact(next)
+		previous, next = next, previous[:0]
 		previousBatch = batch
 	}
 
@@ -458,11 +471,15 @@ func VertexFeatures(ctx *adt.OpContext, v *adt.Vertex) []adt.Feature {
 	return builder.Build().Sort(ctx)
 }
 
-func (vf *vertexFeatures) addEdges(previous []adt.Feature, sMeta *structMeta) []adt.Feature {
+// addEdges adds an edge from every member of previous to the first
+// field of sMeta's struct, and from each field to the one after it.
+// It returns the last field, or [adt.InvalidLabel] when the struct
+// contributes no fields and previous stays in place.
+func (vf *vertexFeatures) addEdges(previous []adt.Feature, sMeta *structMeta) adt.Feature {
 	debug("--- S %p (sl: %p) (explicit? %v) ---\n",
 		sMeta, sMeta.structInfo.StructLit, sMeta.isExplicit)
 	debug(" previous: %v\n", previous)
-	var next []adt.Feature
+	last := adt.InvalidLabel
 
 	filename := sMeta.pos.Filename()
 	debug(" filename: %s (%v)\n", filename, sMeta.pos)
@@ -509,15 +526,18 @@ func (vf *vertexFeatures) addEdges(previous []adt.Feature, sMeta *structMeta) []
 				debug("    %v %v\n", node, exists)
 				node = vf.builder.EnsureNode(currentLabel)
 				node.structMeta = sMeta
-				next = append(next, currentLabel)
-				for _, prevLabel := range previous {
+				from := previous
+				if last != adt.InvalidLabel {
+					from = []adt.Feature{last}
+				}
+				for _, prevLabel := range from {
+					vf.stats.OrderEdges++
 					vf.builder.AddEdge(prevLabel, currentLabel)
 				}
-				previous = next
-				next = nil
+				last = currentLabel
 			}
 		}
 	}
 
-	return previous
+	return last
 }

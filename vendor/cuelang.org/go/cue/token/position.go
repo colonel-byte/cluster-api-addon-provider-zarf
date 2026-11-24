@@ -16,9 +16,9 @@ package token
 
 import (
 	"cmp"
-	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 
 	"cuelang.org/go/internal/core/layer"
@@ -56,7 +56,7 @@ func (pos Position) String() string {
 		if s != "" {
 			s += ":"
 		}
-		s += fmt.Sprintf("%d:%d", pos.Line, pos.Column)
+		s += strconv.Itoa(pos.Line) + ":" + strconv.Itoa(pos.Column)
 	}
 	if s == "" {
 		s = "-"
@@ -79,6 +79,15 @@ type Pos struct {
 func (p Pos) File() *File {
 	// assumed: p.index() != 0 iff p.file != nil
 	return p.file
+}
+
+// LanguageVersion reports the language version of the file that p belongs to,
+// as [File.LanguageVersion] does. It is empty for a position with no file.
+func (p Pos) LanguageVersion() string {
+	if !p.HasAbsPos() {
+		return ""
+	}
+	return p.file.LanguageVersion()
 }
 
 // hiddenPos allows defining methods in Pos that are hidden from public
@@ -176,7 +185,7 @@ var NoPos = Pos{}
 // RelPos indicates the relative position of token to the previous token.
 type RelPos int
 
-//go:generate go tool stringer -type=RelPos -linecomment
+// See the stringer directive in token.go for the generated String method.
 
 const (
 	// NoRelPos indicates no relative position is specified.
@@ -393,6 +402,16 @@ func (f *hiddenFile) SetExperiments(experiments *cueexperiment.File) {
 	f.experiments = experiments
 }
 
+// LanguageVersion reports the language version recorded for the file, if any.
+// The parser records the version it resolved, which defaults to the current
+// language version.
+func (f *File) LanguageVersion() string {
+	if f.experiments == nil {
+		return ""
+	}
+	return f.experiments.LanguageVersion()
+}
+
 // NOTE: this is an internal API and may change at any time without notice.
 //
 // SetLayer sets the layer priority for this file. The priority parameter
@@ -589,7 +608,7 @@ type lineInfo struct {
 func (f *File) AddLineInfo(offset int, filename string, line int) {
 	x := index(offset)
 	f.mutex.Lock()
-	if i := len(f.infos); i == 0 || index(f.infos[i-1].Offset) < x && x < f.size {
+	if i := len(f.infos); (i == 0 || index(f.infos[i-1].Offset) < x) && x < f.size {
 		f.infos = append(f.infos, lineInfo{offset, filename, line})
 	}
 	f.mutex.Unlock()
@@ -636,6 +655,8 @@ func searchLineInfos(a []lineInfo, x int) int {
 // If adjusted is set, unpack will return the filename and line information
 // possibly adjusted by //line comments; otherwise those comments are ignored.
 func (f *File) unpack(offset index, adjusted bool) (filename string, line, column int) {
+	f.mutex.RLock()
+	defer f.mutex.RUnlock()
 	filename = f.name
 	if i := searchInts(f.lines, offset); i >= 0 {
 		line, column = i+1, int(offset-f.lines[i]+1)

@@ -26,6 +26,7 @@ import (
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/build"
+	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/parser"
 	"cuelang.org/go/internal/filetypes"
 	"cuelang.org/go/internal/mod/modimports"
@@ -35,7 +36,6 @@ import (
 	"cuelang.org/go/internal/mod/semver"
 	"cuelang.org/go/mod/modfile"
 	"cuelang.org/go/mod/module"
-	pkgpath "cuelang.org/go/pkg/path"
 )
 
 // Instances returns the instances named by the command line arguments 'args'.
@@ -53,27 +53,15 @@ func Instances(args []string, c *Config) []*build.Instance {
 	}
 
 	ctx := context.TODO()
-	newC, err := c.complete()
+	newC, err := c.completeFor(args)
 	if err != nil {
 		return []*build.Instance{c.newErrInstance(err)}
 	}
 	c = newC
 
-	// Rewrite absolute directory arguments as relative paths rooted at
-	// [Config.Dir] so the rest of the loading logic handles them as ordinary
-	// local import paths. Must happen before the package/file split, as
-	// [filetypes.IsPackage] rejects Windows paths like `C:\foo` due to the colon.
-	// Also rewrite \ to / as a courtesy to Windows developers.
-	args = slices.Clone(args)
-	for i, p := range args {
-		if pkgpath.IsAbs(p, c.pathOS) {
-			rel, err := pkgpath.Rel(c.Dir, p, c.pathOS)
-			if err != nil {
-				return []*build.Instance{c.newErrInstance(err)}
-			}
-			p = "./" + rel
-		}
-		args[i] = pkgpath.ToSlash(p, c.pathOS)
+	args, err = c.normalizeArgs(args)
+	if err != nil {
+		return []*build.Instance{c.newErrInstance(err)}
 	}
 
 	// Packages and files may be interspersed in any order; split them apart.
@@ -155,7 +143,7 @@ func Instances(args []string, c *Config) []*build.Instance {
 		opts := []build.Option{
 			build.ParseFile(c.ParseFile),
 		}
-		if f := l.loadFunc(); l != nil {
+		if f := l.loadFunc(); f != nil {
 			opts = append(opts, build.Loader(f))
 		}
 		c.Context = build.NewContext(opts...)
@@ -177,12 +165,29 @@ func Instances(args []string, c *Config) []*build.Instance {
 		a = append(a, l.cueFilesPackage(otherFiles))
 	}
 
-	for _, p := range a {
-		tags, err := findTags(p)
-		if err != nil {
-			p.ReportError(err)
+	if c.modFile == nil {
+		for _, p := range a {
+			p.SetTargetLanguageVersion(c.LanguageVersion)
 		}
-		tg.tags = append(tg.tags, tags...)
+	}
+
+	// A file may be shared by multiple instances, such as one inherited from
+	// a parent directory, so collect the tags in each file once to inject each
+	// value once. Each instance still reports the errors in its files.
+	fileErrs := make(map[*ast.File]errors.Error)
+	for _, p := range a {
+		for _, f := range p.Files {
+			err, seen := fileErrs[f]
+			if !seen {
+				var tags []*tag
+				tags, err = findTags(f)
+				fileErrs[f] = err
+				tg.tags = append(tg.tags, tags...)
+			}
+			if err != nil {
+				p.ReportError(err)
+			}
+		}
 	}
 
 	// TODO(api): have API call that returns an error which is the aggregate
@@ -198,16 +203,14 @@ func Instances(args []string, c *Config) []*build.Instance {
 		return a
 	}
 
-	for _, p := range a {
-		for _, f := range p.Files {
-			ast.Walk(f, nil, func(n ast.Node) {
-				if ident, ok := n.(*ast.Ident); ok {
-					if v, ok := tg.replacements[ident.Node]; ok {
-						ident.Node = v
-					}
+	for f := range fileErrs {
+		ast.Walk(f, nil, func(n ast.Node) {
+			if ident, ok := n.(*ast.Ident); ok {
+				if field, ok := tg.replacements[ident.Node]; ok {
+					ident.Node = field.Value
 				}
-			})
-		}
+			}
+		})
 	}
 
 	return a

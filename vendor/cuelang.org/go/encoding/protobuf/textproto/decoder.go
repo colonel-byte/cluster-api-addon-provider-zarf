@@ -15,7 +15,6 @@
 package textproto
 
 import (
-	"fmt"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -41,9 +40,7 @@ type options struct {
 
 // NewDecoder returns a new [Decoder].
 func NewDecoder(option ...Option) *Decoder {
-	d := &Decoder{}
-	_ = d.m // work around linter bug.
-	return d
+	return &Decoder{}
 }
 
 // A Decoder caches conversions of [cue.Value] between calls to its methods.
@@ -272,6 +269,7 @@ func (d *decoder) decodeMsg(m *mapping, n []*pbast.Node) ast.Expr {
 				}
 			}
 			if cg := addComments(x.ClosingBraceComment); cg != nil {
+				cg.Line = true
 				cg.Position = 4
 				ast.AddComment(list, cg)
 			}
@@ -427,7 +425,8 @@ func (d *decoder) decodeValue(f *fieldInfo, n *pbast.Node) (x ast.Expr) {
 			if pbinternal.MatchBySymbol(f.Value, s, &x) {
 				return &x
 			}
-			d.addErrf(n.Start, "invalid number %s", s)
+			d.addErrf(n.Start, "invalid number %q", s)
+			return &ast.BottomLit{}
 		}
 		if !info.IsInt() {
 			return &ast.BasicLit{Kind: token.FLOAT, Value: s}
@@ -435,6 +434,7 @@ func (d *decoder) decodeValue(f *fieldInfo, n *pbast.Node) (x ast.Expr) {
 		return &ast.BasicLit{Kind: token.INT, Value: info.String()}
 
 	default:
-		panic(fmt.Sprintf("unexpected type %v", f.ValueType))
+		d.addErrf(n.Start, "unsupported type for field %s", f.Name)
+		return &ast.BottomLit{}
 	}
 }

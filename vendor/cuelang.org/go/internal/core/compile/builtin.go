@@ -28,7 +28,6 @@ const supportedByLen = adt.StructKind | adt.BytesKind | adt.StringKind | adt.Lis
 
 var (
 	stringParam = adt.Param{Value: &adt.BasicType{K: adt.StringKind}}
-	structParam = adt.Param{Value: &adt.BasicType{K: adt.StructKind}}
 	listParam   = adt.Param{Value: &adt.BasicType{K: adt.ListKind}}
 	intParam    = adt.Param{Value: &adt.BasicType{K: adt.IntKind}}
 	topParam    = adt.Param{Value: &adt.BasicType{K: adt.TopKind}}
@@ -131,29 +130,41 @@ var lenBuiltin = &adt.Builtin{
 }
 
 var closeBuiltin = &adt.Builtin{
-	Name:   "close",
-	Params: []adt.Param{structParam},
-	Result: adt.StructKind,
+	Name:        "close",
+	Closes:      adt.ClosesOnce,
+	Params:      []adt.Param{topParam},
+	Result:      adt.TopKind,
+	PerDisjunct: true,
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
-		s, ok := call.Value(0).(*adt.Vertex)
+		v := call.Value(0)
+		s, ok := v.(*adt.Vertex)
 		if !ok {
-			return c.NewErrf("struct argument must be concrete")
+			// Closing concerns the fields of a struct, so any other value
+			// is returned unchanged.
+			return v
+		}
+		// An incomplete vertex has no kind yet; it is closed and unified
+		// where the result is, see [adt.OpContext.closedArg].
+		if k := s.Kind(); k&(adt.StructKind|adt.ListKind) == 0 && k != adt.BottomKind {
+			return v
 		}
 		// TODO(evalv3) this is a rather convoluted and inefficient way to
 		// accomplish signaling vertex should be closed. In most cases, it
 		// would suffice to set IsClosed in the CloseInfo. However, that
 		// does not cover all code paths. Consider simplifying this.
-		v := c.Wrap(s, c.CloseInfo())
-		v.ClosedNonRecursive = true
-		return v
+		w := c.Wrap(s, c.CloseInfo())
+		w.ClosedNonRecursive = true
+		return w
 	},
 }
 
 var closeAllBuiltin = &adt.Builtin{
-	Name:   "__closeAll",
-	Params: []adt.Param{topParam},
-	Result: adt.TopKind,
+	Name:        "__closeAll",
+	Closes:      adt.ClosesRecursively,
+	Params:      []adt.Param{topParam},
+	Result:      adt.TopKind,
+	PerDisjunct: true,
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
 
@@ -181,9 +192,11 @@ var closeAllBuiltin = &adt.Builtin{
 }
 
 var recloseBuiltin = &adt.Builtin{
-	Name:   "__reclose",
-	Params: []adt.Param{topParam},
-	Result: adt.TopKind,
+	Name:        "__reclose",
+	Closes:      adt.ClosesByEmbedding,
+	Params:      []adt.Param{topParam},
+	Result:      adt.TopKind,
+	PerDisjunct: true,
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
 
@@ -197,7 +210,7 @@ var recloseBuiltin = &adt.Builtin{
 		case *adt.CallExpr:
 			// Allow __reclose(close(...)) so that __reclose can wrap
 			// a close() call and conditionally add recursive closing.
-			if b, ok := x.Fun.(*adt.Builtin); !ok || b.Name != "close" {
+			if b, ok := x.Fun.(*adt.Builtin); !ok || b.Closes != adt.ClosesOnce {
 				return c.NewErrf("argument must be a struct or list literal, or a close() call")
 			}
 			if src := x.Source(); src == nil || !src.Pos().Experiment().ExplicitOpen {
@@ -228,9 +241,9 @@ var andBuiltin = &adt.Builtin{
 	Result: adt.IntKind,
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
-		seq := c.RawElems(call.Value(0))
+		list := c.RawList(call.Value(0))
 		a := []adt.Value{}
-		for c := range seq {
+		for c := range list.Elems() {
 			a = append(a, c)
 		}
 		if len(a) == 0 {
@@ -248,11 +261,11 @@ var orBuiltin = &adt.Builtin{
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
 
-		d := []adt.Disjunct{}
-		for c := range c.RawElems(call.Value(0)) {
-			d = append(d, adt.Disjunct{Val: c, Default: false})
+		var values []adt.Value
+		for v := range c.RawList(call.Value(0)).Elems() {
+			values = append(values, v)
 		}
-		if len(d) == 0 {
+		if len(values) == 0 {
 			// TODO(manifest): This should not be unconditionally incomplete,
 			// but it requires results from comprehensions and all to have
 			// some special status. Maybe this can be solved by having results
@@ -266,15 +279,10 @@ var orBuiltin = &adt.Builtin{
 				Err: errors.Newf(c.Pos(), "empty list in call to or"),
 			}
 		}
-		v := &adt.Vertex{}
-		// TODO: make a Disjunction.
-		closeInfo := c.CloseInfo()
-		v.AddConjunct(adt.MakeConjunct(nil,
-			&adt.DisjunctionExpr{Values: d, HasDefaults: false},
-			closeInfo,
-		))
-		v.CompleteArcs(c)
-		return v
+		if len(values) == 1 {
+			return values[0]
+		}
+		return &adt.Disjunction{Values: values}
 	},
 }
 
@@ -345,5 +353,26 @@ var testExperiment = &adt.Builtin{
 		} else {
 			return call.OpContext().NewErrf("testing experiment disabled")
 		}
+	},
+}
+
+// validatorBuiltin is the validator type former of the functions
+// experiment: validator(T) denotes a validator applying to values of
+// type T. The generated standard library definitions use it to declare
+// the validator form of a builtin alongside its call form, as in
+//
+//	MinRunes: func(min: int) -> validator(string) |
+//	          func(s: string, min: int) -> bool
+//
+// A call currently evaluates to top: holding a builtin to its declared
+// validator form is future work, so for now the type former documents
+// without constraining.
+var validatorBuiltin = &adt.Builtin{
+	Name:        "validator",
+	Params:      []adt.Param{topParam},
+	Result:      adt.TopKind,
+	NonConcrete: true,
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		return &adt.Top{}
 	},
 }

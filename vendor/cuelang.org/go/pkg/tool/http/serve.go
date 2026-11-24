@@ -15,14 +15,19 @@
 package http
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sync"
+
+	"golang.org/x/net/http/httpguts"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/errors"
@@ -52,14 +57,16 @@ func (c *listenCmd) IsService() bool {
 var m sync.Mutex
 
 var (
-	listenPath = cue.ParsePath("listenAddr")
-	pathPath   = cue.ParsePath("routing.path")
-	methodPath = cue.ParsePath("routing.method")
+	listenPath = cue.MakePath(cue.Str("listenAddr"))
+	pathPath   = cue.MakePath(cue.Str("routing"), cue.Str("path"))
+	methodPath = cue.MakePath(cue.Str("routing"), cue.Str("method"))
 
-	requestPath        = cue.ParsePath("request")
-	respBodyPath       = cue.ParsePath("response.body")
-	respStatusCodePath = cue.ParsePath("response.statusCode")
-	responsePath       = cue.ParsePath("response")
+	requestPath  = cue.MakePath(cue.Str("request"))
+	responsePath = cue.MakePath(cue.Str("response"))
+
+	// Relative to responsePath.
+	respBodyPath       = cue.MakePath(cue.Str("body"))
+	respStatusCodePath = cue.MakePath(cue.Str("statusCode"))
 )
 
 // httpRequest represents the request data to fill into the CUE value.
@@ -69,6 +76,7 @@ type httpRequest struct {
 	Body       []byte              `json:"body"`
 	Form       map[string][]string `json:"form"`
 	Header     map[string][]string `json:"header"`
+	Trailer    map[string][]string `json:"trailer"`
 	PathValues map[string]string   `json:"pathValues"`
 }
 
@@ -95,10 +103,13 @@ func (c *listenCmd) Run(ctx *task.Context) (res any, err error) {
 		muxers[addr] = mux
 		listeners[addr] = ln
 
-		log.Printf("listening on %v\n", addr)
+		log.Printf("listening on %v\n", ln.Addr())
 
+		// Only accept requests once all ready Serve tasks have run, as otherwise
+		// a request could arrive before its handler is registered.
+		// Until then, connections wait in the listener's backlog.
 		// TODO: use Server at some point.
-		go http.Serve(ln, mux)
+		ctx.BackgroundTask(func() { http.Serve(ln, mux) })
 	}
 	m.Unlock()
 
@@ -124,16 +135,28 @@ func (c *listenCmd) Run(ctx *task.Context) (res any, err error) {
 
 	log.Printf("adding handler for %v\n", url)
 	mux.HandleFunc(url, func(w http.ResponseWriter, req *http.Request) {
-		err := req.ParseForm()
-		if err != nil {
-			http.Error(w, fmt.Sprintf("cannot parse form: %v", err), http.StatusBadRequest)
-			return
-		}
-
+		// Read the body before parsing the form, which consumes a form body,
+		// and then give the form parser a copy.
 		data, err := io.ReadAll(req.Body)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("cannot read body: %v", err), http.StatusBadRequest)
 			return
+		}
+		req.Body = io.NopCloser(bytes.NewReader(data))
+
+		if err := req.ParseForm(); err != nil {
+			http.Error(w, fmt.Sprintf("cannot parse form: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// The trailers are only known once the body has been read in full.
+		// A trailer declared via the Trailer header but never sent has no
+		// values, so it is left out.
+		trailer := make(map[string][]string)
+		for k, vs := range req.Trailer {
+			if len(vs) > 0 {
+				trailer[k] = vs
+			}
 		}
 
 		pathValues := make(map[string]string)
@@ -149,6 +172,7 @@ func (c *listenCmd) Run(ctx *task.Context) (res any, err error) {
 			Body:       data,
 			Form:       req.Form,
 			Header:     req.Header,
+			Trailer:    trailer,
 			PathValues: pathValues,
 		})
 
@@ -167,19 +191,20 @@ func (c *listenCmd) Run(ctx *task.Context) (res any, err error) {
 		}
 	})
 
-	ctx.BackgroundTask()
 	return nil, nil
 }
 
 // variableRegex is a regular expression to find all instances of {variableName} in a path.
 // It captures the content inside the braces.
-var variableRegex = regexp.MustCompile(`\{([^{}\.]+)(\.\.\.)?\}`)
+var variableRegex = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile(`\{([^{}\.]+)(\.\.\.)?\}`)
+})
 
 // extractPathVariables parses a URL pattern string and returns a slice of the variable names.
 // For example, given "/users/{userID}/posts/{postID}", it returns ["userID", "postID"].
 // The special pattern {$} (exact path match in http.ServeMux) is excluded.
 func extractPathVariables(pattern string) []string {
-	matches := variableRegex.FindAllStringSubmatch(pattern, -1)
+	matches := variableRegex().FindAllStringSubmatch(pattern, -1)
 	if matches == nil {
 		return nil
 	}
@@ -205,48 +230,84 @@ func (c *serveCmd) IsService() bool {
 	return true
 }
 
+// Run builds the entire response before writing any of it, so that a failure
+// leaves the response untouched. The caller, the handler set up by
+// [listenCmd.Run], then turns the returned error into the sole error response.
 func (c *serveCmd) Run(ctx *task.Context) (res any, err error) {
 	v := ctx.Obj
 
 	response := v.LookupPath(responsePath)
 	headers, err := parseHeaders(response, "header")
 	if err != nil {
-		http.Error(c.w, fmt.Sprintf("cannot parse headers: %v", err), http.StatusBadRequest)
-		return nil, err
+		return nil, errors.Wrapf(err, response.Pos(), "cannot parse headers")
 	}
 	trailers, err := parseHeaders(response, "trailer")
 	if err != nil {
-		http.Error(c.w, fmt.Sprintf("cannot parse trailers: %v", err), http.StatusBadRequest)
-		return nil, err
+		return nil, errors.Wrapf(err, response.Pos(), "cannot parse trailers")
 	}
-
-	v = v.LookupPath(respBodyPath)
-
-	b, err := v.Bytes()
-	if err != nil {
-		http.Error(c.w, fmt.Sprintf("cannot encode response: %v", err), http.StatusBadRequest)
+	trailerKeys := slices.Sorted(maps.Keys(trailers))
+	for _, k := range trailerKeys {
+		// net/http silently drops the trailers it does not allow.
+		if !httpguts.ValidTrailerHeader(k) {
+			return nil, errors.Newf(response.Pos(), "%s is not allowed as a trailer", k)
+		}
 	}
-
-	for k, v := range headers {
-		for _, v := range v {
-			c.w.Header().Set(k, v)
+	// Trailers follow a chunked body, which net/http does not use
+	// when given either of these headers, silently dropping the trailers.
+	if len(trailers) > 0 {
+		if headers.Get("Content-Length") != "" {
+			return nil, errors.Newf(response.Pos(), "trailers cannot be sent with a Content-Length header")
+		}
+		if headers.Get("Transfer-Encoding") == "identity" {
+			return nil, errors.Newf(response.Pos(), "trailers cannot be sent with an identity Transfer-Encoding")
 		}
 	}
 
-	for k, v := range trailers {
-		for _, v := range v {
-			c.w.Header().Set(k, v)
+	// net/http panics when writing a status code outside the range of the
+	// three-digit HTTP codes. [task.Context.TaskFunc] unifies every task value
+	// with its builtin schema, and Serve bounds statusCode to that range, so
+	// the check below only guards against that unification being bypassed.
+	statusCode := int64(http.StatusOK)
+	if sc := response.LookupPath(respStatusCodePath); sc.Exists() {
+		statusCode, err = sc.Int64()
+		if err != nil {
+			return nil, errors.Wrapf(err, sc.Pos(), "invalid response status code")
+		}
+		if statusCode < 100 || statusCode > 999 {
+			return nil, errors.Newf(sc.Pos(),
+				"response status code %d is not in the range [100, 999]", statusCode)
 		}
 	}
 
-	// Set status code if specified, otherwise defaults to 200
-	if sc := ctx.Obj.LookupPath(respStatusCodePath); sc.Exists() {
-		if code, err := sc.Int64(); err == nil {
-			c.w.WriteHeader(int(code))
+	// The body is optional; an absent one results in an empty response.
+	var b []byte
+	if body := response.LookupPath(respBodyPath); body.Exists() {
+		b, err = body.Bytes()
+		if err != nil {
+			return nil, errors.Wrapf(err, body.Pos(), "cannot encode response")
 		}
 	}
 
+	for k, vs := range headers {
+		for _, v := range vs {
+			c.w.Header().Add(k, v)
+		}
+	}
+
+	// Trailers must be declared before writing the header,
+	// and their values set once the body has been written.
+	for _, k := range trailerKeys {
+		c.w.Header().Add("Trailer", k)
+	}
+
+	c.w.WriteHeader(int(statusCode))
 	c.w.Write(b)
+
+	// The header has already been written, so replace any header values
+	// of the same name, which net/http would also send as trailer values.
+	for k, vs := range trailers {
+		c.w.Header()[k] = vs
+	}
 
 	return nil, nil
 }

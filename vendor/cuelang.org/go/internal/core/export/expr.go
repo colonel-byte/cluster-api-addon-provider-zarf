@@ -115,31 +115,30 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 	s, saved := e.pushFrame(src, orig)
 	defer e.popFrame(saved)
 
+	e.top().mergesFiles = mergesFiles(a)
+
 	// Handle value aliases and lets
-	var valueAlias *ast.Alias
+	var valueAlias string
 	for _, c := range a {
 		if f, ok := c.c.Field().Source().(*ast.Field); ok {
 			if a, ok := f.Value.(*ast.Alias); ok {
-				if valueAlias == nil {
+				if valueAlias == "" {
 					if e.valueAlias == nil {
-						e.valueAlias = map[*ast.Alias]*ast.Alias{}
+						e.valueAlias = map[*ast.Alias]string{}
 					}
-					name := a.Ident.Name
-					name = e.uniqueAlias(name)
-					valueAlias = &ast.Alias{Ident: ast.NewIdent(name)}
+					valueAlias = e.uniqueAlias(a.Ident.Name)
 				}
 				e.valueAlias[a] = valueAlias
 			}
 		}
-		x.markLets(c.c.Expr().Source(), s)
+		x.markLets(c.c.Expr().Source())
 	}
 
 	defer filterUnusedLets(s)
 
 	defer func() {
-		if valueAlias != nil {
-			valueAlias.Expr = expr
-			expr = valueAlias
+		if valueAlias != "" {
+			expr = e.bindValueAlias(valueAlias, expr)
 		}
 	}()
 
@@ -171,6 +170,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 		}
 	}
 
+	e.attrs = e.exportAttrs(e.attrs)
 	for _, a := range e.attrs {
 		s.Elts = append(s.Elts, a)
 	}
@@ -204,7 +204,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 		return -cmp.Compare(m[f1], m[f2])
 	})
 
-	if len(e.fields) == 0 && !e.hasEllipsis {
+	if len(e.fields) == 0 && len(e.decls) == 0 && !e.hasEllipsis {
 		switch len(e.embed) + len(e.conjuncts) {
 		case 0:
 			if len(e.attrs) > 0 {
@@ -231,6 +231,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 		}
 	}
 
+	s.Elts = append(s.Elts, e.decls...)
 	for _, x := range e.embed {
 		s.Elts = append(s.Elts, &ast.EmbedDecl{Expr: x})
 	}
@@ -257,7 +258,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 
 		top := e.frame(0, false)
 		if fr, ok := top.fields[f]; ok && fr.alias != "" {
-			setFieldAlias(d, fr.alias)
+			e.setValueAlias(d, fr.alias)
 			fr.node = d
 			top.fields[f] = fr
 		}
@@ -274,12 +275,13 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 		if x.cfg.ShowDocs {
 			v := &adt.Vertex{Conjuncts: a}
 			docs := extractDocs(v)
-			ast.SetComments(d, docs)
+			setComments(d, docs)
 		}
 		if x.cfg.ShowAttributes {
 			for _, c := range a {
 				d.Attrs = extractFieldAttrs(d.Attrs, c.Field())
 			}
+			d.Attrs = x.exportAttrs(d.Attrs)
 		}
 		s.Elts = append(s.Elts, d)
 	}
@@ -321,6 +323,11 @@ type conjuncts struct {
 	// A value is a struct if it has a non-zero structs slice or if isData is
 	// set to true. Data vertices may not have conjuncts associated with them.
 	isData bool
+
+	// decls holds the declarations of complex file-level structs, which are
+	// spliced into the result rather than embedded, as files share the
+	// package scope.
+	decls []ast.Decl
 }
 
 func (c *conjuncts) getField(label adt.Feature) field {
@@ -378,7 +385,16 @@ func (e *conjuncts) addExpr(env *adt.Environment, src *adt.Vertex, x adt.Elem, i
 		// Only add if it only has no bulk fields or ellipsis.
 		if isComplexStruct(x) {
 			_, saved := e.pushFrame(src, nil)
-			e.embed = append(e.embed, e.adt(env, x))
+			// Embedding would hide the file's fields from the other files of
+			// the package; see https://cuelang.org/issue/2648.
+			_, isFile := x.Src.(*ast.File)
+			e.top().spliced = isFile
+			s := e.adt(env, x)
+			if isFile {
+				e.decls = append(e.decls, s.(*ast.StructLit).Elts...)
+			} else {
+				e.embed = append(e.embed, s)
+			}
 			e.top().upCount-- // not necessary, but for proper form
 			e.popFrame(saved)
 			return
@@ -499,10 +515,8 @@ func isComplexStruct(s *adt.StructLit) bool {
 		case *adt.Field:
 			// TODO: remove this and also handle field annotation in expr().
 			// This allows structs to be merged. Ditto below.
-			if x.Src != nil {
-				if _, ok := x.Src.Label.(*ast.Alias); ok {
-					return ok
-				}
+			if _, ok := valueAliasName(x.Src); ok {
+				return true
 			}
 
 		case *adt.LetField:

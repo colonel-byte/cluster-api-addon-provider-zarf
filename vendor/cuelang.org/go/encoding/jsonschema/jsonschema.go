@@ -38,7 +38,9 @@ import (
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/ast/astutil"
+	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/cueexperiment"
 )
 
 // Extract converts JSON Schema data into an equivalent CUE representation.
@@ -47,8 +49,16 @@ import (
 // a valid instance of the source JSON schema.
 //
 // The result can be converted to a [cue.Value] via [cue.Context.BuildFile].
+// It follows the style of [format.Simplify], so formatting it with that
+// option makes no difference.
 func Extract(data cue.InstanceOrValue, cfg *Config) (*ast.File, error) {
-	cfg = ref(*cfg)
+	return extract(data, cfg, nil)
+}
+
+// extract implements [Extract], adding extra to the file's
+// declarations before sanitizing it and applying the style.
+func extract(data cue.InstanceOrValue, cfg *Config, extra []ast.Decl) (*ast.File, error) {
+	cfg = new(*cfg)
 	if cfg.MapURL == nil {
 		cfg.MapURL = DefaultMapURL
 	}
@@ -85,8 +95,13 @@ func Extract(data cue.InstanceOrValue, cfg *Config) (*ast.File, error) {
 	if !rootIDURI.IsAbs() {
 		return nil, fmt.Errorf("Config.ID %q is not absolute URI", cfg.ID)
 	}
+	targetExp, err := cueexperiment.NewFile(cfg.TargetLanguageVersion)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Config.TargetLanguageVersion value %q: %v", cfg.TargetLanguageVersion, err)
+	}
 	d := &decoder{
 		cfg:          cfg,
+		targetExp:    targetExp,
 		mapURLErrors: make(map[string]bool),
 		root:         data.Value(),
 		rootID:       rootIDURI,
@@ -98,9 +113,11 @@ func Extract(data cue.InstanceOrValue, cfg *Config) (*ast.File, error) {
 	if d.errs != nil {
 		return nil, d.errs
 	}
+	f.Decls = append(f.Decls, extra...)
 	if err := astutil.Sanitize(f); err != nil {
 		return nil, fmt.Errorf("cannot sanitize jsonschema resulting syntax: %v", err)
 	}
+	format.ASTStyle{Labels: true, InlineStructs: true, Ellipsis: true}.Apply(f)
 	return f, nil
 }
 
@@ -133,6 +150,20 @@ type Config struct {
 	// If Root is non-empty and SingleRoot is true, then
 	// Root should specify the location of a single schema to extract.
 	SingleRoot bool
+
+	// Roots holds a set of JSON references (like [Config.Root]), each
+	// identifying the location of a single schema within the JSON Schema data.
+	// [Config.MapRef] is called for every schema in this list to determine
+	// its location in the generated CUE, so all the schemas can refer to one
+	// another. If this field is non-nil, [Config.Root] and [Config.SingleRoot]
+	// are ignored. If [Config.AllowNonExistentRoot] is true, no error is given
+	// for entries in the list that do not exist.
+	//
+	// If in doubt, use Root and/or SingleRoot. This functionality
+	// is principally here for use by the OpenAPI generator.
+	//
+	// THIS IS EXPERIMENTAL. API MIGHT CHANGE.
+	Roots []string
 
 	// AllowNonExistentRoot prevents an error when there is no value at
 	// the above Root path. Such an error can be useful to signal that
@@ -236,6 +267,24 @@ type Config struct {
 	// which will be defined accordingly.
 	DefineSchema func(importPath string, path cue.Path, e ast.Expr, docComment *ast.CommentGroup)
 
+	// NOTE: this field is currently experimental. Its usage and type
+	// signature may change.
+	//
+	// Base holds an initial skeleton for the extracted output. Fields from
+	// the base appear in the resulting file in the order they hold in the
+	// base, before any other top-level declarations, and a base field with
+	// the placeholder value _ marks a position that an extracted schema can
+	// be placed at (via [Config.MapRef]); a placeholder field that no schema
+	// is placed at retains the value _.
+	//
+	// The base must consist only of regular fields (no embeddings, aliases,
+	// or constraints such as ? and !) with identifier or simple string
+	// labels, holding values composed of struct literals, list literals and
+	// other expressions, which are treated as opaque leaf values.
+	//
+	// THIS IS EXPERIMENTAL. API MIGHT CHANGE.
+	Base *ast.File
+
 	// TODO: configurability to make it compatible with OpenAPI, such as
 	// - locations of definitions: #/components/schemas, for instance.
 	// - selection and definition of formats
@@ -277,6 +326,18 @@ type Config struct {
 	// will be used.
 	DefaultVersion Version
 
+	// TargetLanguageVersion holds the CUE language version that the
+	// extracted syntax must be valid at. The empty string means the
+	// current one. Note that this is unrelated to [Config.DefaultVersion],
+	// which selects a JSON Schema dialect.
+	//
+	// Set it when writing the result into a module that declares an older
+	// language version, as a spelling valid today may not parse there: an
+	// alias is written in the postfix form from v0.18.0 on, and in the
+	// prefix form before it; a numeric const or enum is written as a ==
+	// comparison from v0.15.0 on, and as a pair of bounds before it.
+	TargetLanguageVersion string
+
 	_ struct{} // prohibit casting from different type.
 }
 
@@ -300,8 +361,4 @@ func (loc SchemaLoc) String() string {
 		return fmt.Sprintf("id=%v localPath=%v", loc.ID, loc.Path)
 	}
 	return fmt.Sprintf("id=%v", loc.ID)
-}
-
-func ref[T any](x T) *T {
-	return &x
 }

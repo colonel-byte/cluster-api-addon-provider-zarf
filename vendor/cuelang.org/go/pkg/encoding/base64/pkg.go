@@ -59,7 +59,7 @@ var p = &pkg.Package{
 			{Kind: adt.TopKind},
 			{Kind: adt.StringKind},
 		},
-		Result: adt.BytesKind | adt.StringKind,
+		Result: adt.BytesKind,
 		Func: func(c *pkg.CallCtxt) {
 			encoding, s := c.Value(0), c.String(1)
 			if c.Do() {
@@ -67,4 +67,11 @@ var p = &pkg.Package{
 			}
 		},
 	}},
+	CUE: `
+@experiment(functions)
+@pure()
+EncodedLen: func(encoding: _, n: int) -> int
+DecodedLen: func(encoding: _, x: int) -> int
+Encode:     func(encoding: _, src: bytes | string) -> string
+Decode:     func(encoding: _, s: string) -> bytes`,
 }

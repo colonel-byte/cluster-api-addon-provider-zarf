@@ -16,8 +16,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Originally generated with: go run qgo.go -exclude=Append,Unquote,Itoa,CanBackquote,FormatComplex extract strconv
-
+//cue:pure
 package strconv
 
 import (

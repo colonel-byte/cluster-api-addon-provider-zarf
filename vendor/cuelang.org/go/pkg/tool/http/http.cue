@@ -21,7 +21,7 @@ Delete: Do & {method: "DELETE"}
 
 Do: {
 	$id: _id
-	_id: *"tool/http.Do" | "http" // http for backwards compatibility
+	_id: "tool/http.Do"
 
 	method: string
 	url:    string // TODO: make url.URL type
@@ -30,10 +30,19 @@ Do: {
 	// or not. Defaults to true, like the default net/http client in Go.
 	followRedirects: *true | bool
 
+	// timeout limits the total time spent on the request, including
+	// connection setup, redirects, and reading the response body.
+	// It is a positive duration string as accepted by time.Duration,
+	// such as "300ms" or "1m30s".
+	// If not set, only the surrounding command bounds the request.
+	timeout?: string
+
 	tls: {
 		// Whether the server certificate must be validated.
 		verify: *true | bool
-		// PEM encoded certificate(s) to validate the server certificate.
+		// PEM encoded certificate(s) to validate the server certificate,
+		// as CERTIFICATE blocks. PUBLIC KEY blocks are also accepted for
+		// backwards compatibility, and any other block type is ignored.
 		// If not set the CA bundle of the system is used.
 		caCert?: bytes | string
 	}
@@ -60,6 +69,10 @@ Do: {
 // served from the same address. Serve will multiplex these different instances
 // based on the serving path and, optionally, method.
 //
+// Requests are only served once all Serve tasks ready to run have run,
+// so that their routes are in place before the first request is handled.
+// Serve tasks which depend on other tasks may add their routes later.
+//
 // For more details see the documentation of the routing parameters such as
 // path and method.
 Serve: {
@@ -68,6 +81,9 @@ Serve: {
 
 	// listenAddr is the address to listen on (e.g., ":8080", "localhost:8000").
 	// This field is required to avoid accidentally binding to privileged ports.
+	// A port of 0, as in "localhost:0", picks an unused port;
+	// the address listened on is logged to standard error.
+	// Serve tasks with the same listenAddr share a single listener.
 	listenAddr!: string
 
 	// routing configures the HTTP routes that are served.
@@ -191,7 +207,9 @@ Serve: {
 	// request data and their output can be used in the response.
 	response: {
 		// statusCode sets the HTTP status code. If not set, 200 is used.
-		statusCode?: int
+		// HTTP status codes are three digits, so values outside the
+		// range [100, 999] are rejected.
+		statusCode?: int & >=100 & <=999
 
 		// body is the response body to send.
 		body?: *bytes | string

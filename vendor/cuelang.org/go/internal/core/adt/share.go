@@ -14,6 +14,8 @@
 
 package adt
 
+import "iter"
+
 // This file contains logic regarding structure sharing.
 
 // Notes
@@ -30,33 +32,93 @@ package adt
 //
 // Maybe this is okay, though, as #Def itself can be shared, at least.
 
+// sharedConjunct is a conjunct a shared node holds without having scheduled
+// it: the reference that started the sharing, one resolving to the same
+// vertex, or a definition that vertex is already an instance of. Each is
+// scheduled in turn if the node is unshared.
+type sharedConjunct struct {
+	c   Conjunct
+	arc *Vertex
+	id  CloseInfo
+}
+
 func (n *nodeContext) unshare() {
 	n.noSharing = true
 
 	if !n.isShared {
 		return
 	}
+	n.dropSharing()
+	for _, s := range n.shared {
+		n.scheduleVertexConjuncts(s.c, s.arc, s.id)
+	}
+}
+
+// sharesSingleValue reports whether the vertex n shares holds a value that
+// is not a disjunction, finalizing the vertex if needed to know its value.
+func (n *nodeContext) sharesSingleValue() bool {
+	v, ok := n.node.BaseValue.(*Vertex)
+	if !ok {
+		return false
+	}
+	// A cyclic reference is left to finalizeSharing, as in that case the
+	// vertex may depend on this node.
+	if n.shareCycleType == NoCycle {
+		v.Finalize(n.ctx)
+	}
+	return v.isFinal() && disjunctionOf(v) == nil
+}
+
+// hasResolver reports whether a disjunct of x is a reference, possibly in a
+// conjunction, which is the only kind of disjunct that can keep sharing.
+func hasResolver(x *DisjunctionExpr) bool {
+	for _, d := range x.Values {
+		for y := range andOperands(d.Val) {
+			if _, ok := y.(Resolver); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// andOperands yields the operands of a conjunction x, descending into nested
+// conjunctions, x itself for any other expression, and nothing for a nil x.
+func andOperands(x Expr) iter.Seq[Expr] {
+	return func(yield func(Expr) bool) {
+		walkAndOperands(x, yield)
+	}
+}
+
+func walkAndOperands(x Expr, yield func(Expr) bool) bool {
+	if b, ok := x.(*BinaryExpr); ok && b.Op == AndOp {
+		return walkAndOperands(b.X, yield) && walkAndOperands(b.Y, yield)
+	}
+	return x == nil || yield(x)
+}
+
+// dropSharing ends sharing without replaying the shared vertex, for a
+// node whose value is computed elsewhere, such as in its disjuncts.
+func (n *nodeContext) dropSharing() {
+	if !n.isShared {
+		return
+	}
 	n.isShared = false
+	n.noSharing = true
 	n.node.IsShared = false
 	n.node.OpenedShared = false
-
-	v := n.node.BaseValue.(*Vertex)
+	n.node.ClosedShared = false
+	n.decShared()
 
 	// TODO: the use of cycle for BaseValue is getting increasingly outdated.
 	// Find another mechanism once we get rid of the old evaluator.
 	n.node.BaseValue = n.origBaseValue
-
-	for _, id := range n.sharedIDs {
-		n.scheduleVertexConjuncts(n.shared, v, id)
-	}
-
-	n.decSharedIDs()
 }
 
 // finalizeSharing should be called when it is known for sure a node can be
 // shared.
 func (n *nodeContext) finalizeSharing() {
-	n.decSharedIDs()
+	n.decShared()
 	if !n.isShared {
 		return
 	}
@@ -87,9 +149,18 @@ func (n *nodeContext) finalizeSharing() {
 	}
 }
 
-func (n *nodeContext) addShared(id CloseInfo) {
-	if len(n.sharedIDs) == 0 || n.shareCycleType < id.CycleType {
+func (n *nodeContext) addShared(c Conjunct, arc *Vertex, id CloseInfo) {
+	if len(n.shared) == 0 || n.shareCycleType < id.CycleType {
 		n.shareCycleType = id.CycleType
+	}
+	// A reference that does not open the vertex wins, in either order. One
+	// naming a definition, or sharing one as arc, the vertex finally shared,
+	// stops [Vertex.sharesOpened] at this node.
+	if !id.Opened && !id.ConjunctOpened {
+		n.node.OpenedShared = false
+		if namesDefinition(c.Expr(), id) || arc.Label.IsDef() {
+			n.node.ClosedShared = true
+		}
 	}
 
 	// At this point, the node may still be unshared at a later point. For this
@@ -97,16 +168,16 @@ func (n *nodeContext) addShared(id CloseInfo) {
 	// have been processed and it is clear that sharing is possible. Delaying
 	// such a count should not hurt performance, as a shared node is completed
 	// anyway.
-	n.sharedIDs = append(n.sharedIDs, id)
+	n.shared = append(n.shared, sharedConjunct{c, arc, id})
 }
 
-func (n *nodeContext) decSharedIDs() {
+func (n *nodeContext) decShared() {
 	if n.shareDecremented {
 		return
 	}
 	n.shareDecremented = true
-	for _, id := range n.sharedIDs {
-		n.updateConjunctInfo(n.node.Kind(), id, 0)
+	for _, s := range n.shared {
+		n.updateConjunctInfo(n.node.Kind(), s.id, 0)
 	}
 }
 
@@ -118,9 +189,8 @@ func (n *nodeContext) share(c Conjunct, arc *Vertex, id CloseInfo) {
 	n.node.BaseValue = arc
 	n.node.IsShared = true
 	n.isShared = true
-	n.shared = c
-	n.addShared(id)
 	n.node.OpenedShared = id.Opened || id.ConjunctOpened
+	n.addShared(c, arc, id)
 
 	if arc.IsDetached() && arc.MayAttach() { // TODO: Second check necessary?
 		// This node can safely be shared. Since it is not rooted, though, it
@@ -175,19 +245,15 @@ func (n *nodeContext) shareIfPossible(c Conjunct, arc *Vertex, id CloseInfo) boo
 		return false
 	}
 
-	// This line is to deal with this case:
+	// An open value is not shared into a recursively closed node, as in
 	//
 	//     reg: {}
 	//     #def: sub: reg
 	//
-	// Ideally we find a different solution, like passing closedness
-	// down elsewhere. In fact, as we do this in closeContexts, it probably
-	// already works, it will just not be reflected in the debug output.
-	// We could fix that by not printing structure shared nodes, which is
-	// probably a good idea anyway.
+	// since the node would then take its closedness from the open value.
 	//
 	// TODO: come up with a mechanism to allow this case.
-	if n.node.ClosedRecursive && !arc.ClosedRecursive {
+	if n.node.ClosedRecursive && !arc.ClosedRecursive && !arc.closedByConjunct() {
 		return false
 	}
 
@@ -215,6 +281,9 @@ func (n *nodeContext) shareIfPossible(c Conjunct, arc *Vertex, id CloseInfo) boo
 // DerefValue
 //   - get the value the node ultimately represents.
 //
+// derefSharedDisjunct
+//   - like DerefValue, but stop at a disjunct that shares a vertex.
+//
 
 // DerefValue unrolls indirections of Vertex values. These may be introduced,
 // for instance, by temporary bindings such as comprehension values.
@@ -226,6 +295,22 @@ func (v *Vertex) DerefValue() *Vertex {
 			return v
 		}
 		v = arc
+	}
+}
+
+// derefSharedDisjunct is like [Vertex.DerefValue], but stops at a disjunct
+// that structure shares a vertex, as the node holding the disjunct does not
+// share it.
+func (v *Vertex) derefSharedDisjunct() *Vertex {
+	for {
+		arc, ok := v.BaseValue.(*Vertex)
+		if !ok {
+			return v
+		}
+		v = arc
+		if v.IsDisjunct && v.IsShared {
+			return v
+		}
 	}
 }
 
@@ -249,6 +334,24 @@ func (v *Vertex) DerefNonDisjunct() *Vertex {
 		}
 		v = arc
 	}
+}
+
+// sharesOpened reports whether v, or a node v indirects to as in
+// [Vertex.DerefValue], shares a vertex through an opened reference,
+// stopping at a node with ClosedShared set. Sharing does not copy
+// OpenedShared, as the shared vertex may not be evaluated yet.
+func (v *Vertex) sharesOpened() bool {
+	for !v.ClosedShared {
+		if v.OpenedShared {
+			return true
+		}
+		arc, ok := v.BaseValue.(*Vertex)
+		if !ok {
+			return false
+		}
+		v = arc
+	}
+	return false
 }
 
 // DerefNonRooted indirects a node that points to a value that is not rooted.
@@ -278,4 +381,63 @@ func (v *Vertex) DerefNonShared() *Vertex {
 		}
 		v = arc
 	}
+}
+
+// closedByConjunct reports whether v, whose conjuncts have not been scheduled
+// yet, holds a conjunct from a definition. Scheduling that conjunct closes v,
+// so until then the flag is stale, which is how a forward reference finds it.
+func (v *Vertex) closedByConjunct() bool {
+	if v.isInitialized() {
+		return false
+	}
+	for c := range v.LeafConjuncts() {
+		if c.CloseInfo.FromDef {
+			return true
+		}
+		// A direct definition reference closes v once it is resolved.
+		for x := range andOperands(directExpr(c)) {
+			if isDef, _ := IsDef(x); isDef {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// directExpr returns the expression of a conjunct that applies to its vertex
+// directly, neither opened nor embedded, and nil for any other conjunct. A
+// comprehension is not an expression, as it may not have yielded its value.
+func directExpr(c Conjunct) Expr {
+	ci := c.CloseInfo
+	if ci.Opened || ci.ConjunctOpened || ci.FromEmbed {
+		return nil
+	}
+	x, _ := c.Elem().(Expr)
+	return x
+}
+
+// sharedClosedBy reports whether the vertex n shares holds a direct conjunct
+// that refers to the definition def, so that it already is an instance of it.
+func (n *nodeContext) sharedClosedBy(def *Vertex) bool {
+	if !def.Label.IsDef() {
+		return false
+	}
+	shared, ok := n.node.BaseValue.(*Vertex)
+	if !ok {
+		return false
+	}
+	for c := range shared.LeafConjuncts() {
+		if c.Env == nil {
+			continue
+		}
+		for x := range andOperands(directExpr(c)) {
+			if isDef, _ := IsDef(x); !isDef {
+				continue
+			}
+			if v, _ := n.ctx.Lookup(c.Env, x.(Resolver)); v != nil && equalDeref(v, def) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -289,6 +289,36 @@ type refEntry struct {
 
 // markExpr visits all nodes in an expression to mark dependencies.
 func (c *visitor) markExpr(env *adt.Environment, expr adt.Elem) {
+	if x, ok := expr.(*adt.FuncCallRef); ok {
+		// A call reference resolves to the function's conjunct-less anchor
+		// vertex, which exists only to give cycle detection a stable identity
+		// and is never a meaningful dependency itself. The expressions of the
+		// called function, and of the signatures the called value was
+		// tightened with, are reachable through the call instead. The
+		// conjunct environment is the call's body environment: the body is
+		// scheduled under it directly, while parameter constraints and the
+		// return type are pinned to its Up, the closure scope (see
+		// scheduleFuncCall in package adt).
+		fn := x.Func()
+		for i := range fn.Params {
+			if v := fn.Params[i].Value; v != nil {
+				c.markExpr(env.Up, v)
+			}
+			if d := fn.Params[i].Default; d != nil {
+				c.markExpr(env.Up, d)
+			}
+		}
+		if fn.Ret != nil {
+			c.markExpr(env.Up, fn.Ret)
+		}
+		if fn.Body != nil {
+			c.markExpr(env, fn.Body)
+		}
+		for _, t := range x.Types() {
+			c.markFunction(t.Env, t.Fn)
+		}
+		return
+	}
 	if expr, ok := expr.(adt.Resolver); ok {
 		c.markResolver(env, expr)
 		return
@@ -300,6 +330,15 @@ func (c *visitor) markExpr(env *adt.Environment, expr adt.Elem) {
 
 	switch x := expr.(type) {
 	case nil:
+	case *adt.Vertex:
+		// A vertex appears as a conjunct when the value being analyzed was
+		// composed through the API, such as by cue.Value.Unify, rather than
+		// compiled from source. Note that a vertex shared by multiple
+		// conjuncts is walked once per path reaching it; deduplicating on
+		// vertex identity alone would be wrong, as what markConjuncts reports
+		// depends on the path taken to get there.
+		c.markConjuncts(x)
+
 	case *adt.BinaryExpr:
 		c.markExpr(env, x.X)
 		c.markExpr(env, x.Y)
@@ -326,6 +365,9 @@ func (c *visitor) markExpr(env *adt.Environment, expr adt.Elem) {
 			c.markExpr(env, a)
 		}
 		c.all = saved
+
+	case *adt.Function:
+		c.markFunction(env, x)
 
 	case *adt.DisjunctionExpr:
 		for _, d := range x.Values {
@@ -403,6 +445,11 @@ func (c *visitor) markResolver(env *adt.Environment, r adt.Resolver) {
 		c.markExpr(env, x.Index)
 
 	case *adt.SelectorExpr:
+		c.markExpr(env, x.X)
+
+	case *adt.LetReference:
+		// export.resolveLet renders x.X inline for an unresolved let, and
+		// the self-contained exporter matches references by identity.
 		c.markExpr(env, x.X)
 	}
 }
@@ -623,6 +670,32 @@ func (c *visitor) feature(env *adt.Environment, r adt.Resolver) adt.Feature {
 	}
 }
 
+// markFunction marks dependencies in the expressions of a function literal.
+// env is the function's closure environment: parameter constraints,
+// parameter defaults, and the return type are compiled in that scope, while
+// the body assumes one additional scope level for the parameter activation
+// (see the compilation of ast.Func in internal/core/compile). Parameter
+// references in the body point into that extra level and simply do not
+// resolve against the empty vertex; only references to outer features yield
+// dependencies.
+func (c *visitor) markFunction(env *adt.Environment, fn *adt.Function) {
+	for i := range fn.Params {
+		if v := fn.Params[i].Value; v != nil {
+			c.markExpr(env, v)
+		}
+		if d := fn.Params[i].Default; d != nil {
+			c.markExpr(env, d)
+		}
+	}
+	if fn.Ret != nil {
+		c.markExpr(env, fn.Ret)
+	}
+	if fn.Body != nil {
+		env := &adt.Environment{Up: env, Vertex: empty}
+		c.markExpr(env, fn.Body)
+	}
+}
+
 func (c *visitor) markSubExpr(env *adt.Environment, x adt.Expr) {
 	if c.all {
 		saved := c.top
@@ -700,9 +773,6 @@ func (c *visitor) markClauses(env *adt.Environment, a []adt.Yielder) *adt.Enviro
 				env = &adt.Environment{Up: env, Vertex: empty}
 			}
 			// Struct form: no expression, body is in Comprehension.Value
-
-		case *adt.ValueClause:
-			env = &adt.Environment{Up: env, Vertex: empty}
 		}
 	}
 	return env

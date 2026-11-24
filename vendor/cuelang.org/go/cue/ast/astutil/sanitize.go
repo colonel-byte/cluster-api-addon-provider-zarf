@@ -16,13 +16,13 @@ package astutil
 
 import (
 	"fmt"
-	"math/rand/v2"
 	"slices"
-	"strings"
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/astinternal"
+	"cuelang.org/go/internal/cueexperiment"
 )
 
 // TODO:
@@ -32,6 +32,10 @@ import (
 
 // SanitizeFiles sanitizes all CUE files belonging to a single package,
 // detecting cross-file shadowing of predeclared identifiers.
+//
+// Every file is sanitized, whether or not an earlier one failed; the
+// errors of all failing files are returned together, each positioned in
+// the file it concerns.
 func SanitizeFiles(files []*ast.File) error {
 	names := make(map[string]bool)
 	for _, f := range files {
@@ -43,12 +47,33 @@ func SanitizeFiles(files []*ast.File) error {
 			}
 		}
 	}
+	var errs errors.Error
 	for _, f := range files {
 		if err := sanitize(f, names); err != nil {
-			return err
+			errs = errors.Append(errs, errors.Promote(err, "sanitize"))
 		}
 	}
+	if errs != nil {
+		return errs
+	}
 	return nil
+}
+
+// requiresPostfixAliases reports whether an alias introduced into f must be
+// written in the postfix form (a~X) rather than the prefix form (X=a). This
+// is determined by f's experiments, aliasv2 being what enables the postfix
+// form: from the language version where it is stable, or wherever the file
+// enables it outright.
+//
+// The parser sets f's experiments; a generator sets whatever it was told
+// applies. A file with neither says nothing about what it is written for, and
+// the current version is the only reasonable reading of that.
+func requiresPostfixAliases(f *ast.File) bool {
+	exp := f.Experiment()
+	if exp.LanguageVersion() == "" {
+		exp = cueexperiment.Default()
+	}
+	return exp.AliasV2
 }
 
 // labelName returns the name of a label, or "" if it cannot be determined.
@@ -71,6 +96,8 @@ func labelName(label ast.Label) string {
 //   - auto inserts imports associated with Idents
 //   - unshadows imports associated with idents
 //   - unshadows references for identifiers that were already resolved.
+//   - renames let clauses and postfix aliases named by a keyword, such as
+//     "in", along with their references.
 //
 // Deprecated: use [SanitizeFiles] to sanitize all files in a package together,
 // to avoid issues such as one file shadowing a builtin name in the package scope.
@@ -80,10 +107,11 @@ func Sanitize(f *ast.File) error {
 
 func sanitize(f *ast.File, names map[string]bool) error {
 	z := &sanitizer{
-		file: f,
-		rand: rand.New(rand.NewPCG(123, 456)), // ensure determinism between runs
+		file:           f,
+		postfixAliases: requiresPostfixAliases(f),
 
 		names:      map[string]bool{},
+		pkgNames:   names,
 		importMap:  map[string]*ast.ImportSpec{},
 		referenced: map[ast.Node]bool{},
 		altMap:     map[ast.Node]string{},
@@ -109,31 +137,76 @@ func sanitize(f *ast.File, names map[string]bool) error {
 	// Add imports and unshadow.
 	stack = stack[:0]
 	s = &scope{
-		file:       f,
 		errFn:      z.errf,
+		nameFn:     z.renameKeyword,
 		identFn:    z.handleIdent,
 		index:      make(map[string]entry),
 		scopeStack: &stack,
 	}
 	z.fileScope = s
 	ast.Walk(f, s.Before, nil)
+	// The walk has renamed the references, so the declarations must follow,
+	// even if it failed.
+	for id, name := range z.keywordAlts {
+		id.Name = name
+	}
 	if z.errs != nil {
 		return z.errs
 	}
 
 	z.cleanImports()
-
 	return z.errs
+}
+
+// declIdent returns the identifier declaring e if it is a let clause or
+// either half of a postfix alias, or nil otherwise.
+func declIdent(e entry) *ast.Ident {
+	switch x := e.link.(type) {
+	case *ast.LetClause:
+		return x.Ident
+	case *ast.PostfixAlias:
+		if e.field != nil {
+			return x.Label
+		}
+		return x.Field
+	}
+	return nil
+}
+
+// renameKeyword gives a let clause or postfix alias named by a keyword, which
+// the syntax does not accept as such a name, a new unique name. It is applied
+// to the declaration once the walk has renamed its references.
+func (z *sanitizer) renameKeyword(name string, e entry) {
+	id := declIdent(e)
+	if id == nil || !token.Lookup(name).IsKeyword() {
+		return
+	}
+	alt := z.uniqueName(name)
+	if z.keywordAlts == nil {
+		z.keywordAlts = make(map[*ast.Ident]string)
+	}
+	z.keywordAlts[id] = alt
+	if x, ok := e.link.(*ast.PostfixAlias); ok && id == x.Field {
+		// A reference to the shadowed field can use the alias too.
+		z.altMap[e.node] = alt
+	}
 }
 
 type sanitizer struct {
 	file      *ast.File
 	fileScope *scope
 
-	rand *rand.Rand
+	// postfixAliases records whether an alias this sanitizer introduces must
+	// be written in the postfix form to parse at the target language version.
+	postfixAliases bool
 
 	// names is all used names. Can be used to determine a new unique name.
-	names      map[string]bool
+	names map[string]bool
+	// namer picks the new names which [sanitizer.uniqueName] adds to
+	// [sanitizer.names].
+	namer astinternal.UniqueNamer
+	// pkgNames holds the top-level field names of all files in the package.
+	pkgNames   map[string]bool
 	referenced map[ast.Node]bool
 
 	// altMap defines an alternative name for an existing entry link (a field,
@@ -142,6 +215,10 @@ type sanitizer struct {
 	altMap    map[ast.Node]string
 	importMap map[string]*ast.ImportSpec
 
+	// keywordAlts holds the new names of the identifiers declaring let
+	// clauses and postfix aliases named by a keyword.
+	keywordAlts map[*ast.Ident]string
+
 	errs errors.Error
 }
 
@@ -149,7 +226,7 @@ func (z *sanitizer) errf(p token.Pos, msg string, args ...interface{}) {
 	z.errs = errors.Append(z.errs, errors.Newf(p, msg, args...))
 }
 
-func (z *sanitizer) addName(name string) {
+func (z *sanitizer) addName(name string, _ entry) {
 	z.names[name] = true
 }
 
@@ -158,7 +235,7 @@ func (z *sanitizer) addRename(base string, n ast.Node) (alt string, new bool) {
 		return name, false
 	}
 
-	name := z.uniqueName(base, false)
+	name := z.uniqueName(base)
 	z.altMap[n] = name
 	return name, true
 }
@@ -166,7 +243,7 @@ func (z *sanitizer) addRename(base string, n ast.Node) (alt string, new bool) {
 func (z *sanitizer) unshadow(parent ast.Node, base string, link ast.Node) string {
 	name, ok := z.altMap[link]
 	if !ok {
-		name = z.uniqueName(base, false)
+		name = z.uniqueName(base)
 		z.altMap[link] = name
 
 		// Insert new let clause at top to refer to a declaration in possible
@@ -184,6 +261,10 @@ func (z *sanitizer) unshadow(parent ast.Node, base string, link ast.Node) string
 		case *ast.StructLit:
 			decls = &x.Elts
 		default:
+			// A Field scope declares a pattern constraint's label alias or a
+			// value alias. The exporter links a reference past a value
+			// alias, and names a label alias so that no field in its value
+			// shadows it, so no reference is unshadowed within a Field.
 			panic(fmt.Sprintf("impossible scope type %T", parent))
 		}
 
@@ -192,8 +273,12 @@ func (z *sanitizer) unshadow(parent ast.Node, base string, link ast.Node) string
 			if (*decls)[i] == link {
 				break
 			}
-			if f, ok := (*decls)[i].(*ast.Field); ok && f.Label == link {
-				break
+			if f, ok := (*decls)[i].(*ast.Field); ok {
+				// The link is the node the name was declared by, which for a
+				// field is its label, or the alias beside it.
+				if f.Label == link || f.Alias == link {
+					break
+				}
 			}
 		}
 
@@ -209,6 +294,12 @@ func (z *sanitizer) unshadow(parent ast.Node, base string, link ast.Node) string
 
 func (z *sanitizer) markUsed(s *scope, n *ast.Ident) bool {
 	if n.Node != nil {
+		// The import may only be declared as the second walk reaches the
+		// reference, while it picks new names; see [sanitizer.handleIdent].
+		if spec, ok := n.Node.(*ast.ImportSpec); ok {
+			info, _ := ParseImportSpec(spec)
+			z.names[info.Ident] = true
+		}
 		return false
 	}
 	_, _, entry := s.lookup(n.String())
@@ -232,7 +323,46 @@ func (z *sanitizer) cleanImports() {
 	}
 }
 
+// bindField binds name to the value of field x, whose label is the identifier
+// y, in the syntax the target language version accepts. The postfix form sits
+// beside the label; the prefix form wraps it, and so takes the label's
+// formatting and comments with it.
+func (z *sanitizer) bindField(x *ast.Field, y *ast.Ident, name string) {
+	ident := ast.NewIdent(name)
+	// A field already carrying a postfix alias takes the name into its free
+	// half, whatever the target version would otherwise pick: a field cannot
+	// hold both forms at once, and the one already there is the one the file
+	// it belongs to evidently accepts.
+	if x.Alias == nil && !z.postfixAliases {
+		CopyMeta(ident, y)
+		ast.SetRelPos(y, token.NoRelPos)
+		ast.SetComments(y, nil)
+		x.Label = &ast.Alias{Ident: ident, Expr: y}
+		return
+	}
+	if x.Alias == nil {
+		x.Alias = &ast.PostfixAlias{}
+	}
+	ast.SetRelPos(ident, token.NoSpace)
+	x.Alias.Field = ident
+}
+
 func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
+	if len(z.keywordAlts) > 0 {
+		// Another declaration may shadow the one n refers to.
+		var node entry
+		if n.Node != nil {
+			_, node, _ = s.resolveScope(n.Name, n.Node)
+		} else {
+			_, _, node = s.lookup(n.Name)
+		}
+		// New names are unique, so they need no unshadowing.
+		if name, ok := z.keywordAlts[declIdent(node)]; ok {
+			n.Name = name
+			n.Scope = nil
+			return true
+		}
+	}
 	if n.Node == nil {
 		return true
 	}
@@ -242,7 +372,7 @@ func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
 		if n.IsPredeclared() {
 			// Check if the predeclared name is shadowed by a top-level field
 			// in another file of the same package.
-			if z.names[n.Name] {
+			if z.pkgNames[n.Name] {
 				n.Name = "__" + n.Name
 			}
 			n.Scope = nil
@@ -283,7 +413,7 @@ func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
 		// use a previously created one.
 		spec := z.importMap[xi.ID]
 		if spec == nil {
-			name := z.uniqueName(xi.Ident, false)
+			name := z.uniqueName(xi.Ident)
 			spec = z.addImport(&ast.ImportSpec{
 				Name: ast.NewIdent(name),
 				Path: x.Path,
@@ -340,10 +470,14 @@ func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
 		if ok {
 			break
 		}
-		// If this field has not alias, introduce one with a unique name.
-		// If this has an alias, also introduce a new name. There is a
-		// possibility that the alias can be used, but it is easier to just
-		// assign a new name, assuming this case is rather rare.
+		// If this field already binds its value to a name, unshadow that name.
+		// Otherwise introduce an alias with a unique name. There is a
+		// possibility that an existing alias can be used, but it is easier to
+		// just assign a new name, assuming this case is rather rare.
+		if a := x.Alias; a != nil && a.Field != nil && a.Field.Name != "_" {
+			name = z.unshadow(parent, a.Field.Name, a)
+			break
+		}
 		switch y := x.Label.(type) {
 		case *ast.Alias:
 			name = z.unshadow(parent, y.Ident.Name, y)
@@ -352,13 +486,7 @@ func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
 			var isNew bool
 			name, isNew = z.addRename(y.Name, x)
 			if isNew {
-				ident := ast.NewIdent(name)
-				// Move formatting and comments from original label to alias
-				// identifier.
-				CopyMeta(ident, y)
-				ast.SetRelPos(y, token.NoRelPos)
-				ast.SetComments(y, nil)
-				x.Label = &ast.Alias{Ident: ident, Expr: y}
+				z.bindField(x, y, name)
 			}
 
 		default:
@@ -371,6 +499,11 @@ func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
 
 	case *ast.Alias:
 		name = z.unshadow(parent, x.Ident.Name, x)
+
+	case *ast.PostfixAlias:
+		// n resolved to either half of the alias, so it already holds the
+		// name that half was inserted under.
+		name = z.unshadow(parent, n.Name, x)
 
 	default:
 		panic(fmt.Sprintf("unexpected link type %T", e.link))
@@ -385,32 +518,14 @@ func (z *sanitizer) handleIdent(s *scope, n *ast.Ident) bool {
 	return true
 }
 
-// uniqueName returns a new name globally unique name of the form
-// base_NN ... base_NNNNNNNNNNNNNN or _base or the same pattern with a '_'
-// prefix if hidden is true.
-//
-// It prefers short extensions over large ones, while ensuring the likelihood of
-// fast termination is high. There are at least two digits to make it visually
-// clearer this concerns a generated number.
-func (z *sanitizer) uniqueName(base string, hidden bool) string {
-	if hidden && !strings.HasPrefix(base, "_") {
-		base = "_" + base
-		if !z.names[base] {
-			z.names[base] = true
-			return base
-		}
-	}
-
-	const mask = 0xff_ffff_ffff_ffff // max bits; stay clear of int64 overflow
-	const shift = 4                  // rate of growth
-	for n := int64(0x10); ; n = mask&((n<<shift)-1) + 1 {
-		num := z.rand.IntN(int(n))
-		name := fmt.Sprintf("%s_%01X", base, num)
-		if !z.names[name] {
-			z.names[name] = true
-			return name
-		}
-	}
+// uniqueName returns a new name, based on base but never base itself, which
+// is unused in the file and the package's top level.
+func (z *sanitizer) uniqueName(base string) string {
+	name := z.namer.Name(base, func(name string) bool {
+		return name == base || z.names[name]
+	})
+	z.names[name] = true
+	return name
 }
 
 func (z *sanitizer) addImport(spec *ast.ImportSpec) *ast.ImportSpec {

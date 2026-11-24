@@ -24,10 +24,13 @@ import (
 	"golang.org/x/net/idna"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/internal/pkg"
 )
 
-// TODO: revert to using ValidateLabels and StrictDomainName once
-// https://go.dev/issue/74848 is fixed.
+// TODO: revert to using ValidateLabels and StrictDomainName once we
+// require Go 1.27. https://go.dev/issue/74848 is fixed, but the fix rides
+// on the Unicode 17 IDNA tables, which x/net/idna only builds on Go 1.27
+// and later, so the revert still regresses net.FQDN on Go 1.26.
 var idnaProfile = idna.New(
 	idna.MapForLookup(),
 	idna.VerifyDNSLength(true),
@@ -98,7 +101,7 @@ func JoinHostPort(host, port cue.Value) (string, error) {
 //
 // FQDN allows only ASCII characters as prescribed by RFC 1034 (A-Z, a-z, 0-9
 // and the hyphen).
-func FQDN(s string) bool {
+func FQDN(s string) pkg.Validator {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= utf8.RuneSelf {
 			return false

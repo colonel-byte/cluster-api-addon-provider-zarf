@@ -22,44 +22,39 @@ import (
 	"cuelang.org/go/cue"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/convert"
-	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/core/runtime"
 )
 
 // Context returns the cue.Context of the given argument.
+// For a [cue.Value], it is equivalent to the deprecated [cue.Value.Context],
+// and the same caveats apply when combining values from different contexts.
+//
+//lint:ignore SA1019 callers may still pass the deprecated *cue.Runtime
 func Context[Ctx *cue.Runtime | *cue.Context | cue.Value | *adt.OpContext](ctx Ctx) *cue.Context {
-	switch x := any(ctx).(type) {
-	case *cue.Runtime:
-		(*runtime.Runtime)(x).Init()
-		return (*cue.Context)(x)
-	case *cue.Context:
-		return x
-	case cue.Value:
-		r, _ := ToInternal(x)
+	// Type-switch on a pointer: converting a cue.Value itself to an
+	// interface would copy it to the heap.
+	// TODO: switch on ctx directly once the compiler folds type switches
+	// in instantiated generic functions; see https://go.dev/issue/59591.
+	switch x := any(&ctx).(type) {
+	case **cue.Runtime: //lint:ignore SA1019 see above
+		(*runtime.Runtime)(*x).Init()
+		return (*cue.Context)(*x)
+	case **cue.Context:
+		return *x
+	case *cue.Value:
+		r, _ := ToInternal(*x)
 		return (*cue.Context)(r)
-	case *adt.OpContext:
-		r := x.Runtime.(*runtime.Runtime)
+	case **adt.OpContext:
+		r := (*x).Runtime.(*runtime.Runtime)
 		return (*cue.Context)(r)
 	}
 	panic("unreachable")
 }
 
-// OpContext returns an OpContext with proper node formatting initialized.
-func OpContext[Ctx *cue.Runtime | *cue.Context | cue.Value](c Ctx) *adt.OpContext {
-	var r *runtime.Runtime
-	var v *adt.Vertex
-	switch x := any(c).(type) {
-	case *cue.Runtime:
-		r = (*runtime.Runtime)(x)
-		r.Init()
-	case *cue.Context:
-		r = (*runtime.Runtime)(x)
-	case cue.Value:
-		r, v = ToInternal(x)
-	default:
-		panic("unreachable")
-	}
-	return eval.NewContext(r, v)
+// OpContext returns an OpContext for the runtime and vertex underlying v.
+func OpContext(v cue.Value) *adt.OpContext {
+	r, x := ToInternal(v)
+	return adt.NewContext(r, x)
 }
 
 func ToInternal(v cue.Value) (*runtime.Runtime, *adt.Vertex) {
@@ -80,7 +75,7 @@ func Make(ctx *adt.OpContext, v adt.Value) cue.Value {
 // UnifyBuiltin returns the given Value unified with the given builtin template.
 func UnifyBuiltin(v cue.Value, kind string) cue.Value {
 	pkg, name, _ := strings.Cut(kind, ".")
-	ctx := v.Context()
+	ctx := Context(v)
 	rt := (*runtime.Runtime)(ctx)
 	s := rt.LoadBuiltin(pkg)
 	if s == nil {
@@ -98,7 +93,7 @@ func UnifyBuiltin(v cue.Value, kind string) cue.Value {
 func FromGoValue(r *cue.Context, x interface{}, nilIsTop bool) cue.Value {
 	rt := (*runtime.Runtime)(r)
 	rt.Init()
-	ctx := eval.NewContext(rt, nil)
+	ctx := adt.NewContext(rt, nil)
 	v := convert.FromGoValue(ctx, x, nilIsTop)
 	n := adt.ToVertex(v)
 	return r.Encode(n)
@@ -107,7 +102,7 @@ func FromGoValue(r *cue.Context, x interface{}, nilIsTop bool) cue.Value {
 func FromGoType(r *cue.Context, x interface{}) cue.Value {
 	rt := (*runtime.Runtime)(r)
 	rt.Init()
-	ctx := eval.NewContext(rt, nil)
+	ctx := adt.NewContext(rt, nil)
 	v, err := convert.FromGoType(ctx, x)
 	if err != nil {
 		return r.Encode(&adt.Bottom{Err: err})

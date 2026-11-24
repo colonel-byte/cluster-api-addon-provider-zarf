@@ -15,18 +15,12 @@
 package literal
 
 import (
+	"sync"
+
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 	"github.com/cockroachdb/apd/v3"
 )
-
-// We avoid cuelang.org/go/internal.Context as that would be an import cycle.
-var baseContext apd.Context
-
-func init() {
-	baseContext = apd.BaseContext
-	baseContext.Precision = 34
-}
 
 // NumInfo contains information about a parsed numbers.
 //
@@ -73,15 +67,26 @@ func (p *NumInfo) decimal(v *apd.Decimal) error {
 			b = p.buf[1:]
 		}
 		v.Coeff.SetString(string(b), int(p.base))
-		return nil
-	}
-	_ = v.UnmarshalText(p.buf)
-	if p.mul != 0 {
-		_, _ = baseContext.Mul(v, v, mulToRat[p.mul])
-		cond, _ := baseContext.RoundToIntegralExact(v, v)
-		if cond.Inexact() {
-			return p.errorf("number cannot be represented as int")
+	} else {
+		// The syntax is already validated, so this fails only for an exponent
+		// out of apd's range, leaving v as NaN or as the coefficient alone.
+		// A zero coefficient is still zero with any exponent.
+		if err := v.UnmarshalText(p.buf); err != nil && !v.IsZero() {
+			return p.errorf("exponent out of range in number %q", p.src)
 		}
+		if p.mul != 0 {
+			// apd.BaseContext has no precision, so it never rounds: a literal
+			// keeps every digit however wide it is, as the spec requires.
+			_, _ = apd.BaseContext.Mul(v, v, mulToRat()[p.mul])
+			cond, _ := apd.BaseContext.RoundToIntegralExact(v, v)
+			if cond.Inexact() {
+				return p.errorf("number cannot be represented as int")
+			}
+		}
+	}
+	// The spec defines -x as 0 - x, so a signed zero is zero.
+	if v.IsZero() {
+		v.Negative = false
 	}
 	return nil
 }
@@ -124,9 +129,6 @@ func ParseNum(s string, n *NumInfo) error {
 	}
 	if n.p < len(n.src) {
 		return n.errorf("invalid number %q", s)
-	}
-	if len(n.buf) == 0 {
-		n.buf = append(n.buf, '0')
 	}
 	return nil
 }
@@ -184,7 +186,7 @@ func (p *NumInfo) next() bool {
 		p.err = p.errorf("illegal character NUL")
 	}
 	if p.ch == '.' {
-		if len(p.buf) == 0 {
+		if len(p.buf) == 0 || string(p.buf) == "-" {
 			p.buf = append(p.buf, '0')
 		}
 		p.buf = append(p.buf, '.')
@@ -271,13 +273,12 @@ func (p *NumInfo) scanNumber(seenDecimalPoint bool) error {
 		default:
 			// 0 or float
 			seenDigits := p.scanMantissa(10)
+			if !seenDigits && p.ch != '.' {
+				// Only the leading '0' was seen; p.next has added it before a '.'.
+				p.buf = append(p.buf, '0')
+			}
 			switch p.ch {
-			case 'e', 'E':
-				if len(p.buf) == 0 {
-					p.buf = append(p.buf, '0')
-				}
-				fallthrough
-			case '.':
+			case 'e', 'E', '.':
 				goto fraction
 			}
 			if seenDigits {
@@ -363,9 +364,10 @@ var charToMul = map[byte]Multiplier{
 	'Y': mul8,
 }
 
-var mulToRat = map[Multiplier]*apd.Decimal{}
-
-func init() {
+// mulToRat returns the value of each multiplier.
+// It is built on first use, as building it is costly at init time.
+var mulToRat = sync.OnceValue(func() map[Multiplier]*apd.Decimal {
+	m := map[Multiplier]*apd.Decimal{}
 	d := apd.New(1, 0)
 	b := apd.New(1, 0)
 	dm := apd.New(1000, 0)
@@ -379,7 +381,8 @@ func init() {
 		d = &dn
 		_, _ = c.Mul(&bn, b, bm)
 		b = &bn
-		mulToRat[mulDec|i] = d
-		mulToRat[mulBin|i] = b
+		m[mulDec|i] = d
+		m[mulBin|i] = b
 	}
-}
+	return m
+})

@@ -94,22 +94,11 @@ func (c *Context) addErr(v cue.Value, wrap error, format string, args ...interfa
 	c.Err = errors.Append(c.Err, errors.Wrap(err, wrap))
 }
 
-// ErrLegacy is a sentinel error value that may be returned by a TaskKey
-// function to indicate that the task is a legacy task. This will cause the
-// configuration value to be passed to the RunnerFunc instead of an empty
-// value.
-var ErrLegacy error = errors.New("legacy task error")
-
-// NewTaskFunc creates a flow.TaskFunc that uses global settings from Context
+// TaskFunc creates a flow.TaskFunc that uses global settings from Context
 // and a taskKey function to determine the kind of task to run.
 func (c Context) TaskFunc(didWork *atomic.Bool) flow.TaskFunc {
 	return func(v cue.Value) (flow.Runner, error) {
 		kind, err := c.TaskKey(v)
-		var isLegacy bool
-		if err == ErrLegacy {
-			err = nil
-			isLegacy = true
-		}
 		if err != nil || kind == "" {
 			return nil, err
 		}
@@ -133,18 +122,13 @@ func (c Context) TaskFunc(didWork *atomic.Bool) flow.TaskFunc {
 			return nil, errors.Promote(err, "errors running task")
 		}
 
-		if !isLegacy {
-			v = cue.Value{}
-		}
-
-		return c.flowFunc(runner, v), nil
+		return c.flowFunc(runner), nil
 	}
 }
 
-// flowFunc takes a Runner and a schema v, which should only be defined for
-// legacy task ids.
-func (c Context) flowFunc(runner Runner, v cue.Value) flow.Runner {
-	wrapper := &flowRunner{c: c, runner: runner, v: v}
+// flowFunc wraps a Runner to implement flow.Runner.
+func (c Context) flowFunc(runner Runner) flow.Runner {
+	wrapper := &flowRunner{c: c, runner: runner}
 	// If the runner declares it is a service, return a
 	// wrapper that implements both Runner and Service.
 	if ce, ok := runner.(flow.Service); ok && ce.IsService() {
@@ -157,17 +141,16 @@ func (c Context) flowFunc(runner Runner, v cue.Value) flow.Runner {
 type flowRunner struct {
 	c      Context
 	runner Runner
-	v      cue.Value
 }
 
 func (r *flowRunner) Run(t *flow.Task, err error) error {
-	// Set task-specific values.
-	r.c.Context = t.Context()
-	r.c.Obj = t.Value()
-	if r.v.Exists() {
-		r.c.Obj = r.c.Obj.Unify(r.v)
-	}
-	value, runErr := r.runner.Run(&r.c)
+	// Work on a copy: the runner outlives this call, and c.Obj would
+	// otherwise keep the task's configuration tree reachable for the
+	// rest of the flow.
+	c := r.c
+	c.Context = t.Context()
+	c.Obj = t.Value()
+	value, runErr := r.runner.Run(&c)
 	if runErr != nil {
 		return runErr
 	}
@@ -196,6 +179,7 @@ func (c Context) ForkRunLoop(ctx context.Context, path cue.Path, v cue.Value, r 
 		InferTasks:       true,
 		IgnoreConcrete:   true,
 		RunInferredTasks: true, // Run inferred tasks since inputs are filled
+		UpdateFunc:       StartBackgroundWhenReady,
 	}
 
 	// Fill the root with the request data. The v value contains the filled
@@ -206,7 +190,7 @@ func (c Context) ForkRunLoop(ctx context.Context, path cue.Path, v cue.Value, r 
 	taskFunc := func(v cue.Value) (flow.Runner, error) {
 		// The node itself has a function to continue.
 		if v.Path().String() == path.String() {
-			return c.flowFunc(r, cue.Value{}), nil
+			return c.flowFunc(r), nil
 		}
 		var didWork atomic.Bool
 		// if !didWork.Load() {
@@ -265,12 +249,16 @@ type Runner interface {
 	Run(ctx *Context) (results interface{}, err error)
 }
 
-// Background indicates whether the task is running in the background after
-// finishing.
-var Background atomic.Bool
+var (
+	backgroundMu     sync.Mutex
+	background       bool
+	backgroundStarts []func()
+)
 
 // BackgroundTask must be used by a task to indicate that it is running in the
-// background.
+// background. The start func is called in a new goroutine by the next call to
+// [StartBackground], such as to start accepting requests only once all the
+// handlers for a server are in place.
 // TODO: this is a hack. We should have a better way to indicate this. Also,
 // introduce mechanism to cancel and background tasks, detect when they are
 // done, and collect errors.
@@ -278,8 +266,39 @@ var Background atomic.Bool
 // task.Context and have a way to add to it (perhaps just expose a Go method)
 // and wait for it to complete (in practice you'd probably select on that
 // finishing and os.Interrupt)?
-func (c *Context) BackgroundTask() {
-	Background.Store(true)
+func (c *Context) BackgroundTask(start func()) {
+	backgroundMu.Lock()
+	defer backgroundMu.Unlock()
+	background = true
+	backgroundStarts = append(backgroundStarts, start)
+}
+
+// StartBackground starts the work registered via [Context.BackgroundTask]
+// since the last call, and reports whether any task is running in the background.
+func StartBackground() bool {
+	backgroundMu.Lock()
+	defer backgroundMu.Unlock()
+	for _, start := range backgroundStarts {
+		go start()
+	}
+	backgroundStarts = nil
+	return background
+}
+
+// StartBackgroundWhenReady is a [flow.Config.UpdateFunc] which calls
+// [StartBackground] once no service tasks are ready to run or running,
+// so that, for example, all the handlers which can be registered
+// for a server are in place before it accepts requests.
+// Services waiting on other tasks do not hold back background work,
+// as those tasks might be clients of the services which already ran.
+func StartBackgroundWhenReady(c *flow.Controller, _ *flow.Task) error {
+	for _, t := range c.Tasks() {
+		if t.IsService() && (t.State() == flow.Ready || t.State() == flow.Running) {
+			return nil
+		}
+	}
+	StartBackground()
+	return nil
 }
 
 // Register registers a task for cue commands.

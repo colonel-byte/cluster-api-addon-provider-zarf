@@ -32,7 +32,7 @@ var matchNBuiltin = &adt.Builtin{
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
 
-		if !c.IsValidator {
+		if !c.IsValidator() {
 			return c.NewErrf("matchN is a validator and should not be used as a function")
 		}
 
@@ -52,7 +52,7 @@ var matchNBuiltin = &adt.Builtin{
 
 		var errs []*adt.Bottom
 		var count, possibleCount int64
-		for check := range c.Elems(call.Value(2)) {
+		for check := range c.List(call.Value(2)).Elems() {
 			v := adt.Unify(c, self, check)
 			if err := adt.Validate(c, v, finalCfg); err == nil {
 				// TODO: is it always true that the lack of an error signifies
@@ -99,7 +99,7 @@ var matchIfBuiltin = &adt.Builtin{
 	Func: func(call adt.BuiltinCallContext) adt.Expr {
 		c := call.OpContext()
 
-		if !c.IsValidator {
+		if !c.IsValidator() {
 			return c.NewErrf("matchIf is a validator and should not be used as a function")
 		}
 

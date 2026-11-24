@@ -15,7 +15,6 @@
 package cli
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"strings"
@@ -27,9 +26,6 @@ import (
 func init() {
 	task.Register("tool/cli.Print", newPrintCmd)
 	task.Register("tool/cli.Ask", newAskCmd)
-
-	// For backwards compatibility.
-	task.Register("print", newPrintCmd)
 }
 
 type printCmd struct{}
@@ -53,19 +49,9 @@ func newAskCmd(v cue.Value) (task.Runner, error) {
 	return &askCmd{}, nil
 }
 
-type oneByteReader struct {
-	r io.Reader
-}
-
-func (r *oneByteReader) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	return r.r.Read(p[:1])
-}
-
 func (c *askCmd) Run(ctx *task.Context) (res interface{}, err error) {
 	str := ctx.String("prompt")
+	responseValue := ctx.Lookup("response")
 	if ctx.Err != nil {
 		return nil, ctx.Err
 	}
@@ -73,26 +59,27 @@ func (c *askCmd) Run(ctx *task.Context) (res interface{}, err error) {
 		fmt.Fprint(ctx.Stdout, str+" ")
 	}
 
-	// Roger is convinced that bufio.Scanner will only issue as many reads
-	// as it needs, so that limiting it to one-byte reads should be enough
-	// to not read any bytes after a newline.
-	// This behavior is true today but technically not documented,
-	// so Roger will send a CL to properly document it.
-	//
-	// TODO(mvdan): come back to remove this notice once Roger's CL is
-	// approved, or to rewrite the code if it is rejected.
-	scanner := bufio.NewScanner(&oneByteReader{ctx.Stdin})
-	var response string
-	if scanner.Scan() {
-		response = scanner.Text()
+	// Read a single line from stdin, one byte at a time, so that we do
+	// not consume any input past the newline; stdin may be shared with
+	// subsequent tasks such as another cli.Ask or an exec.Run.
+	var line []byte
+	var b [1]byte
+	for {
+		if _, err := io.ReadFull(ctx.Stdin, b[:]); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+		if b[0] == '\n' {
+			break
+		}
+		line = append(line, b[0])
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
+	response := strings.TrimSuffix(string(line), "\r")
 
 	update := map[string]interface{}{"response": response}
 
-	switch v := ctx.Lookup("response"); v.IncompleteKind() {
+	switch responseValue.IncompleteKind() {
 	case cue.BoolKind:
 		update["response"] = strings.ToLower(response) == "yes"
 	case cue.StringKind:

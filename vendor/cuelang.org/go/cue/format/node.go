@@ -14,6 +14,10 @@
 
 package format
 
+// This file implements the pre-v2 formatter, used when the formatv2 experiment
+// is disabled. It is no longer maintained: fix bugs and add features in the v2
+// formatter instead.
+
 import (
 	"fmt"
 	"slices"
@@ -28,7 +32,7 @@ import (
 func printNode(node interface{}, f *printer) error {
 	s := newFormatter(f)
 
-	ls := labelSimplifier{scope: map[string]bool{}}
+	ls := newLabelSimplifier()
 
 	// format node
 	f.allowed = nooverride // gobble initial whitespace.
@@ -36,11 +40,6 @@ func printNode(node interface{}, f *printer) error {
 	case *ast.File:
 		if f.cfg.simplify {
 			ls.markReferences(x)
-		}
-		// Prefer the language version from the AST (set by the parser from the
-		// module file) over any explicit option, which is used as a fallback.
-		if x.LanguageVersion != "" {
-			f.cfg.languageVersion = x.LanguageVersion
 		}
 		s.file(x)
 	case ast.Expr:
@@ -57,7 +56,7 @@ func printNode(node interface{}, f *printer) error {
 	// 	s.walk(x)
 	case []ast.Decl:
 		if f.cfg.simplify {
-			ls.processDecls(x)
+			ls.processDecls(x, false)
 		}
 		s.walkDeclList(x)
 	default:
@@ -347,15 +346,53 @@ func (f *formatter) walkListElems(list []ast.Expr, lbrack, rbrack token.Pos) {
 	f.after(nil)
 }
 
-func (f *formatter) walkArgsList(list []ast.Expr, depth int) {
+func (f *formatter) walkCallArgsList(args []ast.Expr, labels []ast.Label, depth int) {
 	f.before(nil)
-	for _, x := range list {
+	for i, x := range args {
 		f.before(x)
+		if i < len(labels) && labels[i] != nil {
+			f.label(labels[i], token.ILLEGAL)
+			f.print(token.COLON, blank)
+		}
 		f.exprRaw(x, token.LowestPrec, depth)
 		f.print(comma, blank)
 		f.after(x)
 	}
 	f.after(nil)
+}
+
+// funcParamDocComments prints the doc comments of a parameter's constraint
+// or default expression, which is printed with exprRaw and so without its
+// comments. Any other comment on the expression is printed by the
+// expression itself where it has one, and is otherwise beside the point:
+// a same-line comment attaches to the parameter, not to the expression.
+func (f *formatter) funcParamDocComments(e ast.Expr) {
+	if e == nil {
+		return
+	}
+	for _, cg := range ast.Comments(e) {
+		if cg.Doc {
+			f.printComment(cg)
+		}
+	}
+}
+
+func (f *formatter) postfixAlias(a *ast.PostfixAlias) {
+	if a == nil {
+		return
+	}
+	f.print(a.Tilde, token.TILDE, noblank)
+	if a.Label != nil {
+		f.print(a.Lparen, token.LPAREN, noblank)
+		f.expr(a.Label)
+		f.print(a.Comma, token.COMMA, noblank)
+		f.expr(a.Field)
+		f.print(a.Rparen, token.RPAREN, noblank)
+		return
+	}
+	f.print(a.Lparen, token.LPAREN, noblank)
+	f.expr(a.Field)
+	f.print(a.Rparen, token.RPAREN, noblank)
 }
 
 func (f *formatter) file(file *ast.File) {
@@ -607,6 +644,30 @@ func (f *formatter) nextNeedsFormfeed(n ast.Expr) bool {
 		if slices.ContainsFunc(x.Args, f.nextNeedsFormfeed) {
 			return true
 		}
+	case *ast.Func:
+		// Parameters synthesized from the legacy Args field carry no
+		// label or comments and have Value set to the argument, so this
+		// inspects the same information for both signature styles.
+		for _, p := range x.Parameters() {
+			if p == nil {
+				continue
+			}
+			if len(ast.Comments(p)) > 0 || (p.Label != nil && len(ast.Comments(p.Label)) > 0) {
+				return true
+			}
+			// A comment on the constraint or the default is printed as
+			// the parameter's (see funcParamDocComments), and parses
+			// back as such: treat it the same here so that formatting
+			// is idempotent.
+			if len(ast.Comments(p.Value)) > 0 || f.nextNeedsFormfeed(p.Value) {
+				return true
+			}
+			if p.Default != nil && (len(ast.Comments(p.Default)) > 0 || f.nextNeedsFormfeed(p.Default)) {
+				return true
+			}
+		}
+		return (x.Ret != nil && f.nextNeedsFormfeed(x.Ret)) ||
+			(x.Body != nil && f.nextNeedsFormfeed(x.Body))
 	}
 	return false
 }
@@ -750,6 +811,88 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 		}
 		f.after(nil)
 
+	case *ast.Func:
+		// A function type's result constraint and a function's body extend
+		// to the end of the expression. In an operand position they would
+		// absorb a following operator when parsed back — for example,
+		// func() -> int & T parses the conjunction as part of the result —
+		// so the function literal needs parentheses to preserve the tree.
+		parens := prec1 > token.LowestPrec && (x.Ret != nil || x.Body != nil)
+		if parens {
+			f.print(token.LPAREN, nooverride)
+		}
+		f.print(x.Func, token.FUNC)
+		f.print(x.Lparen, token.LPAREN)
+		f.before(nil)
+		// Print the nodes actually present in the AST rather than the
+		// synthesized view of [ast.Func.Parameters] (whose discriminator
+		// between the two signature styles this condition mirrors), so
+		// that f.before/f.after visit the nodes carrying the comments.
+		//lint:ignore SA1019 still print ASTs that only set the legacy Args
+		args := x.Args
+		if len(x.Params) > 0 || len(args) == 0 {
+			for _, p := range x.Params {
+				if p == nil {
+					continue
+				}
+				f.before(p)
+				// The parser attaches a comment on its own line before
+				// the constraint or the default to that expression, which
+				// exprRaw prints without its comments. Print such doc
+				// comments with the parameter's own, before the label.
+				f.funcParamDocComments(p.Value)
+				f.funcParamDocComments(p.Default)
+				if p.Label != nil {
+					f.label(p.Label, token.ILLEGAL)
+					f.postfixAlias(p.Alias)
+					if p.Constraint != token.ILLEGAL {
+						f.print(p.Constraint)
+					}
+					f.print(noblank, nooverride, p.TokenPos, token.COLON, blank)
+					f.visitComments(f.current.pos)
+				}
+				f.exprRaw(p.Value, token.LowestPrec, depth)
+				if p.Default != nil {
+					// A parameter default follows the constraint as
+					// " = expr", the spacing of a let clause's "=".
+					f.print(blank, nooverride, p.Equal, token.BIND, blank)
+					f.exprRaw(p.Default, token.LowestPrec, depth)
+				}
+				for _, a := range p.Attrs {
+					if f.before(a) {
+						f.print(blank, a.At, a)
+					}
+					f.after(a)
+				}
+				f.print(comma, blank)
+				f.after(p)
+			}
+		} else {
+			for _, arg := range args {
+				f.before(arg)
+				f.exprRaw(arg, token.LowestPrec, depth)
+				f.print(comma, blank)
+				f.after(arg)
+			}
+		}
+		if x.Ellipsis != token.NoPos {
+			f.print(x.Ellipsis, token.ELLIPSIS)
+			f.print(comma, blank)
+		}
+		f.after(nil)
+		f.print(trailcomma, noblank, x.Rparen, token.RPAREN)
+		if x.Ret != nil {
+			f.print(blank, x.Arrow, token.RARROW, blank)
+			f.expr(x.Ret)
+		}
+		if x.Body != nil {
+			f.print(x.Colon, token.COLON, blank)
+			f.expr(x.Body)
+		}
+		if parens {
+			f.print(token.RPAREN)
+		}
+
 	case *ast.ParenExpr:
 		if _, hasParens := x.X.(*ast.ParenExpr); hasParens {
 			// don't print parentheses around an already parenthesized expression
@@ -796,7 +939,13 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 		}
 		wasIndented := f.possibleSelectorExpr(x.Fun, token.HighestPrec, depth)
 		f.print(x.Lparen, token.LPAREN)
-		f.walkArgsList(x.Args, depth)
+		f.walkCallArgsList(x.Args, x.ArgLabels, depth)
+		if x.Ellipsis != token.NoPos {
+			if len(x.Args) > 0 {
+				f.print(token.COMMA, blank)
+			}
+			f.print(x.Ellipsis, token.ELLIPSIS)
+		}
 		f.print(trailcomma, noblank, x.Rparen, token.RPAREN)
 		if wasIndented {
 			f.print(unindent)
@@ -820,6 +969,9 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 			ff = ffAlt
 		case !x.Rbrace.HasRelPos() || !x.Elts[0].Pos().HasRelPos():
 			ws |= newline | nooverride
+		}
+		if x.Hash.IsValid() {
+			f.print(x.Hash, "#", noblank)
 		}
 		f.print(x.Lbrace, token.LBRACE, &l, ws, ff, indent)
 		f.prevLbraceOnLine = l == f.lineout
@@ -850,6 +1002,9 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 			ws |= collapseWs
 		}
 
+		if x.Hash.IsValid() {
+			f.print(x.Hash, "#", noblank)
+		}
 		f.print(x.Lbrack, token.LBRACK, ws)
 		f.walkListElems(x.Elts, x.Lbrack, x.Rbrack)
 		f.print(trailcomma, noblank)

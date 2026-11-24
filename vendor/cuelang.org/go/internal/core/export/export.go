@@ -15,8 +15,7 @@
 package export
 
 import (
-	"fmt"
-	"math/rand/v2"
+	"cmp"
 	"slices"
 
 	"cuelang.org/go/cue/ast"
@@ -24,9 +23,10 @@ import (
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/astinternal"
 	"cuelang.org/go/internal/core/adt"
-	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/core/walk"
+	"cuelang.org/go/internal/cueexperiment"
 )
 
 const debug = false
@@ -36,6 +36,10 @@ type Profile struct {
 
 	// Final reports incomplete errors as errors.
 	Final bool
+
+	// Concrete reports non-concrete values as errors, outside of
+	// definitions. It is meant to be used along with Final.
+	Concrete bool
 
 	// TakeDefaults is used in Value mode to drop non-default values.
 	TakeDefaults bool
@@ -76,6 +80,14 @@ type Profile struct {
 	// ExpandReferences causes all references to be expanded inline. This
 	// disables the ability to prevent billion laughs attacks, so use with care.
 	ExpandReferences bool
+
+	// TargetLanguageVersion holds the language version that the exported
+	// syntax must be valid at. The empty string means the current one.
+	//
+	// It matters wherever a spelling changed between versions: an alias is
+	// written in the postfix form from v0.18.0 on, and in the prefix form
+	// before it.
+	TargetLanguageVersion string
 }
 
 var Simplified = &Profile{
@@ -118,7 +130,8 @@ func Def(r adt.Runtime, pkgID string, v *adt.Vertex) (*ast.File, errors.Error) {
 // Def exports v as a definition.
 // It resolves references that point outside any of the vertices in v.
 func (p *Profile) Def(r adt.Runtime, pkgID string, v *adt.Vertex) (f *ast.File, err errors.Error) {
-	e := newExporter(p, r, pkgID, v)
+	e := newExporter(p, adt.NewContext(r, v), pkgID, v)
+	defer adt.AddStats(e.ctx)
 	e.initPivot(v)
 
 	isDef := v.IsRecursivelyClosed()
@@ -174,25 +187,11 @@ func isDefinitionReference(x ast.Expr) bool {
 	return false
 }
 
-// Expr exports the given unevaluated expression (schema mode).
-// It does not resolve references that point outside the given expression.
-func Expr(r adt.Runtime, pkgID string, n adt.Expr) (ast.Expr, errors.Error) {
-	return Simplified.Expr(r, pkgID, n)
-}
-
-// Expr exports the given unevaluated expression (schema mode).
-// It does not resolve references that point outside the given expression.
-func (p *Profile) Expr(r adt.Runtime, pkgID string, n adt.Expr) (ast.Expr, errors.Error) {
-	e := newExporter(p, r, pkgID, nil)
-
-	return e.expr(nil, n), nil
-}
-
 func (e *exporter) toFile(v *adt.Vertex, x ast.Expr) *ast.File {
 	fout := &ast.File{}
 
 	if e.cfg.AddPackage {
-		pkgName := ""
+		pkgName := packageName(v)
 		pkg := &ast.Package{
 			// prevent the file comment from attaching to pkg when there is no pkg comment
 			PackagePos: token.NoPos.WithRel(token.NewSection),
@@ -203,16 +202,15 @@ func (e *exporter) toFile(v *adt.Vertex, x ast.Expr) *ast.File {
 				continue
 			}
 
-			if name := f.PackageName(); name != "" {
-				pkgName = name
-			}
-
 			if e.cfg.ShowDocs {
+				// Copy the comments, as they belong to the source.
 				pkgComments, fileComments := internal.FileComments(f)
+				pkgComments = cloneComments(pkgComments)
+				fileComments = cloneComments(fileComments)
 
 				for _, c := range pkgComments {
 					// add a newline between previous file comment and the pkg comments
-					c.List[0].Slash = c.List[0].Slash.WithRel(token.NewSection)
+					setLeadingRelPos(c, token.NewSection)
 					ast.AddComment(pkg, c)
 				}
 				for _, c := range fileComments {
@@ -247,7 +245,18 @@ func (e *exporter) toFile(v *adt.Vertex, x ast.Expr) *ast.File {
 	return fout
 }
 
+// packageName returns the name of the package that v is defined in, if any.
+func packageName(v *adt.Vertex) string {
+	for c := range v.LeafConjuncts() {
+		if f, _ := c.Source().(*ast.File); f != nil && f.PackageName() != "" {
+			return f.PackageName()
+		}
+	}
+	return ""
+}
+
 // mergeDocs merges multiple doc comments into one single doc comment.
+// The comments must belong to the output, as they may be modified.
 func mergeDocs(comments []*ast.CommentGroup) []*ast.CommentGroup {
 	if len(comments) <= 1 || !hasDocComment(comments) {
 		return comments
@@ -263,7 +272,7 @@ func mergeDocs(comments []*ast.CommentGroup) []*ast.CommentGroup {
 		case docComment == nil:
 			docComment = c
 		default:
-			docComment.List = append(slices.Clip(docComment.List), &ast.Comment{Text: "//"})
+			docComment.List = append(docComment.List, &ast.Comment{Text: "//"})
 			docComment.List = append(docComment.List, c.List...)
 		}
 	}
@@ -282,33 +291,30 @@ func hasDocComment(comments []*ast.CommentGroup) bool {
 
 // Vertex exports evaluated values (data mode).
 // It resolves incomplete references that point outside the current context.
-func Vertex(r adt.Runtime, pkgID string, n *adt.Vertex) (*ast.File, errors.Error) {
-	return Simplified.Vertex(r, pkgID, n)
-}
-
-// Vertex exports evaluated values (data mode).
-// It resolves incomplete references that point outside the current context.
 func (p *Profile) Vertex(r adt.Runtime, pkgID string, n *adt.Vertex) (f *ast.File, err errors.Error) {
-	e := newExporter(p, r, pkgID, n)
+	e := newExporter(p, adt.NewContext(r, n), pkgID, n)
+	defer adt.AddStats(e.ctx)
 	e.initPivot(n)
 
+	// Errors created while exporting report paths relative to n,
+	// even when n is structure-shared.
+	defer e.popArc(e.pushArc(n))
 	v := e.value(n, n.Conjuncts...)
 	return e.finalize(n, v)
 }
 
 // Value exports evaluated values (data mode).
 // It does not resolve references that point outside the given Value.
-func Value(r adt.Runtime, pkgID string, n adt.Value) (ast.Expr, errors.Error) {
-	return Simplified.Value(r, pkgID, n)
+func Value(ctx *adt.OpContext, pkgID string, n adt.Value) (ast.Expr, errors.Error) {
+	return Simplified.Value(ctx, pkgID, n)
 }
 
 // Value exports evaluated values (data mode).
-//
 // It does not resolve references that point outside the given Value.
-//
-// TODO: Should take context.
-func (p *Profile) Value(r adt.Runtime, pkgID string, n adt.Value) (ast.Expr, errors.Error) {
-	e := newExporter(p, r, pkgID, n)
+// Unlike [Profile.Def] and [Profile.Vertex], it exports
+// within ctx, whose stats remain the caller's to add to the totals.
+func (p *Profile) Value(ctx *adt.OpContext, pkgID string, n adt.Value) (ast.Expr, errors.Error) {
+	e := newExporter(p, ctx, pkgID, n)
 	v := e.value(n)
 	// finalize runs astutil.Sanitize, which edits v in place via the shared
 	// StructLit Elts.
@@ -327,7 +333,10 @@ type exporter struct {
 	ctx *adt.OpContext
 
 	index adt.StringIndexer
-	rand  *rand.Rand
+
+	// isInjectionKind reports whether an attribute name is a registered
+	// injection kind, such as "embed"; see [exporter.exportAttrs].
+	isInjectionKind func(name string) bool
 
 	// For resolving references.
 	stack []frame
@@ -344,19 +353,23 @@ type exporter struct {
 	// If a used feature maps to an expression, it means it is assigned to a
 	// unique let expression.
 	usedFeature map[adt.Feature]adt.Expr
-	labelAlias  map[adt.Expr]adt.Feature
-	valueAlias  map[*ast.Alias]*ast.Alias
-	// fieldAlias is used to track original alias names of regular fields.
-	fieldAlias map[*ast.Field]fieldAndScope
-	letAlias   map[*ast.LetClause]*ast.LetClause
-	references map[*adt.Vertex]*referenceInfo
+	// names picks the names which [exporter.uniqueFeature] adds to
+	// [exporter.usedFeature].
+	names      astinternal.UniqueNamer
+	labelAlias map[adt.Expr]adt.Feature
+	// valueAlias maps a source value alias to the name it is bound to in the
+	// output, where a let clause naming "self" takes its place.
+	valueAlias map[*ast.Alias]string
+	// experiments are those of cfg.TargetLanguageVersion plus any of
+	// [carriedExperiments], resolved once in [newExporter] as they are fixed
+	// for the exporter's lifetime, along with the error from resolving them
+	// and the one decision taken from them.
+	experiments    *cueexperiment.File
+	experimentsErr error
+	postfixAliases bool
+	references     map[*adt.Vertex]*referenceInfo
 
 	pivotter *pivotter
-}
-
-type fieldAndScope struct {
-	field *ast.Field
-	scope ast.Node // StructLit or File
 }
 
 // referenceInfo is used to track which Field.Value fields should be linked
@@ -405,20 +418,60 @@ func (e *exporter) linkIdentifier(v *adt.Vertex, ident *ast.Ident) {
 }
 
 // newExporter creates and initializes an exporter.
-func newExporter(p *Profile, r adt.Runtime, pkgID string, v adt.Value) *exporter {
+func newExporter(p *Profile, ctx *adt.OpContext, pkgID string, v adt.Value) *exporter {
 	n, _ := v.(*adt.Vertex)
+	// The experiments of the target language version decide which spellings
+	// the output may use; aliasv2 is the one that enables postfix aliases.
+	// finalize records them on the file it builds, so resolve them once here.
+	// Experiments carried into the output enable their syntax there too.
+	// One invalid at the target language version is left out, so that the
+	// others still apply; its attribute is copied regardless, and the output
+	// reports it just like the source would at that version.
+	carried := slices.DeleteFunc(carriedExperiments(p, n), func(exp string) bool {
+		_, err := cueexperiment.NewFile(p.TargetLanguageVersion, exp)
+		return err != nil
+	})
+	exp, err := cueexperiment.NewFile(p.TargetLanguageVersion, carried...)
 	e := &exporter{
 		cfg:   p,
-		ctx:   eval.NewContext(r, n),
-		index: r,
+		ctx:   ctx,
+		index: ctx.Runtime,
 		pkgID: pkgID,
 
+		experiments:    exp,
+		experimentsErr: err,
+		postfixAliases: exp != nil && exp.AliasV2,
+
 		references: map[*adt.Vertex]*referenceInfo{},
+	}
+
+	if r, ok := ctx.Runtime.(interface{ IsInjectionKind(string) bool }); ok {
+		e.isInjectionKind = r.IsInjectionKind
 	}
 
 	e.markUsedFeatures(v)
 
 	return e
+}
+
+// carriedExperiments returns the experiments enabled by the files of n that
+// exporting n copies into an output without a package clause, such as for a
+// file without one. [exporter.finalize] moves their attributes to the front
+// of the output, where they are file attributes. The attributes of a struct
+// are not carried, as they may stay nested in the output, such as within
+// _#def.
+func carriedExperiments(p *Profile, n *adt.Vertex) []string {
+	if !p.ShowAttributes || n == nil || p.AddPackage && packageName(n) != "" {
+		return nil
+	}
+	var experiments []string
+	for c := range n.LeafConjuncts() {
+		if f, _ := c.Source().(*ast.File); f != nil {
+			exp := f.Experiment()
+			experiments = append(experiments, exp.Experiments()...)
+		}
+	}
+	return experiments
 }
 
 // initPivot initializes the pivotter to allow aligning a configuration around
@@ -438,11 +491,34 @@ func (e *exporter) initPivot(n *adt.Vertex) {
 func (e *exporter) finalize(n *adt.Vertex, v ast.Expr) (f *ast.File, err errors.Error) {
 	f = e.toFile(n, v)
 
+	// The file is built rather than parsed, so nothing in it records which
+	// language version it is written for. Say so, both for the passes below
+	// and for whoever receives the file.
+	if e.experimentsErr != nil {
+		return f, errors.Append(e.errs,
+			errors.Promote(e.experimentsErr, "export"))
+	}
+	f.SetExperiments(e.experiments)
+
 	e.completePivot(f)
 
 	if err := astutil.Sanitize(f); err != nil {
 		err := errors.Promote(err, "export")
 		return f, errors.Append(e.errs, err)
+	}
+
+	if f.PackageName() == "" {
+		// Only the attributes at the very top of a file without a package
+		// clause, before any let clause or import, enable experiments.
+		var exps, rest []ast.Decl
+		for _, d := range f.Decls {
+			if a, ok := d.(*ast.Attribute); ok && a.Name() == "experiment" {
+				exps = append(exps, d)
+			} else {
+				rest = append(rest, d)
+			}
+		}
+		f.Decls = append(exps, rest...)
 	}
 
 	return f, nil
@@ -494,61 +570,148 @@ func (e *exporter) markUsedFeatures(x adt.Expr) {
 	w.Elem(x)
 }
 
-func (e *exporter) getFieldAlias(f *ast.Field, name string) string {
-	a, ok := f.Label.(*ast.Alias)
-	if !ok {
-		a = &ast.Alias{
-			Ident: ast.NewIdent(e.uniqueAlias(name)),
-			Expr:  f.Label.(ast.Expr),
-		}
-		f.Label = a
-	}
-	return a.Ident.Name
+// isNonBlank reports whether ident binds a name that can be referenced.
+// Either half of an [ast.PostfixAlias] may be absent or blank.
+func isNonBlank(ident *ast.Ident) bool {
+	return ident != nil && ident.Name != "_"
 }
 
-func setFieldAlias(f *ast.Field, name string) {
-	if _, ok := f.Label.(*ast.Alias); !ok {
-		x := f.Label.(ast.Expr)
-		f.Label = &ast.Alias{
-			Ident: ast.NewIdent(name),
-			Expr:  x,
-		}
-		ast.SetComments(f.Label, ast.Comments(x))
-		ast.SetComments(x, nil)
-		// TODO: move position information.
-	}
-}
-
-func (e *exporter) markLets(n ast.Node, scope *ast.StructLit) {
-	if n == nil {
+// setValueAlias binds name to f's own value, unless f already binds it to one.
+// The label alias, if any, is left alone.
+func (e *exporter) setValueAlias(f *ast.Field, name string) {
+	if _, ok := valueAliasName(f); ok {
 		return
 	}
-	ast.Walk(n, func(n ast.Node) bool {
-		switch v := n.(type) {
-		case *ast.StructLit:
-			e.markLetDecls(v.Elts, scope)
-		case *ast.File:
-			e.markLetDecls(v.Decls, scope)
-			// TODO: return true here and false for everything else?
-
-		case *ast.Field,
-			*ast.LetClause,
-			*ast.IfClause,
-			*ast.ForClause,
-			*ast.Comprehension:
-			return false
+	if e.postfixAliases {
+		if f.Alias == nil {
+			f.Alias = &ast.PostfixAlias{}
 		}
-		return true
-	}, nil)
+		f.Alias.Field = ast.NewIdent(name)
+		return
+	}
+	label := f.Label.(ast.Expr)
+	f.Label = &ast.Alias{Ident: ast.NewIdent(name), Expr: label}
+	// Move formatting and comments from the label to the alias.
+	ast.SetComments(f.Label, ast.Comments(label))
+	ast.SetComments(label, nil)
+	// TODO: move position information.
 }
 
-func (e *exporter) markLetDecls(decls []ast.Decl, scope *ast.StructLit) {
+// setLabelAlias binds name to f's concrete label, unless f already binds it to
+// one. f must be a pattern constraint, as only those bind a label.
+func (e *exporter) setLabelAlias(f *ast.Field, name string) {
+	if _, ok := labelAliasName(f); ok {
+		return
+	}
+	list, ok := f.Label.(*ast.ListLit)
+	if !ok || len(list.Elts) != 1 {
+		panic("label alias on a field that is not a pattern constraint")
+	}
+	if !e.postfixAliases {
+		list.Elts[0] = &ast.Alias{Ident: ast.NewIdent(name), Expr: list.Elts[0]}
+		return
+	}
+	if f.Alias == nil {
+		f.Alias = &ast.PostfixAlias{}
+	}
+	f.Alias.Label = ast.NewIdent(name)
+	// Only the dual form binds a label, so force it with a blank field alias.
+	if f.Alias.Field == nil {
+		f.Alias.Field = ast.NewIdent("_")
+	}
+}
+
+// labelAliasName reports the name that f binds to its matched label, if any.
+// It reads both the postfix form (a~(_,X)) and the prefix form ([X=a]), as
+// either may be what the source or the exporter itself used.
+func labelAliasName(f *ast.Field) (name string, ok bool) {
+	if a := f.Alias; a != nil && isNonBlank(a.Label) {
+		return a.Label.Name, true
+	}
+	if list, ok := f.Label.(*ast.ListLit); ok && len(list.Elts) == 1 {
+		if a, ok := list.Elts[0].(*ast.Alias); ok {
+			return a.Ident.Name, true
+		}
+	}
+	return "", false
+}
+
+// valueAliasName reports the name that f binds to its own value, if any. It
+// reads both the postfix form (a~X) and the prefix form (X=a), as either may
+// be what the source or the exporter itself used.
+func valueAliasName(f *ast.Field) (name string, ok bool) {
+	if f == nil {
+		return "", false
+	}
+	if a := f.Alias; a != nil && isNonBlank(a.Field) {
+		return a.Field.Name, true
+	}
+	if a, ok := f.Label.(*ast.Alias); ok {
+		return a.Ident.Name, true
+	}
+	return "", false
+}
+
+// aliasedLabel reports the label f gives its field, looking through a prefix
+// alias, which wraps the label rather than sitting beside it.
+func aliasedLabel(f *ast.Field) ast.Label {
+	if a, ok := f.Label.(*ast.Alias); ok {
+		label, _ := a.Expr.(ast.Label)
+		return label
+	}
+	return f.Label
+}
+
+func (e *exporter) getFieldAlias(f *ast.Field, name string) string {
+	if name, ok := valueAliasName(f); ok {
+		return name
+	}
+	name = e.uniqueAlias(name)
+	e.setValueAlias(f, name)
+	return name
+}
+
+// bindValueAlias returns value with name bound to it. The postfix syntax has
+// no value alias, so a let clause naming the predeclared "self" stands in for
+// it, wrapping value in a struct literal when it cannot hold one itself.
+func (e *exporter) bindValueAlias(name string, value ast.Expr) ast.Expr {
+	if !e.postfixAliases {
+		return &ast.Alias{Ident: ast.NewIdent(name), Expr: value}
+	}
+	s, _, _ := internal.BindSelfAlias(ast.NewIdent(name), value)
+	return s
+}
+
+// markLets marks the lets and field aliases of struct literals which are
+// merged into scope. Any other struct literal, such as a list element or
+// a call argument, is exported with its own scope.
+func (e *exporter) markLets(n ast.Node) {
+	switch x := n.(type) {
+	case *ast.StructLit:
+		e.markLetDecls(x.Elts, false)
+	case *ast.File:
+		e.markLetDecls(x.Decls, true)
+	case *ast.ParenExpr:
+		e.markLets(x.X)
+	case *ast.BinaryExpr:
+		if x.Op == token.AND {
+			e.markLets(x.X)
+			e.markLets(x.Y)
+		}
+	}
+}
+
+// markLetDecls marks the lets and field aliases of decls, which are those at
+// the top level of a file if topLevel is set, or those of a struct literal.
+func (e *exporter) markLetDecls(decls []ast.Decl, topLevel bool) {
 	for _, d := range decls {
 		switch x := d.(type) {
 		case *ast.Field:
-			e.prepareAliasedField(x, scope)
+			e.prepareAliasedField(x, topLevel)
 		case *ast.LetClause:
 			e.markLetAlias(x)
+		case *ast.EmbedDecl:
+			e.markLets(x.Expr)
 		}
 	}
 }
@@ -558,34 +721,88 @@ func (e *exporter) markLetDecls(decls []ast.Decl, scope *ast.StructLit) {
 // occurs earlier in a struct can already refer to it.
 //
 // It is assumed that the same alias names can be used. We rely on Sanitize
-// to do any renaming of aliases in case of shadowing.
-func (e *exporter) prepareAliasedField(f *ast.Field, scope ast.Node) {
-	if _, ok := e.fieldAlias[f]; ok {
+// to do any renaming of aliases in case of shadowing, except where files are
+// merged into one scope; see [exporter.fileAliasName].
+func (e *exporter) prepareAliasedField(f *ast.Field, topLevel bool) {
+	top := e.top()
+	if _, ok := top.fieldAlias[f]; ok {
 		return
 	}
 
-	alias, ok := f.Label.(*ast.Alias)
+	name, ok := valueAliasName(f)
 	if !ok {
 		return // not aliased
 	}
-	field := &ast.Field{
-		Label: &ast.Alias{
-			Ident: ast.NewIdent(alias.Ident.Name),
-			Expr:  alias.Expr,
-		},
+	// Only the aliases of fields with a fixed label are referenced via
+	// fieldAlias; the others are named as they are referenced.
+	label := aliasedLabel(f)
+	switch label.(type) {
+	case *ast.Ident, *ast.BasicLit:
+	default:
+		return
+	}
+	name = e.fileAliasName(topLevel, name)
+	// Copy the label, as it belongs to the source.
+	field := &ast.Field{Label: ast.Clone(label)}
+	e.setValueAlias(field, name)
+
+	if top.fieldAlias == nil {
+		top.fieldAlias = make(map[*ast.Field]*ast.Field)
 	}
 
-	if e.fieldAlias == nil {
-		e.fieldAlias = make(map[*ast.Field]fieldAndScope)
-	}
+	top.fieldAlias[f] = field
+}
 
-	e.fieldAlias[f] = fieldAndScope{field: field, scope: scope}
+// lookupFieldAlias returns the aliased field prepared for the source field f
+// by the innermost struct being exported that declares it, and the scope of
+// that struct. It returns a nil field if there is none.
+func (e *exporter) lookupFieldAlias(f *ast.Field) (field *ast.Field, scope *ast.StructLit) {
+	for i := len(e.stack) - 1; i >= 0; i-- {
+		if field, ok := e.stack[i].fieldAlias[f]; ok {
+			return field, e.stack[i].scope
+		}
+	}
+	return nil, nil
+}
+
+// mergesFiles reports whether a, the conjuncts of a struct, holds more than
+// one file.
+func mergesFiles(a []conjunct) bool {
+	n := 0
+	for _, c := range a {
+		if _, ok := c.c.Expr().Source().(*ast.File); ok {
+			n++
+		}
+	}
+	return n > 1
+}
+
+// fileAliasName returns the name to give an alias named name, which is at
+// the top level of a file if topLevel is set, or nested in one.
+//
+// An alias may not be named like a field, or any other declaration, in any
+// enclosing scope. Once files are merged into one scope, an alias at the top
+// level of a file is also in scope for the other files, so it is given a name
+// which is not used anywhere. A nested alias is renamed if it is named like a
+// field at the top level of the files.
+func (e *exporter) fileAliasName(topLevel bool, name string) string {
+	var merged *adt.Vertex
+	for i := len(e.stack) - 1; i >= 0; i-- {
+		if f := e.stack[i]; f.mergesFiles {
+			merged = f.node
+			break
+		}
+	}
+	if merged == nil || !topLevel && merged.Lookup(e.identFeature(name)) == nil {
+		return name
+	}
+	return e.uniqueAlias(name)
 }
 
 func (e *exporter) getFixedField(f *adt.Field) *ast.Field {
 	if f.Src != nil {
-		if entry, ok := e.fieldAlias[f.Src]; ok {
-			return entry.field
+		if field, _ := e.lookupFieldAlias(f.Src); field != nil {
+			return field
 		}
 	}
 	return &ast.Field{
@@ -600,13 +817,13 @@ func (e *exporter) markLetAlias(x *ast.LetClause) {
 	// later if never referenced.
 	let := &ast.LetClause{}
 
-	if e.letAlias == nil {
-		e.letAlias = make(map[*ast.LetClause]*ast.LetClause)
+	top := e.top()
+	if top.letAlias == nil {
+		top.letAlias = make(map[*ast.LetClause]*ast.LetClause)
 	}
-	e.letAlias[x] = let
+	top.letAlias[x] = let
 
-	scope := e.top().scope
-	scope.Elts = append(scope.Elts, let)
+	top.scope.Elts = append(top.scope.Elts, let)
 }
 
 // In value mode, lets are only used if there wasn't an error.
@@ -617,18 +834,35 @@ func filterUnusedLets(s *ast.StructLit) {
 	})
 }
 
+// lookupLetAlias returns the let clause added for the source let clause x by
+// the innermost struct being exported that declares it, and the index of its
+// frame. A let clause is only in scope while exporting such a struct: the same
+// source clause is not declared where the struct is reached through a
+// reference, for instance.
+func (e *exporter) lookupLetAlias(x *ast.LetClause) (*ast.LetClause, int) {
+	for i := len(e.stack) - 1; i >= 0; i-- {
+		if let, ok := e.stack[i].letAlias[x]; ok {
+			return let, i
+		}
+	}
+	return nil, -1
+}
+
 // resolveLet actually parses the let expression.
 // If there was no recorded let expression, it expands the expression in place.
 func (e *exporter) resolveLet(env *adt.Environment, x *adt.LetReference) ast.Expr {
 	letClause, _ := x.Src.Node.(*ast.LetClause)
-	let := e.letAlias[letClause]
+	let, depth := e.lookupLetAlias(letClause)
 
 	switch {
 	case let == nil:
 		ref, _ := e.ctx.Lookup(env, x)
-		if ref == nil {
-			// This can happen if x.X does not resolve to a valid value. At this
-			// point we will not get a valid configuration.
+		c, n := ref.SingleConjunct()
+		if n == 0 {
+			// This can happen if x.X does not resolve to a valid value, or if
+			// a let bound to self resolves to a placeholder vertex, as used by
+			// dependency analysis for struct literals. At this point we will
+			// not get a valid configuration.
 
 			// TODO: get rid of the use of x.X.
 			// str := x.Label.IdentString(e.ctx)
@@ -637,14 +871,26 @@ func (e *exporter) resolveLet(env *adt.Environment, x *adt.LetReference) ast.Exp
 
 			return e.expr(env, x.X)
 		}
-		c, _ := ref.SingleConjunct()
+		if x.ValueBinding() != nil {
+			// The vertex it denotes may have many conjuncts.
+			return e.expr(nil, ref)
+		}
 		return e.expr(c.EnvExpr())
 
 	case let.Expr == nil:
 		label := e.uniqueLetIdent(x.Label, x.X)
 
 		let.Ident = e.ident(label)
+
+		// The let clause is exported where it is first referenced, but its
+		// expression must be exported in the scope declaring it.
+		for range x.UpCount {
+			env = env.Up
+		}
+		saved := e.stack
+		e.stack = slices.Clip(e.stack[:depth+1])
 		let.Expr = e.expr(env, x.X)
+		e.stack = saved
 	}
 
 	ident := ast.NewIdent(let.Ident.Name)
@@ -664,78 +910,27 @@ func (e *exporter) uniqueLetIdent(f adt.Feature, x adt.Expr) adt.Feature {
 }
 
 func (e *exporter) uniqueAlias(name string) string {
-	f := adt.MakeIdentLabel(e.ctx, name, "")
-
-	if _, ok := e.usedFeature[f]; !ok {
-		e.usedFeature[f] = nil
-		return name
-	}
-
-	_, name = e.uniqueFeature(f.IdentString(e.ctx))
+	_, name = e.uniqueFeature(name)
 	return name
 }
 
-// A featureSet implements a set of Features. It only supports testing
-// whether a given string is available as a Feature.
-type featureSet interface {
-	// intn returns a pseudo-random integer in [0..n).
-	intn(n int) int
-
-	// makeFeature converts s to f if it is available.
-	makeFeature(s string) (f adt.Feature, ok bool)
+// identFeature returns the feature of an identifier named s, which, if hidden,
+// belongs to the package being exported.
+func (e *exporter) identFeature(s string) adt.Feature {
+	return adt.MakeIdentLabel(e.ctx, s, cmp.Or(e.pkgID, "_"))
 }
 
-func (e *exporter) intn(n int) int {
-	return e.rand.IntN(n)
-}
-
-func (e *exporter) makeFeature(s string) (f adt.Feature, ok bool) {
-	f = adt.MakeIdentLabel(e.ctx, s, "")
-	_, exists := e.usedFeature[f]
-	if !exists {
-		e.usedFeature[f] = nil
-	}
-	return f, !exists
-}
-
-// uniqueFeature returns a name for an identifier that uniquely identifies
-// the given expression. If the preferred name is already taken, a new globally
-// unique name of the form base_N ... base_NNNNNNNNNNNNNN is generated.
-//
-// It prefers short extensions over large ones, while ensuring the likelihood of
-// fast termination is high. There are at least two digits to make it visually
-// clearer this concerns a generated number.
+// uniqueFeature returns the first name from [astinternal.UniqueNamer.Name]
+// which is not in [exporter.usedFeature], with its feature, and marks it as
+// used.
 func (e *exporter) uniqueFeature(base string) (f adt.Feature, name string) {
-	if e.rand == nil {
-		e.rand = rand.New(rand.NewPCG(123, 456)) // ensure determinism between runs
-	}
-	return findUnique(e, base)
-}
-
-func findUnique(set featureSet, base string) (f adt.Feature, name string) {
-	if f, ok := set.makeFeature(base); ok {
-		return f, base
-	}
-
-	// Try the first few numbers in sequence.
-	for i := 1; i < 5; i++ {
-		name := fmt.Sprintf("%s_%01X", base, i)
-		if f, ok := set.makeFeature(name); ok {
-			return f, name
-		}
-	}
-
-	const mask = 0xff_ffff_ffff_ffff // max bits; stay clear of int64 overflow
-	const shift = 4                  // rate of growth
-	digits := 1
-	for n := int64(0x10); ; n = mask&((n<<shift)-1) + 1 {
-		num := set.intn(int(n)-1) + 1
-		name := fmt.Sprintf("%[1]s_%0[2]*[3]X", base, digits, num)
-		if f, ok := set.makeFeature(name); ok {
-			return f, name
-		}
-		digits++
-	}
+	name = e.names.Name(base, func(name string) bool {
+		f = e.identFeature(name)
+		_, ok := e.usedFeature[f]
+		return ok
+	})
+	e.usedFeature[f] = nil
+	return f, name
 }
 
 type frame struct {
@@ -757,8 +952,24 @@ type frame struct {
 	// labeled fields
 	fields map[adt.Feature]entry
 
+	// letAlias maps the source let clauses declared in this scope to the
+	// ones in the output.
+	letAlias map[*ast.LetClause]*ast.LetClause
+
+	// fieldAlias maps the source fields with an alias declared in this scope
+	// to the ones in the output.
+	fieldAlias map[*ast.Field]*ast.Field
+
 	// field to new field
 	mapped map[adt.Node]ast.Node
+
+	// spliced reports whether the declarations of this frame are spliced into
+	// the struct of the enclosing frame, rather than embedded in it.
+	spliced bool
+
+	// mergesFiles reports whether more than one file is merged into the
+	// scope of this frame.
+	mergesFiles bool
 }
 
 type entry struct {
@@ -800,7 +1011,7 @@ func (e *exporter) popFrame(saved []frame) {
 	for _, f := range top.fields {
 		node := f.node
 		if f.alias != "" && f.field != nil {
-			setFieldAlias(f.field, f.alias)
+			e.setValueAlias(f.field, f.alias)
 			node = f.field
 		}
 		if node != nil {

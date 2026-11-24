@@ -240,6 +240,18 @@ func (c *injector) InjectedValue(attr *runtime.ExternAttr, scope *adt.Vertex) (a
 	// Resolve the FS from the file's recorded FSLoc, which is populated
 	// by cue/load for both [load.Config.FS] and [load.Config.Overlay].
 	loc := pos.File().FSLoc()
+
+	// Embedding is restricted to files within the module; embedding files from
+	// outside the module is not currently supported. A file named explicitly on
+	// the command line may sit outside the module root even though the
+	// invocation is within a module, so reject that here.
+	// See https://cuelang.org/issue/4302.
+	if root := c.b.RootLoc.Path; root != "" {
+		if p := loc.Path; p != root && !strings.HasPrefix(p, root+"/") {
+			return nil, errors.Newf(pos, "cannot embed files from a file outside of the current module")
+		}
+	}
+
 	dir := path.Dir(loc.Path)
 	if c.dir != dir {
 		fsys, err := iofs.Sub(loc.FS, dir)
@@ -413,7 +425,13 @@ func (c *injector) decodeFile(file, scope string) (adt.Expr, errors.Error) {
 
 	defer d.Close()
 
-	n := d.File()
+	n := d.EvalFile()
+	// File can record an error lazily (for example when projecting a
+	// value-plane document to syntax fails), so the earlier Err check
+	// does not cover it; recheck before using the file.
+	if err := d.Err(); err != nil {
+		return nil, errors.Promote(err, "failed to decode file")
+	}
 
 	if d.Next(); !d.Done() {
 		// TODO: support streaming values

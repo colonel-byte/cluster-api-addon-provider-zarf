@@ -382,6 +382,18 @@ type CycleInfo struct {
 	// a cycle is detected and of which type.
 	CycleType CyclicType
 
+	// IsFuncArg marks a conjunct created as an argument of a native function
+	// call. Argument conjuncts are created with the caller's CloseInfo and
+	// must never inherit the callee's cycle references: an argument that
+	// calls the same function (twice(twice(2))) is nesting, not recursion.
+	// Arguments are evaluated lazily, typically triggered from within the
+	// callee's body, so without this mark the re-scheduling of the stored
+	// conjunct would adopt the body's ambient reference chain, and a call in
+	// the argument would falsely collide with the same call site in the
+	// body. [nodeContext.scheduleConjunct] restores the stored (caller)
+	// chain for marked conjuncts.
+	IsFuncArg bool
+
 	// TODO(perf): pack this in with CloseInfo. Make an uint32 pointing into
 	// a buffer maintained in OpContext, using a mark-release mechanism.
 	Refs *RefNode
@@ -420,6 +432,10 @@ type RefNode struct {
 
 	Next  *RefNode
 	Depth int32
+
+	// Len is the length of the chain starting at this node. A node r is part
+	// of a chain if and only if the node of that chain with r.Len is r.
+	Len int32
 }
 
 // cyclicConjunct is used in nodeContext to postpone the computation of
@@ -452,9 +468,36 @@ const (
 // either as an unevaluated DisjunctionExpr or an already-built Disjunction.
 func hasDisjunctConjunct(v *Vertex) bool {
 	for c := range v.LeafConjuncts() {
-		switch c.Expr().(type) {
-		case *DisjunctionExpr, *Disjunction:
+		if exprHasDisjunct(c.Expr()) {
 			return true
+		}
+	}
+	return false
+}
+
+// exprHasDisjunct reports whether x is a disjunction, or wraps one in a way
+// that preserves its value: an embedding in a struct literal, an & operand,
+// or an element of a Conjunction. These are the wrappers that
+// [nodeContext.scheduleConjunct] flattens eagerly, without a task.
+func exprHasDisjunct(x Expr) bool {
+	switch x := x.(type) {
+	case *DisjunctionExpr, *Disjunction:
+		return true
+	case *StructLit:
+		for _, d := range x.Decls {
+			if e, ok := d.(Expr); ok && exprHasDisjunct(e) {
+				return true
+			}
+		}
+	case *BinaryExpr:
+		if x.Op == AndOp {
+			return exprHasDisjunct(x.X) || exprHasDisjunct(x.Y)
+		}
+	case *Conjunction:
+		for _, e := range x.Values {
+			if exprHasDisjunct(e) {
+				return true
+			}
 		}
 	}
 	return false
@@ -472,9 +515,22 @@ func (n *nodeContext) detectCycle(arc *Vertex, env *Environment, x Resolver, ci 
 		return n.markCyclic(arc, env, x, ci)
 	}
 
+	// The optional-conjunct affordances below assume that re-entering the
+	// same arc settles to a fixed point, so that skipping the conjunct or
+	// affording it one more level eventually terminates (e.g. a pattern
+	// constraint feeding rooted structure). A function-call template
+	// reference does not have this property: every call re-instantiates the
+	// template into a fresh non-rooted vertex, so skipping the conjunct
+	// drops the call's result entirely and re-evaluation makes no progress,
+	// looping forever. Function calls therefore always take the regular
+	// (vertex, reference) cycle rules below, which already distinguish
+	// same-call-site recursion (a structural cycle) from distinct-call-site
+	// nesting such as twice(twice(2)).
+	fx, isFuncCall := x.(*FuncCallRef)
+
 	// As long as a node-wide cycle has not yet been detected, we allow cycles
 	// in optional fields to proceed unchecked.
-	if n.hasNonCyclic && ci.CycleType == MaybeCyclic {
+	if !isFuncCall && n.hasNonCyclic && ci.CycleType == MaybeCyclic {
 		return ci, false
 	}
 
@@ -482,16 +538,53 @@ func (n *nodeContext) detectCycle(arc *Vertex, env *Environment, x Resolver, ci 
 	// below. Older occurrences would spuriously fail that check.
 	chainStep := false
 
+	// born tracks the creation chain of a called closure to detect recursion
+	// through closures created by an in-progress call; see
+	// [FuncCallRef.calledAt]. The candidates r are visited in order of
+	// decreasing chain length, so a single pass over born suffices.
+	var born *RefNode
+	if isFuncCall {
+		born = fx.born
+	}
+
 	for r := ci.Refs; r != nil; r = r.Next {
-		if equalDeref(r.Arc, arc) {
+		if born != nil && fx.calledAt(r) {
+			for born != nil && born.Len > r.Len {
+				born = born.Next
+			}
+			if born == r {
+				return n.markCyclicPath(arc, env, x, ci)
+			}
+		}
+		// Compare r.Arc as recorded, already dereferenced: if it has since
+		// started sharing a vertex, its own reference to it is not a cycle.
+		if r.Arc == deref(arc) {
 			if equalDeref(r.Node, n.node) {
-				// reference cycle
-				return ci, true
+				// A reference cycle: the same reference reoccurring on the
+				// same node signals equality (x: x) and is skipped as it
+				// adds no information.
+				//
+				// A function-call reference is exempt: its arc is the
+				// conjunct-less anchor vertex, never the referencing node
+				// itself, so a match here only means that this node reached
+				// the same function again — recursion or nesting, to be
+				// classified by the rules below. The node match arises
+				// artificially when a disjunct re-schedules a recursive call
+				// of its host node: doDisjunct forwards the host's BaseValue
+				// to the disjunct clone, making the node recorded with the
+				// anchor's RefNode dereference to the disjunct. Skipping
+				// would silently drop the call's payload, letting the
+				// disjunct absorb the structural cycle of a recursive
+				// disjunct and survive as the call's return type instead of
+				// being eliminated.
+				if !isFuncCall {
+					return ci, true
+				}
 			}
 
 			// If there are still any non-cyclic conjuncts, and if this conjunct
 			// is optional, we allow this to continue one more cycle.
-			if ci.CycleType == IsOptional && n.hasNonCyclic {
+			if !isFuncCall && ci.CycleType == IsOptional && n.hasNonCyclic {
 				ci.CycleType = MaybeCyclic
 				// There my still be a cycle if the optional field is a pattern
 				// that unifies with itself, as in:
@@ -523,18 +616,35 @@ func (n *nodeContext) detectCycle(arc *Vertex, env *Environment, x Resolver, ci 
 			// r.Ref == x case.
 			//
 			// The skip must not fire, though, when a dynamic node re-enters a
-			// not-yet-finalized disjunction: that is self-feeding recursion
-			// reoccurring through a different reference per disjunct at the same
-			// depth, so the skip would let every disjunct re-expand the whole
-			// disjunction. markCyclicPath bounds it instead.
-			selfFeeding := n.node.IsDynamic && arc.Status() != finalized && hasDisjunctConjunct(arc)
-			if r.Ref != x && n.hasNonCycle && n.hasNonCyclic && !selfFeeding {
+			// disjunction: that is self-feeding recursion reoccurring through
+			// a different reference per disjunct at the same depth, so the
+			// skip would let every disjunct re-expand the whole disjunction,
+			// finalized or not. markCyclicPath bounds it instead.
+			if r.Ref != x && n.hasNonCycle && n.hasNonCyclic &&
+				!(n.node.IsDynamic && hasDisjunctConjunct(arc)) {
 				continue
 			}
 
 			return n.markCyclicPath(arc, env, x, ci)
 		}
 		if r.Ref == x && arc.nonRooted {
+			// An equal instantiation made within the evaluation of the
+			// earlier one is the same computation re-entered: structural
+			// expansion. An equal instantiation made beside it may instead
+			// consume the earlier one's result, which happens to equal its
+			// input, and is left to the chain-step rule below. Already
+			// cyclic conjuncts must retain their evidence accounting (in
+			// particular for value cycles). The optional affordance does
+			// not apply: an identical re-instantiation reproduces the same
+			// situation, so another iteration cannot resolve it.
+			if p, q := inlineRoots(arc, r.Arc); p != nil &&
+				!ci.IsCyclic() && instantiatedWithin(p, q) && n.ctx.sameInstantiation(p, q) {
+				ci, _ = n.markCyclicPath(arc, env, x, ci)
+				// The equal template contributes no new structure; do not
+				// let its fresh literal override the cyclic marking.
+				n.reportCycleError()
+				return ci, true
+			}
 			if equalDeref(r.Node, n.node) {
 				if chainStep {
 					continue
@@ -560,7 +670,10 @@ func (n *nodeContext) detectCycle(arc *Vertex, env *Environment, x Resolver, ci 
 			// (e.g. {a}.b), where each evaluation creates a fresh
 			// vertex that prevents matching by identity above.
 			// We identify these as IsDynamic with no Parent (unlike
-			// let vertices which have Parent set).
+			// let vertices which have Parent set). This remains needed
+			// beside the re-instantiation check above for an inline
+			// vertex that reaches an ancestor while its arguments differ
+			// or cannot be compared yet.
 			if p := arc.Parent; r.Arc.nonRooted &&
 				p != nil && p.IsDynamic && p.Parent == nil &&
 				p.state != nil && p.state.hasAncestorCycle {
@@ -569,13 +682,18 @@ func (n *nodeContext) detectCycle(arc *Vertex, env *Environment, x Resolver, ci 
 		}
 	}
 
-	ci.Refs = &RefNode{
+	r := &RefNode{
 		Arc:   deref(arc),
 		Ref:   x,
 		Node:  deref(n.node),
 		Next:  ci.Refs,
 		Depth: n.depth,
+		Len:   1,
 	}
+	if r.Next != nil {
+		r.Len = r.Next.Len + 1
+	}
+	ci.Refs = r
 
 	return ci, false
 }
@@ -679,7 +797,7 @@ func sharedTargetHasInProgressCycle(c *OpContext, w *Vertex) bool {
 		// points to a vertex currently on the evaluation stack,
 		// calling w.unify would recurse and trigger a structural
 		// cycle on w.
-		saved := c.PushConjunct(MakeConjunct(t.env, t.x, t.id))
+		saved := c.pushConjunct(MakeConjunct(t.env, t.x, t.id))
 		arc := r.resolve(c, Flags{condition: fieldSetKnown, mode: ignore})
 		c.PopState(saved)
 		if arc == nil || arc == emptyNode {
@@ -730,10 +848,16 @@ func (c *CloseInfo) setOptional(n *nodeContext) {
 	}
 }
 
-// updateCyclicStatus looks for proof of non-cyclic conjuncts to override
-// a structural cycle.
+// updateCyclicStatus is [nodeContext.overrideCyclicConjuncts] for a conjunct
+// that gives the node a value of its own.
 func (n *nodeContext) updateCyclicStatus(c CloseInfo) {
 	n.hasFieldValue = true
+	n.overrideCyclicConjuncts(c)
+}
+
+// overrideCyclicConjuncts looks for proof of non-cyclic conjuncts to override
+// a structural cycle.
+func (n *nodeContext) overrideCyclicConjuncts(c CloseInfo) {
 	if !c.IsCyclic() {
 		n.hasNonCycle = true
 		for _, c := range n.cyclicConjuncts {
@@ -767,10 +891,13 @@ func (n *nodeContext) reportCycleError() {
 		// TODO: probably, this should have the referenced arc.
 	}
 	n.setBaseValue(CombineErrors(nil, n.node.Value(), b))
-	// TODO(mem): might still be processing, so only use this when we
-	// exclude processed nodes.
-	// n.node.clearArcs(n.ctx)
-	n.node.Arcs = nil
+	// Reclaim the node contexts of the arcs being discarded. clearArcs is
+	// safe even when some arcs are still being processed: reclaimRecursive
+	// skips any arc whose nodeContext is still referenced (refCount > 0),
+	// freeing only those that have fully unwound. Using a bare
+	// n.node.Arcs = nil here instead would orphan the arcs' node contexts,
+	// leaking them for the lifetime of the OpContext.
+	n.node.clearArcs(n.ctx)
 }
 
 // makeAnonymousConjunct creates a conjunct that tracks self-references when
@@ -814,4 +941,183 @@ func (n *nodeContext) markDepth() (saved int) {
 // See markDepth.
 func (n *nodeContext) unmarkDepth(saved int) {
 	n.evalDepth = saved
+}
+
+// inlineRoots returns the inline vertices that the non-rooted arcs a and b
+// are selected from, if both are reached along the same labels (as for the
+// selectors of one expression, such as .out.r); otherwise nil.
+func inlineRoots(a, b *Vertex) (p, q *Vertex) {
+	if !b.nonRooted {
+		return nil, nil
+	}
+	for a.Parent != nil && b.Parent != nil {
+		if a.Label != b.Label {
+			return nil, nil
+		}
+		a, b = a.Parent, b.Parent
+	}
+	if a.Parent != nil || b.Parent != nil || !a.IsDynamic || !b.IsDynamic {
+		return nil, nil
+	}
+	return a, b
+}
+
+// instantiatedWithin reports whether the inline vertex v was instantiated
+// within the evaluation of the inline vertex w: some scope v is evaluated in
+// is w or a field of w, however deep.
+func instantiatedWithin(v, w *Vertex) bool {
+	c, count := v.SingleConjunct()
+	if count != 1 {
+		return false
+	}
+	for e := c.Env; e != nil; e = e.Up {
+		for a := e.Vertex; a != nil; a = a.Parent {
+			if equalDeref(a, w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sameInstantiation reports whether the inline vertex v, as returned by
+// inlineRoots, is a re-instantiation of prev with the same arguments. Both
+// must evaluate the same expression, a conjunction of references and struct
+// literals: the form of a call written as a struct, where the references
+// name the template and the literals supply its arguments, or an inline
+// struct such as {a}.b, which embeds its template. Every operand must then
+// be the same in both: a reference must name the same vertex, found by
+// lookup without evaluating, and every field of a literal must hold the
+// same value. This compares values, not evaluation history: the
+// caller must distinguish structural expansion from sequential applications
+// that happen to return equal values.
+//
+// Any other expression, a reference that cannot be looked up, or an argument
+// that cannot be compared yet is taken to differ, so that this never reports
+// a cycle for recursion that is bounded by data it has not seen.
+func (c *OpContext) sameInstantiation(v, prev *Vertex) bool {
+	cv, nv := v.SingleConjunct()
+	cp, np := prev.SingleConjunct()
+	if v == prev || nv != 1 || np != 1 || cv.Expr() != cp.Expr() {
+		return false
+	}
+	return c.sameOperands(cv.Expr(), cv.Env, cp.Env, v, prev)
+}
+
+// sameOperands compares the operands of the instantiation expression x of v
+// and prev, evaluated in the environments ev and ep respectively. The
+// fields of a struct literal are its arguments; an expression embedded in
+// it is an operand like any other, evaluated in the literal's environment.
+func (c *OpContext) sameOperands(x Expr, ev, ep *Environment, v, prev *Vertex) bool {
+	switch x := x.(type) {
+	case *Top:
+		return true
+	case *BinaryExpr:
+		return x.Op == AndOp &&
+			c.sameOperands(x.X, ev, ep, v, prev) &&
+			c.sameOperands(x.Y, ev, ep, v, prev)
+	case *StructLit:
+		le, lp := Environment{Up: ev, Vertex: v}, Environment{Up: ep, Vertex: prev}
+		for _, d := range x.Decls {
+			switch d := d.(type) {
+			case *Field:
+				a, b := v.LookupRaw(d.Label), prev.LookupRaw(d.Label)
+				if a == nil || b == nil || !c.sameArgument(a, b) {
+					return false
+				}
+			case Expr:
+				if !c.sameOperands(d, &le, &lp, v, prev) {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	default:
+		a, b := c.refTarget(ev, x), c.refTarget(ep, x)
+		return a != nil && b != nil && c.sameArgument(a, b)
+	}
+}
+
+// sameArgument reports whether the arcs a and b hold the same value: they
+// resolve to the same vertex, following structure sharing and chains of arcs
+// that consist of a single reference, or both are finalized without error
+// and structurally equal.
+func (c *OpContext) sameArgument(a, b *Vertex) bool {
+	fa, fb := c.followReferences(a), c.followReferences(b)
+	if fa == fb {
+		return true
+	}
+	return fa.status == finalized && fb.status == finalized &&
+		fa.Bottom() == nil && fb.Bottom() == nil &&
+		Equal(c, fa, fb, CheckStructural)
+}
+
+// followReferences returns the vertex that v stands for: v itself, or, if v
+// holds nothing but a single reference (and top), the arc that reference
+// names, followed transitively. An arc that is not such a reference, or a
+// self reference, ends the chain, which is bounded against loops of
+// references.
+//
+// Structure sharing would make such arcs dereference to their target
+// directly, but is disabled for non-rooted and dynamic targets and for
+// lets (see shareIfPossible and https://cuelang.org/issue/3801), which are
+// exactly the arcs compared here.
+func (c *OpContext) followReferences(v *Vertex) *Vertex {
+	for range 64 {
+		v = v.DerefValue()
+		var ref Conjunct
+		found := false
+		for x := range v.LeafConjuncts() {
+			if _, ok := x.Elem().(*Top); ok {
+				continue
+			}
+			if found {
+				return v
+			}
+			ref, found = x, true
+		}
+		if !found || ref.Env == nil {
+			return v
+		}
+		w := c.refTarget(ref.Env, ref.Expr())
+		if w == nil || w == v {
+			return v
+		}
+		v = w
+	}
+	return v
+}
+
+// refTarget returns the arc that the reference x names when evaluated in
+// env, found by looking it up in the scope it refers to, which neither
+// evaluates nor allocates. It is nil for an arc that does not exist yet and
+// for any expression that is not a field or let reference or a selection
+// from one: a selection from any other value would need its operand
+// evaluated, and so can the resolution of a ValueReference. A MultiLet also
+// yields nil: its raw arc holds only one comprehension iteration, whereas
+// resolution uses a copy for each environment.
+//
+// This is the arc-side counterpart of [refScope], which returns the scope.
+func (c *OpContext) refTarget(env *Environment, x Expr) *Vertex {
+	var w *Vertex
+	switch r := x.(type) {
+	case *FieldReference:
+		if e := env.up(c, r.UpCount); e != nil {
+			w = e.DerefVertex(c).LookupRaw(r.Label)
+		}
+	case *LetReference:
+		if e := env.up(c, r.UpCount); e != nil {
+			w = e.DerefVertex(c).LookupRaw(r.Label)
+			if w != nil && w.MultiLet {
+				return nil
+			}
+		}
+	case *SelectorExpr:
+		if w = c.refTarget(env, r.X); w != nil {
+			w = c.followReferences(w).LookupRaw(r.Sel)
+		}
+	}
+	return w
 }

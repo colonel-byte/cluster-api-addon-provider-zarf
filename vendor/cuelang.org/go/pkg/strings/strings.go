@@ -16,11 +16,12 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Originally generated with: go run qgo.go -exclude=Rune$,Func$,^Map$,Special$,EqualFold,Byte,Title$,ToValidUTF8,All$ extract strings
-
+//cue:pure
 package strings
 
-import "strings"
+import (
+	"strings"
+)
 
 // Compare returns an integer comparing two strings lexicographically.
 // The result will be 0 if a==b, -1 if a < b, and +1 if a > b.

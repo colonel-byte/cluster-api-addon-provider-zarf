@@ -16,6 +16,7 @@ package adt
 
 import (
 	"math/bits"
+	"slices"
 )
 
 // The CUE scheduler schedules tasks for evaluation.
@@ -73,8 +74,13 @@ type taskContext struct {
 	// of all nodes necessary to evaluate that node. Any task that is blocked
 	// during such a round of evaluation is recorded here. Any mutual cycles
 	// will result in unresolved tasks. At the end of such a round, computation
-	// can be frozen and the tasks unblocked.
-	blocking []*task
+	// can be frozen and the tasks unblocked. Each finalize detaches this
+	// queue and owns that batch; see [scheduler.unblockTasks].
+	blocking []taskBlock
+
+	// blockID identifies each registration in blocking, including repeated waits
+	// by the same task and waits by tasks recycled from taskPool.
+	blockID uint64
 
 	// taskPool is a pool of tasks that can be reused to avoid allocations.
 	taskPool []*task
@@ -104,6 +110,24 @@ func (p *taskContext) current() *task {
 	return p.stack[len(p.stack)-1]
 }
 
+// rootedTaskNode returns the node of the innermost running task that is not
+// internal, or that of the current task when every running task is. Nothing
+// finalizes an internal node, so work deferred from its tasks is recorded on
+// the rooted node whose evaluation reached it. The exception is a field of a
+// let's copy, which runs with no rooted task when the referrer shares it: it
+// records the work on itself, and the referrer finalizes it.
+func (p *taskContext) rootedTaskNode() *nodeContext {
+	for _, t := range slices.Backward(p.stack) {
+		if !t.node.node.Internal() {
+			return t.node
+		}
+	}
+	if t := p.current(); t != nil {
+		return t.node
+	}
+	return nil
+}
+
 func (p *taskContext) pushTask(t *task) {
 	p.stack = append(p.stack, t)
 }
@@ -113,7 +137,7 @@ func (p *taskContext) popTask() {
 }
 
 // taskChunkSize is the number of tasks allocated at once when the pool is empty.
-// sizeof(task) is 120 bytes, so 32 tasks is just under 4KiB per chunk.
+// sizeof(task) is 128 bytes, so 32 tasks is exactly 4KiB per chunk.
 const taskChunkSize = 32
 
 func (p *taskContext) newTask() *task {
@@ -136,70 +160,32 @@ func (p *taskContext) newTask() *task {
 }
 
 func (p *taskContext) freeTask(t *task) {
+	// Invalidate any entries still held by an enclosing finalize.
+	t.blockID = 0
 	// Add task to pool without clearing. Task will be cleared when reused.
 	p.taskPool = append(p.taskPool, t)
 }
 
 type taskState uint8
 
-const (
-	taskREADY taskState = iota
-
-	taskRUNNING // processing conjunct(s)
-	taskWAITING // task is blocked on a property of an arc to hold
-	taskSUCCESS
-	taskFAILED
-	taskCANCELLED
-)
-
-type schedState uint8
+// See the stringer directive in doc.go for the generated String method.
 
 const (
-	schedREADY schedState = iota
+	taskREADY taskState = iota // READY
 
-	schedRUNNING // processing conjunct(s)
-	schedSUCCESS
-	schedFAILED
+	// processing conjunct(s)
+	taskRUNNING // RUNNING
+	// task is blocked on a property of an arc to hold
+	taskWAITING   // WAITING
+	taskSUCCESS   // SUCCESS
+	taskFAILED    // FAILED
+	taskCANCELLED // CANCELLED
 )
-
-func (s schedState) done() bool { return s >= schedSUCCESS }
-
-func (s taskState) String() string {
-	switch s {
-	case taskREADY:
-		return "READY"
-	case taskRUNNING:
-		return "RUNNING"
-	case taskWAITING:
-		return "WAITING"
-	case taskSUCCESS:
-		return "SUCCESS"
-	case taskFAILED:
-		return "FAILED"
-	default:
-		return "UNKNOWN"
-	}
-}
-
-func (s schedState) String() string {
-	switch s {
-	case schedREADY:
-		return "READY"
-	case schedRUNNING:
-		return "RUNNING"
-	case schedSUCCESS:
-		return "SUCCESS"
-	case schedFAILED:
-		return "FAILED"
-	default:
-		return "UNKNOWN"
-	}
-}
 
 // runMode indicates how to proceed after a condition could not be met.
 type runMode uint8
 
-//go:generate go tool stringer -type=runMode
+// See the stringer directive in doc.go for the generated String method.
 
 const (
 	// ignore indicates that the new evaluator should not do any processing.
@@ -248,7 +234,8 @@ type scheduler struct {
 	ctx  *OpContext
 	node *nodeContext
 
-	state schedState
+	// running is set once process has started handling conjuncts.
+	running bool
 
 	// completed is bit set of completed states.
 	completed condition
@@ -265,12 +252,10 @@ type scheduler struct {
 	// TODO: do we need a separate field for this, or can we use completed?
 	frozen condition
 
-	// isFrozen indicates if freeze was called explicitly.
-	//
-	// TODO: rename to isExplicitlyFrozen if it turns out we need both frozen
-	// and isFrozen. We probably do not. Check once the implementation of the
-	// new evaluator is complete.
-	isFrozen bool
+	// frozenBy is the node that referenced this node's field set, freezing
+	// it. It is used to point at the source of the freeze in errors about
+	// fields added after the fact.
+	frozenBy Node
 
 	// counters keeps track of the number of uncompleted tasks that are
 	// outstanding for each of the possible conditions. A state is
@@ -292,14 +277,11 @@ type scheduler struct {
 	// blocking is a list of tasks that are blocked on the completion of
 	// the indicate conditions. This can hold tasks from other nodes or tasks
 	// originating from this node itself.
+	//
+	// Entries are never removed, so a task may have been unblocked since, or
+	// freed and recycled for a wait on another scheduler. Readers must check
+	// that a task is still blocked on this scheduler.
 	blocking []*task
-
-	// deferred tracks nodes that were not completed during computation and that
-	// still need to be finalized. This is especially important for inline
-	// structs, which may not be included in the output and thus the errors
-	// would never be discovered. But it is also important for models where we
-	// only do partial evaluation.
-	deferred []*nodeContext
 }
 
 func (s *scheduler) clear() {
@@ -310,6 +292,11 @@ func (s *scheduler) clear() {
 	// is cleared. Perhaps this can happen when the scheduler is stopped prematurely.
 	// For now, this solution seems to work OK.
 	for _, t := range s.blocking {
+		if t.blockedOn != s {
+			// The task already ran, or was freed and recycled for a wait
+			// on another scheduler. Either way the wait is not ours.
+			continue
+		}
 		t.blockedOn = nil
 		t.blockCondition = neverKnown
 	}
@@ -326,7 +313,6 @@ func (s *scheduler) clear() {
 		tasks:       s.tasks[:0],
 		parentTasks: s.parentTasks[:0],
 		blocking:    s.blocking[:0],
-		deferred:    s.deferred[:0],
 	}
 }
 
@@ -350,16 +336,17 @@ func allTasksFinished(x *nodeContext) bool {
 	return true
 }
 
-// cloneInto initializes the state of dst to be the same as s.
-//
-// NOTE: this is deliberately not a pointer receiver: this approach allows
-// cloning s into dst while preserving the buffers of dst and not having to
-// explicitly clone any non-buffer fields.
-func (s scheduler) cloneInto(dst *scheduler) {
-	s.tasks = append(dst.tasks, s.tasks...)
-	s.blocking = append(dst.blocking, s.blocking...)
-
-	*dst = s
+// allNonDeferredTasksFinished is like [allTasksFinished], but ignores
+// [handleDeferred] tasks, which complete other nodes: one may add an error to
+// this node, but never a conjunct. One recorded on a let's copy may never run,
+// as ranging over the copy or taking its length asks only for its fields.
+func allNonDeferredTasksFinished(x *nodeContext) bool {
+	for _, t := range x.tasks {
+		if t.state < taskSUCCESS && t.run != handleDeferred {
+			return false
+		}
+	}
+	return true
 }
 
 // incrementCounts adds the counters for each condition.
@@ -403,22 +390,6 @@ func (s *scheduler) decrementCounts(x condition) {
 	s.signal(completed)
 }
 
-// finalize runs all tasks and signals that the scheduler is done upon
-// completion for the given signals.
-func (s *scheduler) finalize(completed condition) {
-	// Do not panic on cycle detection. Instead, post-process the tasks
-	// by collecting and marking cycle errors.
-	s.process(allKnown, finalize)
-	s.signal(completed)
-	if s.state == schedRUNNING {
-		if s.meets(s.needs) {
-			s.state = schedSUCCESS
-		} else {
-			s.state = schedFAILED
-		}
-	}
-}
-
 // process advances a scheduler by executing tasks that are required.
 // Depending on mode, if the scheduler is blocked on a condition, it will
 // forcefully unblock the tasks.
@@ -439,13 +410,7 @@ func (s *scheduler) process(needs condition, mode runMode) bool {
 		}
 	}
 
-	ranParent := false
-	for _, t := range s.parentTasks {
-		if t.state == taskREADY {
-			runTask(t, mode)
-			ranParent = true
-		}
-	}
+	ranParent := s.runReadyParentTasks(mode)
 
 	// If a parent task ran (e.g. a comprehension that pushes fields into
 	// this node via its parent), re-process ancestors so the parent
@@ -455,15 +420,27 @@ func (s *scheduler) process(needs condition, mode runMode) bool {
 		s.handleParents(needs, mode)
 	}
 
-	if s.node != nil && s.node.node != nil && s.node.node.ArcType == ArcPending && mode == finalize {
-		s.tasks = s.tasks[:0]
+	if s.isPendingArc() {
+		if mode == finalize {
+			s.tasks = s.tasks[:0]
+		}
+		// The parent tasks above may have been the last that could declare
+		// this field, so let stateCompletions settle it now rather than
+		// leaving its readers blocked until a finalize forces them.
+		if f := c.taskContext.complete; f != nil {
+			s.signal(f(s))
+		}
 	}
 
 	// hasRunning := false
-	s.state = schedRUNNING
+	s.running = true
 	// Use variable instead of range, because s.tasks may grow during processes.
 
 	taskPos := 0
+
+	// Waits this finalize leaves alone, see [scheduler.unblockTasks]. Declared
+	// before the label so that a jump back does not reset it.
+	var deferred []taskBlock
 
 	selectTasks := needs
 	if needs&concreteKnown != 0 {
@@ -491,11 +468,18 @@ func (s *scheduler) process(needs condition, mode runMode) bool {
 	// time, so each disjunct gets its own clone that runs in the
 	// disjunct's context.
 	hasPendingDisjunction := false
+	// A running non-comprehension task (e.g. an embedded reference) may
+	// still add fields to this node; see the processNextTask case below.
+	hasRunningNonComp := false
 	for _, t := range s.tasks {
-		if t.state == taskRUNNING && t.run == handleComprehension {
-			hasRunningComp = true
-			if t.inserting {
-				hasInsertingComp = true
+		if t.state == taskRUNNING {
+			if t.run == handleComprehension {
+				hasRunningComp = true
+				if t.inserting {
+					hasInsertingComp = true
+				}
+			} else {
+				hasRunningNonComp = true
 			}
 		}
 		if t.state == taskREADY && t.run == handleDisjunctions {
@@ -527,6 +511,13 @@ processNextTask:
 			// on the same node. The running comprehension may add fields
 			// that this one depends on.
 			continue
+		case hasRunningNonComp && t.run == handleComprehension && mode == attemptOnly:
+			// Do not start a comprehension while a non-comprehension task
+			// on the same node is running: its result may still add fields
+			// that the comprehension iterates over. Only skip in
+			// attemptOnly mode (e.g. a lookup driving this node forward);
+			// in finalize mode freezing is the deliberate cycle-breaker.
+			continue
 		case hasInsertingComp && t.run == handleResolver:
 			// Do not start a resolver while a comprehension is inserting
 			// results on the same node: the resolver (e.g. an embedding
@@ -534,16 +525,13 @@ processNextTask:
 			// A comprehension still evaluating its clauses does not defer
 			// resolvers: its guards may depend on the resolver's conjuncts.
 			continue
-		case hasPendingDisjunction && t.run == handleComprehension &&
-			t.completes == allTasksCompleted:
+		case hasPendingDisjunction && t.isPushedDownComp():
 			// Defer pushed-down comprehensions until pending
-			// disjunctions have expanded the parent into disjuncts.
-			// Only comps whose body was fully pushed down (after
-			// pushDownDeps, completes == allTasksCompleted) are
-			// delayed: such comps need to run inside each disjunct
-			// so the pushed-down arcs see that disjunct's view.
-			// Comps with broader completes (e.g. for-comps over a
-			// list) are not delayed.
+			// disjunctions have expanded the parent into disjuncts:
+			// such comps need to run inside each disjunct so the
+			// pushed-down arcs see that disjunct's view. Comps with
+			// broader completes (e.g. for-comps over a list) are not
+			// delayed.
 			continue
 		default:
 			runTask(t, mode)
@@ -569,56 +557,211 @@ processNextTask:
 		// remainder of function
 	}
 
-unblockTasks:
-	// Unblocking proceeds in three stages. Each of the stages may cause
-	// formerly blocked tasks to become unblocked. To ensure that unblocking
-	// tasks do not happen in an order-dependent way, we want to ensure that we
-	// have unblocked all tasks from one phase, before commencing to the next.
+	deferred = s.unblockTasks(deferred)
 
-	// The types of the node can no longer be altered. We can unblock the
-	// relevant states first to finish up any tasks that were just waiting for
-	// types, such as lists.
-	for _, t := range c.blocking {
-		if t.blockedOn != nil {
-			t.blockedOn.signal(s.ctx.autoUnblock)
-		}
-	}
-
-	// Mark all remaining conditions as "frozen" before actually running the
-	// tasks. Doing this before running the remaining tasks ensures that we get
-	// the same errors, regardless of the order in which tasks are unblocked.
-	for _, t := range c.blocking {
-		if t.blockedOn != nil {
-			t.blockedOn.freeze(t.blockCondition)
-			t.unblocked = true
-		}
-	}
-
-	// Run the remaining blocked tasks.
-	numBlocked := len(c.blocking)
-	for _, t := range c.blocking {
-		if t.blockedOn != nil && !t.defunct {
-			n, cond := t.blockedOn, t.blockCondition
-			t.blockedOn, t.blockCondition = nil, neverKnown
-			n.signal(cond)
-			runTask(t, attemptOnly) // Does this need to be final? Probably not if we do a fixed point computation.
-		}
-	}
-
-	// The running of tasks above may result in more tasks being added to the
-	// queue. Process these first before continuing.
+	// Unblocking may have added tasks to this scheduler.
 	if taskPos < len(s.tasks) {
 		goto processNextTask
 	}
 
-	// Similarly, the running of tasks may result in more tasks being blocked.
-	// Ensure we processed them all.
-	if numBlocked < len(c.blocking) {
-		goto unblockTasks
+	s.releaseDeferred(deferred)
+
+	return true
+}
+
+// taskBlock identifies a particular wait, rather than just a task address:
+// running another task may unblock, reblock, or free and recycle this task.
+// An older entry must not act on the new wait, even if it uses the same address.
+type taskBlock struct {
+	task *task
+	id   uint64
+}
+
+// current reports whether the task is still on the wait this entry registered.
+func (b taskBlock) current() bool { return b.task.blockID == b.id }
+
+// pending reports whether that wait is still outstanding.
+func (b taskBlock) pending() bool { return b.current() && b.task.blockedOn != nil }
+
+// addBlocking registers t as blocked on s for the conditions in
+// t.blockCondition, both on s itself and on the context-wide queue.
+func (s *scheduler) addBlocking(t *task) {
+	// TODO: this line causes the scheduler state to fail if tasks are blocking
+	// on it. Is this desirable? At the very least we should then ensure that
+	// the scheduler where the tasks originate from will fail in that case.
+	s.needs |= t.blockCondition
+
+	t.blockedOn = s
+	s.blocking = append(s.blocking, t)
+
+	c := s.ctx
+	c.blockID++
+	t.blockID = c.blockID
+	c.blocking = append(c.blocking, taskBlock{t, c.blockID})
+}
+
+// unblockTasks takes ownership of each batch before running any tasks. Nested
+// finalizers can only take newly queued waits, never mutate an enclosing batch.
+// Each batch passes through all three unblocking stages. Waits deferred by this
+// scheduler are appended to deferred, which [scheduler.releaseDeferred] returns
+// to the context once this finalize is done running tasks.
+func (s *scheduler) unblockTasks(deferred []taskBlock) []taskBlock {
+	c := s.ctx
+	if len(c.blocking) == 0 {
+		return deferred
 	}
+	// This walks up the parent chain, so compute it once per finalize.
+	inTryBody := s.inTryBody()
+	canUnblock := func(b taskBlock) bool {
+		return b.pending() && !s.mustDeferUnblock(b.task, inTryBody)
+	}
+	numTasks := len(s.tasks)
+	// New waits, including those returned by nested finalizers, get their own
+	// round. Deferred waits cannot cause a busy loop here.
+	for len(c.blocking) > 0 {
+		blocking := c.blocking
+		c.blocking = nil
 
-	c.blocking = c.blocking[:0]
+		// The types of the node can no longer be altered. Unblock tasks
+		// waiting for types, such as lists, before freezing other conditions.
+		for _, b := range blocking {
+			if !canUnblock(b) {
+				continue
+			}
+			// A parent task which has not run yet may still declare a
+			// pending arc, so try it before forcing the arc's type. Like the
+			// tasks run below, it waits rather than being forced.
+			if n := b.task.blockedOn; n.isPendingArc() {
+				n.runReadyParentTasks(attemptOnly)
+			}
+			// Running a parent task can itself resolve the wait.
+			if canUnblock(b) {
+				b.task.blockedOn.signal(c.autoUnblock)
+			}
+		}
 
+		// The signals above may have run tasks that registered new waits.
+		// Those belong to this batch too, so that they are frozen along with
+		// it rather than a round later.
+		blocking = append(blocking, c.blocking...)
+		c.blocking = nil
+
+		// Freeze all remaining conditions before running tasks, so errors
+		// do not depend on the order in which tasks are unblocked.
+		for _, b := range blocking {
+			if canUnblock(b) {
+				t := b.task
+				t.blockedOn.freeze(t.blockCondition, t.x)
+			}
+		}
+
+		for _, b := range blocking {
+			if t := b.task; canUnblock(b) && !t.defunct {
+				n, cond := t.blockedOn, t.blockCondition
+				t.blockedOn, t.blockCondition = nil, neverKnown
+				n.signal(cond)
+				// signal can itself run tasks and invalidate this wait.
+				if b.current() {
+					runTask(t, attemptOnly)
+				}
+			}
+		}
+
+		for _, b := range blocking {
+			if b.pending() && !b.task.defunct {
+				deferred = append(deferred, b)
+			}
+		}
+		// Give newly scheduled work a chance to satisfy waits before
+		// forcefully unblocking another batch.
+		if numTasks < len(s.tasks) {
+			break
+		}
+	}
+	return deferred
+}
+
+// isPendingArc reports whether s evaluates an arc whose type is ArcPending.
+func (s *scheduler) isPendingArc() bool {
+	return s.node != nil && s.node.node != nil && s.node.node.ArcType == ArcPending
+}
+
+// runReadyParentTasks runs the parent tasks of s which have not run yet,
+// including those registered while running them, and reports whether any ran.
+func (s *scheduler) runReadyParentTasks(mode runMode) (ran bool) {
+	for i := 0; i < len(s.parentTasks); i++ {
+		if t := s.parentTasks[i]; t.state == taskREADY {
+			runTask(t, mode)
+			ran = true
+		}
+	}
+	return ran
+}
+
+// releaseDeferred hands the waits held back by [scheduler.unblockTasks] to the
+// context, for a later finalize to unblock.
+func (s *scheduler) releaseDeferred(deferred []taskBlock) {
+	if len(deferred) == 0 {
+		return
+	}
+	// A later batch may have satisfied or invalidated an earlier deferred
+	// wait. This slice is private to this invocation, so DeleteFunc clearing
+	// the tail is safe.
+	deferred = slices.DeleteFunc(deferred, func(b taskBlock) bool {
+		return !b.pending() || b.task.defunct
+	})
+	s.ctx.blocking = append(deferred, s.ctx.blocking...)
+}
+
+// inTryBody reports whether this scheduler belongs to the inline vertex
+// that pre-evaluates a try clause body (see [nodeContext.tryBody]) or to
+// one of its descendants.
+func (s *scheduler) inTryBody() bool {
+	return s.node != nil && s.node.node.tryBodyRoot() != nil
+}
+
+// tryBodyRoot returns the inline vertex pre-evaluating the try clause body
+// that v belongs to, or nil if there is none. Descendants of an inline vertex
+// are non-rooted themselves, so the walk stops at the first rooted ancestor.
+func (v *Vertex) tryBodyRoot() *Vertex {
+	for ; v != nil && !v.Rooted(); v = v.Parent {
+		if v.state != nil && v.state.tryBody != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// mustDeferUnblock reports whether finalizing this scheduler, for which
+// inTryBody holds [scheduler.inTryBody], must leave blocked task t alone.
+// Finalizing the inline vertex of a try clause body is an effect-free
+// pre-evaluation: neither it nor its descendants may force or freeze tasks
+// blocked on schedulers of rooted vertices, as those vertices may still
+// receive fields once the body is evaluated for real, and freezing them
+// commits an incomplete field set. Such tasks remain in the blocking queue
+// and are handled by a subsequent regular finalize.
+//
+// Rooted vertices finalized while evaluating the body are finalized for
+// good, so their unblocking phase runs as usual: deferring there would let
+// them commit results that the deferred tasks later contradict.
+//
+// The tasks of the finalizing vertex itself, and of its descendants, are
+// never deferred, whatever they are blocked on: they are what the
+// pre-evaluation is about, and a ?-marked reference among them left
+// blocked would hide the very failure the try clause looks for.
+func (s *scheduler) mustDeferUnblock(t *task, inTryBody bool) bool {
+	if !inTryBody || t.blockedOn.node == nil {
+		return false
+	}
+	w := t.blockedOn.node.node
+	if w == nil || !w.Rooted() {
+		return false
+	}
+	for v := t.node.node; v != nil && !v.Rooted(); v = v.Parent {
+		if v == s.node.node {
+			return false
+		}
+	}
 	return true
 }
 
@@ -632,7 +775,7 @@ func (s *scheduler) yield() {
 func (s *scheduler) meets(needs condition) bool {
 	s.node.assertInitialized()
 
-	if s.state != schedREADY {
+	if s.running {
 		// Automatically qualify for conditions that are not provided by this node.
 		// NOTE: in the evaluator this is generally not the case, as tasks my still
 		// be added during evaluation until all ancestor nodes are evaluated. This
@@ -670,7 +813,7 @@ func (s *scheduler) signal(completed condition) {
 	// TODO: this could benefit from a linked list where tasks are removed
 	// from the list before being run.
 	for _, t := range s.blocking {
-		if t.blockCondition&s.completed == t.blockCondition {
+		if t.blockedOn == s && t.blockCondition&s.completed == t.blockCondition {
 			// Prevent task from running again.
 			t.blockCondition = neverKnown
 			t.blockedOn = nil
@@ -681,12 +824,16 @@ func (s *scheduler) signal(completed condition) {
 }
 
 // freeze indicates no more tasks satisfying the given condition may be added.
-// It is also used to freeze certain elements of the task.
-func (s *scheduler) freeze(c condition) {
+// It is also used to freeze certain elements of the task. by, if non-nil, is
+// the node whose evaluation required the field set to be frozen, recorded for
+// use in error messages.
+func (s *scheduler) freeze(c condition, by Node) {
 	s.frozen |= s.deferFieldSetKnown(c)
+	if c&fieldSetKnown != 0 && s.frozen&fieldSetKnown != 0 && s.frozenBy == nil && by != nil {
+		s.frozenBy = by
+	}
 	s.completed |= c
 	s.ctx.complete(s)
-	s.isFrozen = true
 }
 
 // deferFieldSetKnown filters fieldSetKnown out of c while a task other than
@@ -748,6 +895,26 @@ func (s *scheduler) deferFieldSetKnown(c condition) condition {
 	return c
 }
 
+// mayDeclareArcs reports whether an unfinished task of s may still declare
+// an arc it has not created. A task completing only allTasksCompleted, such
+// as a pushed-down comprehension (see [task.isPushedDownComp]) or a deferred
+// completion, contributes only to the arcs created when it was scheduled.
+func (s *scheduler) mayDeclareArcs() bool {
+	for _, t := range s.tasks {
+		if t.state < taskSUCCESS && t.completes != allTasksCompleted {
+			return true
+		}
+	}
+	return false
+}
+
+// noTaskMayDeclareArcs reports whether an arc missing from the node cannot
+// exist: all conjuncts of s are scheduled, and neither a parent task nor an
+// unfinished task of s may declare an arc it has not created.
+func (s *scheduler) noTaskMayDeclareArcs() bool {
+	return s.meets(allAncestorsProcessed) && !s.hasActiveParentTask() && !s.mayDeclareArcs()
+}
+
 // hasActiveParentTask reports whether a parent task, such as a pushed-down
 // comprehension, has not yet completed and may still add to this node.
 func (s *scheduler) hasActiveParentTask() bool {
@@ -759,11 +926,25 @@ func (s *scheduler) hasActiveParentTask() bool {
 	return false
 }
 
-// signalDoneAdding signals that no more tasks will be added to this scheduler.
-// This allows unblocking tasks that depend on states for which there are no
-// tasks in this scheduler.
-func (s *scheduler) signalDoneAdding() {
-	s.signal(s.needs &^ s.provided)
+// hasRunningSiblingParentTask reports whether a parent task other than the
+// currently running task is itself running. Such a task (e.g. a sibling
+// comprehension whose guard is still being evaluated) may yet add fields to
+// this node, so its field set must not be committed.
+//
+// Unlike the broader scans in [scheduler.hasActiveParentTask] and
+// [scheduler.deferFieldSetKnown], only taskRUNNING matters here: a READY
+// parent task is run by unify's own parent-task processing, and a WAITING
+// one is resolved by the freeze cycle-breaker during finalize. A RUNNING
+// task is the one state finalize cannot resolve, as it is re-entrant on
+// the evaluation stack.
+func (s *scheduler) hasRunningSiblingParentTask() bool {
+	cur := s.ctx.current()
+	for _, pt := range s.parentTasks {
+		if pt != cur && pt.state == taskRUNNING {
+			return true
+		}
+	}
+	return false
 }
 
 // runner defines properties of a type of task, including a function to run it.
@@ -792,9 +973,6 @@ type task struct {
 	// when it has not yet been run before it is copied into a disjunction.
 	defunct bool
 
-	// unblocked indicates this task was unblocked by force.
-	unblocked bool
-
 	// inserting indicates that this comprehension task is inserting the
 	// conjuncts its clauses yielded; see hasInsertingComp in process.
 	inserting bool
@@ -811,6 +989,8 @@ type task struct {
 	// scheduler.
 	blockedOn      *scheduler
 	blockCondition condition
+	// blockID identifies the wait the two fields above describe, see [taskBlock].
+	blockID uint64
 	// blockStack     []*task // TODO: use; for error reporting.
 
 	err *Bottom
@@ -858,41 +1038,22 @@ func runTask(t *task, mode runMode) {
 		t.state = taskCANCELLED
 		return
 	}
-	// Skip tasks whose evaluation must not cross an ancestor-cycle
-	// reference on this arc (see [nodeContext.hasAncestorCycle]):
+	// Evaluating a disjunction on an arc with an ancestor-cycle reference
+	// (see [nodeContext.hasAncestorCycle]) would resolve the disjunct
+	// through the back-edge into the same disjunction's evaluation; the
+	// cross-disjunct cycle err1/err2 in
+	// [cue/testdata/disjunctions/edge.txtar] documents that this must
+	// surface as an unresolved-disjunction error per the spec. Only the
+	// kinds of the disjuncts apply here.
 	//
-	//   - Comprehensions: a comprehension inherited onto a cycle arc may
-	//     re-enter the ancestor via the cyclic reference (its for/if
-	//     clauses look up children that themselves cycle back), recursing
-	//     without bound. This only applies when the node has no non-cyclic
-	//     conjuncts of its own (see below).
-	//   - Disjunctions: evaluating a disjunction here would resolve the
-	//     disjunct through the cyclic reference back into the same
-	//     disjunction's evaluation — the cross-disjunct cycle err1/err2
-	//     in [cue/testdata/disjunctions/edge.txtar] documents that this
-	//     must surface as an unresolved-disjunction error per the spec,
-	//     not as a successful resolution via the back-edge.
-	//
-	// Other task kinds (Resolver, StructLit body, Field, ListLit, etc.)
-	// contribute bounded structure or constraints that downstream lookups
-	// (e.g. `_self.foo`) need; they must still fire. The structural cycle
-	// is still reported through [nodeContext.detectCycle].
-	if t.node.hasAncestorCycle {
-		switch t.run {
-		case handleComprehension:
-			// Only skip if the node is a pure back-reference to its
-			// ancestor. If it has independent non-cyclic conjuncts (e.g. a
-			// `let X = self` whose conjuncts were copied into this vertex),
-			// the comprehension must still fire to materialize its fields
-			// here.
-			if t.node.hasOnlyCyclicConjuncts() {
-				t.state = taskSUCCESS
-				return
-			}
-		case handleDisjunctions:
-			t.state = taskSUCCESS
-			return
-		}
+	// All other task kinds must still fire: they contribute structure or
+	// constraints that downstream lookups (e.g. `_self.foo`) need. Their
+	// cyclic conjuncts are marked by [nodeContext.detectCycle] and the
+	// structural cycle is reported by [assertStructuralCycle].
+	if t.node.hasAncestorCycle && t.run == handleDisjunctions {
+		t.node.applyDisjunctionKinds()
+		t.state = taskSUCCESS
+		return
 	}
 	ctx := t.node.ctx
 	if ctx.LogEval > 0 {
@@ -966,7 +1127,7 @@ func runTask(t *task, mode runMode) {
 		// This is done to avoid struct args from passing fields up.
 		// Use [task.updateCI] to get the current CloseInfo with this field
 		// restored.
-		s := ctx.PushConjunct(MakeConjunct(t.env, t.x, id))
+		s := ctx.pushConjunct(MakeConjunct(t.env, t.x, id))
 		defer ctx.PopState(s)
 	}
 
@@ -976,15 +1137,8 @@ func runTask(t *task, mode runMode) {
 
 	t.run.f(ctx, t, mode)
 
-	// Clear context error so that it does not leak into deferred tasks.
+	// Take the context error now, so that a retry does not leave it behind.
 	errs := ctx.Err()
-
-	for _, d := range t.node.deferred {
-		d.node.CompleteArcsOnly(ctx)
-		if b, ok := d.node.BaseValue.(*Bottom); ok {
-			t.node.addBottom(b)
-		}
-	}
 
 	if t.retry {
 		// The task ran without effect but may succeed later; requeue it
@@ -1026,15 +1180,7 @@ func (t *task) waitFor(s *scheduler, needs condition) {
 	if s.meets(needs) {
 		panic("waiting for condition that already completed")
 	}
-	// TODO: this line causes the scheduler state to fail if tasks are blocking
-	// on it. Is this desirable? At the very least we should then ensure that
-	// the scheduler where the tasks originate from will fail in that case.
-	s.needs |= needs
-
 	t.state = taskWAITING
-
 	t.blockCondition = needs
-	t.blockedOn = s
-	s.blocking = append(s.blocking, t)
-	s.ctx.blocking = append(s.ctx.blocking, t)
+	s.addBlocking(t)
 }

@@ -28,14 +28,12 @@ type ValidateConfig struct {
 	// requested.
 	ReportIncomplete bool
 
-	// AllErrors continues descending into a Vertex, even if errors are found.
-	AllErrors bool
-
 	// TODO: omitOptional, if this is becomes relevant.
 }
 
 // Validate checks that a value has certain properties. The value must have
-// been evaluated.
+// been evaluated. It stops at the first error; use [ValidateAll] to find all
+// errors.
 func Validate(ctx *OpContext, v *Vertex, cfg *ValidateConfig) *Bottom {
 	if cfg == nil {
 		cfg = &ValidateConfig{}
@@ -43,6 +41,18 @@ func Validate(ctx *OpContext, v *Vertex, cfg *ValidateConfig) *Bottom {
 	x := validator{ValidateConfig: *cfg, ctx: ctx}
 	x.validate(v)
 	return x.err
+}
+
+// ValidateAll is like [Validate], but it continues descending into a Vertex
+// even if errors are found, and returns each error separately, keeping its
+// own error code.
+func ValidateAll(ctx *OpContext, v *Vertex, cfg *ValidateConfig) []*Bottom {
+	if cfg == nil {
+		cfg = &ValidateConfig{}
+	}
+	x := validator{ValidateConfig: *cfg, ctx: ctx, all: true}
+	x.validate(v)
+	return x.errs
 }
 
 // validateValue checks that a value has certain properties. The value must have
@@ -76,21 +86,29 @@ type validator struct {
 	err          *Bottom
 	inDefinition int
 
+	// all collects every error in errs, rather than stopping at the first
+	// error in err.
+	all  bool
+	errs []*Bottom
+	seen map[*Bottom]bool // the errors in errs
+
 	sharedPositions []Node
 
-	// shared vertices should be visited at least once if referenced by
-	// a non-definition.
+	// visited records how each structure-shared vertex has been validated.
 	// TODO: we could also keep track of the number of references to a
 	// shared vertex. This would allow us to report more than a single error
 	// per shared vertex.
-	visited map[*Vertex]bool
+	visited map[*Vertex]sharedVisit
 }
 
-func (v *validator) addPositions(err *ValueError) {
-	for _, p := range v.sharedPositions {
-		err.AddPosition(p)
-	}
-}
+type sharedVisit uint8
+
+// A full visit performs the checks that only apply outside definitions,
+// such as concreteness, on top of those a partial visit performs.
+const (
+	partialVisit sharedVisit = 1 + iota
+	fullVisit
+)
 
 func (v *validator) checkConcrete() bool {
 	return v.Concrete && v.inDefinition == 0
@@ -101,12 +119,18 @@ func (v *validator) checkFinal() bool {
 }
 
 func (v *validator) add(b *Bottom) {
-	if !v.AllErrors {
+	if !v.all {
 		v.err = CombineErrors(nil, v.err, b)
 		return
 	}
-	if !b.ChildError {
-		v.err = CombineErrors(nil, v.err, b)
+	// A shared vertex may be reached both through a reference and at its
+	// own position.
+	if !b.ChildError && !v.seen[b] {
+		if v.seen == nil {
+			v.seen = make(map[*Bottom]bool)
+		}
+		v.seen[b] = true
+		v.errs = append(v.errs, b)
 	}
 }
 
@@ -126,23 +150,23 @@ func (v *validator) validate(x *Vertex) {
 		}
 		defer func() { v.sharedPositions = saved }()
 	}
-	// Dereference values, but only those that are not shared. This includes let
-	// values. This prevents us from processing structure-shared nodes more than
-	// once and prevents potential cycles.
 	x = x.DerefValue()
 	if y != x {
-		// Ensure that each structure shared node is processed at least once
-		// in a position that is not a definition.
-		if v.inDefinition > 0 {
+		// Process each dereferenced node at most once per kind of visit,
+		// which bounds the work and prevents cycles. The node may not be
+		// reachable in any other way, such as a let or an imported package
+		// referenced by a hidden field.
+		visit := partialVisit
+		if v.checkFinal() {
+			visit = fullVisit
+		}
+		if v.visited[x] >= visit {
 			return
 		}
 		if v.visited == nil {
-			v.visited = make(map[*Vertex]bool)
+			v.visited = make(map[*Vertex]sharedVisit)
 		}
-		if v.visited[x] {
-			return
-		}
-		v.visited[x] = true
+		v.visited[x] = visit
 	}
 
 	if b := x.Bottom(); b != nil {
@@ -165,30 +189,24 @@ func (v *validator) validate(x *Vertex) {
 		}
 
 	} else if v.checkConcrete() {
-		x = x.Default()
+		x = x.ConcreteDefault()
 		if !IsConcrete(x) {
-			x := x.Value()
-			err := v.ctx.Newf("incomplete value %v", x)
-			v.addPositions(err)
-			v.add(&Bottom{
-				Code: IncompleteError,
-				Err:  err,
-			})
+			v.add(NewIncompleteValueError(v.ctx, x, v.sharedPositions...))
 		}
 	}
 
 	for _, a := range x.Arcs {
 		if a.ArcType == ArcRequired && v.Final && v.inDefinition == 0 {
-			v.ctx.PushArcAndLabel(a)
+			saved := v.ctx.PushArcAndLabel(a)
 			v.add(NewRequiredNotPresentError(v.ctx, a, v.sharedPositions...))
-			v.ctx.PopArcAndLabel(a)
+			v.ctx.PopArcAndLabel(saved)
 			continue
 		}
 
 		if a.Label.IsLet() || !a.IsDefined(v.ctx) {
 			continue
 		}
-		if !v.AllErrors && v.err != nil {
+		if !v.all && v.err != nil {
 			break
 		}
 		if a.Label.IsRegular() {

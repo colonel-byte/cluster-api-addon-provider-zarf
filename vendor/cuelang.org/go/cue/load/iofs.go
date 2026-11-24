@@ -72,16 +72,18 @@ func (fsys *iofsFileSystem) openFile(p string) (io.ReadCloser, errors.Error) {
 }
 
 func (fsys *iofsFileSystem) walk(root string, f walkFunc) error {
-	root = fsys.fsPath(root)
-	return fs.WalkDir(fsys.fsys, root, func(p string, d fs.DirEntry, err error) error {
-		if p == root && err == nil && !d.IsDir() {
+	fsRoot := fsys.fsPath(root)
+	return fs.WalkDir(fsys.fsys, fsRoot, func(p string, d fs.DirEntry, err error) error {
+		if p == fsRoot && err == nil && !d.IsDir() {
 			return errors.Newf(token.NoPos, "path %q is not a directory", root)
 		}
 		var cueErr errors.Error
 		if err != nil {
 			cueErr = errors.Wrapf(err, token.NoPos, "walk")
 		}
-		walkErr := f(p, d, cueErr)
+		// fs.WalkDir yields io/fs paths; hand the callback
+		// the absolute paths that [fileSystem] deals in.
+		walkErr := f(path.Join("/", p), d, cueErr)
 		if walkErr == skipDir {
 			return fs.SkipDir
 		}
@@ -176,9 +178,7 @@ func (fsys *fsIOFS) ReadCUEFile(p string, cfg parser.Config) (*ast.File, error) 
 		cache.entries[key] = fileCacheEntry{nil, err, nil}
 		return nil, err
 	}
-	if fsys.languageVersion != "" {
-		cfg = cfg.Apply(parser.Version(fsys.languageVersion))
-	}
+	cfg = cfg.Apply(parser.Version(fsys.languageVersion))
 	return fsys.fileCache.getCUESyntax(&build.File{
 		Filename: absPath,
 		Encoding: build.CUE,

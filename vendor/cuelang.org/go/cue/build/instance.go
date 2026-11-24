@@ -98,8 +98,6 @@ type Instance struct {
 	// avoid failing import loading for dependencies.
 	ResolutionErr errors.Error
 
-	parent *Instance // TODO: for cycle detection
-
 	// The following fields are for informative purposes and are not used by
 	// the cue package to create an instance.
 
@@ -119,6 +117,10 @@ type Instance struct {
 
 	// ModuleFile holds the actual module file data, if available.
 	ModuleFile *modfiledata.File
+
+	// targetLanguageVersion is the output target selected by the loader for
+	// input outside a module. It does not control parsing or evaluation.
+	targetLanguageVersion string
 
 	// Root is the root of the directory hierarchy, it may be "" if this an
 	// instance has no imports.
@@ -167,7 +169,17 @@ func (inst *Instance) RelPath(f *File) string {
 	return p
 }
 
-// ID returns the package ID unique for this module.
+// ID returns the package ID unique for this module. It is also the scope of the
+// package's hidden fields, as selected by [cuelang.org/go/cue.Hid].
+//
+// The ID is not always an import path; it is the first of:
+//
+//   - [Instance.CanonicalID], when set
+//   - [Instance.ImportPath], such as "mod.com@v0:b"
+//   - "_", when the instance has no package name
+//   - [Instance.Module] and [Instance.PkgName] joined by a colon, such as
+//     "mod.com@v0:b" for files named directly rather than by import path,
+//     or ":b" for "package b" outside of any module
 func (inst *Instance) ID() string {
 	if s := inst.CanonicalID; s != "" {
 		return s
@@ -231,11 +243,44 @@ func (inst *Instance) Context() *Context {
 	return inst.ctxt
 }
 
+// LanguageVersion reports the language version declared by the module that
+// inst belongs to, or the empty string when there is none to be had.
+func (inst *Instance) LanguageVersion() string {
+	if inst == nil || inst.ModuleFile == nil || inst.ModuleFile.Language == nil {
+		return ""
+	}
+	return inst.ModuleFile.Language.Version
+}
+
+// TargetLanguageVersion reports the target language version for CUE output.
+// A module's language version takes precedence over the loader-selected target
+// for input outside a module. An empty target selects the current version.
+// Source files' own versions do not change this target. It can be older
+// than a source file's version when the loader chooses an older output
+// target; formatting and export use the requested target.
+func (inst *Instance) TargetLanguageVersion() string {
+	if inst == nil {
+		return ""
+	}
+	if v := inst.LanguageVersion(); v != "" {
+		return v
+	}
+	return inst.targetLanguageVersion
+}
+
+type hiddenInstance = Instance
+
+// SetTargetLanguageVersion sets the target for output from input outside a module.
+// It does not change the version used to parse or evaluate any source file.
+//
+// NOTE: this is an internal API and may change at any time without notice.
+func (inst *hiddenInstance) SetTargetLanguageVersion(v string) {
+	inst.targetLanguageVersion = v
+}
+
 func (inst *Instance) parse(name string, src interface{}) (*ast.File, error) {
 	cfg := parser.NewConfig(parser.ParseComments)
-	if inst.ModuleFile != nil && inst.ModuleFile.Language != nil {
-		cfg = cfg.Apply(parser.Version(inst.ModuleFile.Language.Version))
-	}
+	cfg = cfg.Apply(parser.Version(inst.LanguageVersion()))
 	if inst.ctxt != nil && inst.ctxt.parseFunc != nil {
 		return inst.ctxt.parseFunc(name, src, cfg)
 	}

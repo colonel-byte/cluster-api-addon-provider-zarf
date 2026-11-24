@@ -21,6 +21,7 @@ import (
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/format"
+	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/export"
 )
 
@@ -137,7 +138,8 @@ func (v Value) Format(state fmt.State, verb rune) {
 
 func formatCUE(state fmt.State, v Value, showDocs, showAll bool) {
 
-	pkgPath := v.instance().ID()
+	inst := v.instance()
+	pkgPath := inst.ID()
 
 	p := *export.Simplified
 
@@ -161,12 +163,15 @@ func formatCUE(state fmt.State, v Value, showDocs, showAll bool) {
 
 	p.ShowDocs = showDocs
 	p.ShowAttributes = showAll
+	p.TargetLanguageVersion = inst.languageVersion()
 
 	var n ast.Node
 	if isDef {
 		n, _ = p.Def(v.idx, pkgPath, v.v)
 	} else {
-		n, _ = p.Value(v.idx, pkgPath, v.v)
+		ctx := adt.NewContext(v.idx, v.v)
+		n, _ = p.Value(ctx, pkgPath, v.v)
+		adt.AddStats(ctx)
 	}
 
 	formatExpr(state, n)
@@ -185,13 +190,14 @@ func formatExpr(state fmt.State, n ast.Node) {
 	if tabwidth, ok := state.Precision(); ok {
 		// TODO: 0 means no newlines.
 		opts = append(opts,
-			format.UseSpaces(tabwidth),
+			format.IndentWidth(tabwidth),
+			//lint:ignore SA1019 unlike Indent, it does not force formatv2
 			format.TabIndent(false))
 	}
 	// TODO: consider this.
 	//  else if state.Flag(' ') {
 	// 	opts = append(opts,
-	// 		format.UseSpaces(4),
+	// 		format.IndentWidth(4),
 	// 		format.TabIndent(false))
 	// }
 

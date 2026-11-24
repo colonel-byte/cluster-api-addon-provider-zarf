@@ -26,7 +26,7 @@ import (
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
-	"cuelang.org/go/internal/core/eval"
+	"cuelang.org/go/internal/value"
 )
 
 // valueSorter defines a sort.Interface; implemented in cue/builtinutil.go.
@@ -35,10 +35,9 @@ type valueSorter struct {
 	a   []cue.Value
 	err error
 
-	cmp  *adt.Vertex
-	less *adt.Vertex
-	x    *adt.Vertex
-	y    *adt.Vertex
+	cmp *adt.Vertex
+	// The labels of the comparator fields.
+	less, x, y adt.Feature
 }
 
 func (s *valueSorter) ret() ([]cue.Value, error) {
@@ -67,75 +66,71 @@ func (s *valueSorter) lessNew(i, j int) bool {
 		Parent:    s.cmp.Parent,
 		Conjuncts: s.cmp.Conjuncts,
 	}
+	// Create the arcs x and y holding the inputs before anything may evaluate
+	// them, such as a comprehension. Resolving the arcs first and inserting
+	// the inputs into x and y would evaluate such a comprehension, and with it
+	// x and y, too early.
+	n.Arcs = []*adt.Vertex{
+		{Label: s.x, Parent: n, Conjuncts: s.a[i].Core().V.Conjuncts},
+		{Label: s.y, Parent: n, Conjuncts: s.a[j].Core().V.Conjuncts},
+	}
 
-	n.Init(ctx)
+	// Resolve the direct arcs like makeValueSorter does, as they may come
+	// from embeddings or unifications.
+	n.CompleteArcsShallow(ctx)
 
-	less := getArc(ctx, n, "less")
-	xa := getArc(ctx, n, "x")
-	ya := getArc(ctx, n, "y")
-
-	x := s.a[i].Core()
-	y := s.a[j].Core()
-
-	xa.InsertConjunctsFrom(x.V)
-	ya.InsertConjunctsFrom(y.V)
+	less := n.Lookup(s.less)
 
 	// TODO(perf): if we can determine that the comparator values for
 	// x and y are idempotent (no arcs and a basevalue being top or
 	// a struct or list marker), then we do not need to reevaluate the input.
-	// In that case, we can use the below code instead of the above two loops
-	// setting the conjuncts. This may improve performance significantly.
-	//
-	// s.x.BaseValue = x.V.BaseValue
-	// s.x.Arcs = x.V.Arcs
-	// s.y.BaseValue = y.V.BaseValue
-	// s.y.Arcs = y.V.Arcs
+	// In that case, the arcs x and y could take the BaseValue and Arcs of
+	// the inputs instead of their conjuncts. This may improve performance
+	// significantly.
 
-	less.Finalize(s.ctx)
-
-	isLess := s.ctx.BoolValue(less)
-	if b := less.Err(s.ctx); b != nil && s.err == nil {
-		s.err = b.Err
+	// Err finalizes less, and BoolValue then records an error for a value
+	// which is not a concrete bool. Keep the error as a [cue.Value] error so
+	// that its code is preserved, as a non-concrete less field is an
+	// incomplete error rather than a fatal one.
+	b := less.Err(ctx)
+	isLess := ctx.BoolValue(less)
+	if b == nil {
+		b = ctx.Err()
+	}
+	if b != nil {
+		s.err = value.Make(ctx, b).Err()
 		return true
 	}
 
 	return isLess
 }
 
-var less = cue.ParsePath("less")
-
 func makeValueSorter(list []cue.Value, cmp cue.Value) (s valueSorter) {
-	if v := cmp.LookupPath(less); !v.Exists() {
-		// The comparator is already concrete here, so a missing "less" field is
-		// fatal rather than incomplete.
-		return valueSorter{err: errors.Newf(token.NoPos, "field not found: less")}
-	}
-
 	v := cmp.Core()
-	ctx := eval.NewContext(v.R, v.V)
+	ctx := adt.NewContext(v.R, v.V)
 
 	n := &adt.Vertex{
 		Label:     v.V.Label,
 		Parent:    v.V.Parent,
 		Conjuncts: v.V.Conjuncts,
 	}
-	n.CompleteArcs(ctx)
+	n.CompleteArcsShallow(ctx)
 
 	s = valueSorter{
 		a:    list,
 		ctx:  ctx,
 		cmp:  n,
-		less: getArc(ctx, n, "less"),
-		x:    getArc(ctx, n, "x"),
-		y:    getArc(ctx, n, "y"),
+		less: ctx.StringLabel("less"),
+		x:    ctx.StringLabel("x"),
+		y:    ctx.StringLabel("y"),
 	}
-
-	// TODO(perf): see comment in the Less method. If we can determine
-	// the conjuncts for x and y are idempotent, we can pre finalize here and
-	// ignore the values in the Less method.
-	// s.x.UpdateStatus(adt.Finalized)
-	// s.y.UpdateStatus(adt.Finalized)
-
+	// The comparator is already concrete here, so a missing field is fatal
+	// rather than incomplete; a constraint such as less?: bool is no field.
+	for _, f := range []adt.Feature{s.less, s.x, s.y} {
+		if arc := n.Lookup(f); arc == nil || arc.ArcType != adt.ArcMember {
+			return valueSorter{err: errors.Newf(token.NoPos, "field not found: %s", f.StringValue(ctx))}
+		}
+	}
 	return s
 }
 
@@ -158,12 +153,6 @@ func Sort(list []cue.Value, cmp cue.Value) (sorted []cue.Value, err error) {
 	return s.ret()
 }
 
-func getArc(ctx *adt.OpContext, v *adt.Vertex, s string) *adt.Vertex {
-	f := ctx.StringLabel(s)
-	arc, _ := v.GetArc(ctx, f, 0)
-	return arc
-}
-
 // Deprecated: use [Sort], which is always stable
 func SortStable(list []cue.Value, cmp cue.Value) (sorted []cue.Value, err error) {
 	s := makeValueSorter(list, cmp)
@@ -180,9 +169,13 @@ func SortStrings(a []string) []string {
 // IsSorted tests whether a list is sorted.
 //
 // See Sort for an example comparator.
-func IsSorted(list []cue.Value, cmp cue.Value) bool {
+func IsSorted(list []cue.Value, cmp cue.Value) (bool, error) {
 	s := makeValueSorter(list, cmp)
-	return sort.IsSorted(&s)
+	sorted := sort.IsSorted(&s)
+	if s.err != nil {
+		return false, s.err
+	}
+	return sorted, nil
 }
 
 // IsSortedStrings tests whether a list is a sorted list of strings.

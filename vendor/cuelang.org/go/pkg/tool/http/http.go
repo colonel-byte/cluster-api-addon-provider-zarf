@@ -21,6 +21,7 @@ import (
 	"encoding/pem"
 	"io"
 	"net/http"
+	"time"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/errors"
@@ -30,9 +31,6 @@ import (
 func init() {
 	task.Register("tool/http.Do", newHTTPCmd)
 	task.Register("tool/http.Serve", newServeCmd)
-
-	// For backwards compatibility.
-	task.Register("http", newHTTPCmd)
 }
 
 type httpCmd struct{}
@@ -83,6 +81,22 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 		}
 	}
 
+	var timeout time.Duration
+	timeoutValue := ctx.Obj.LookupPath(cue.MakePath(cue.Str("timeout")))
+	if timeoutValue.Exists() {
+		s, err := timeoutValue.String()
+		if err != nil {
+			return nil, errors.Wrapf(err, timeoutValue.Pos(), "invalid string value")
+		}
+		timeout, err = time.ParseDuration(s)
+		if err != nil {
+			return nil, errors.Wrapf(err, timeoutValue.Pos(), "invalid timeout")
+		}
+		if timeout <= 0 {
+			return nil, errors.Newf(timeoutValue.Pos(), "timeout must be positive, found %q", s)
+		}
+	}
+
 	if ctx.Err != nil {
 		return nil, ctx.Err
 	}
@@ -94,27 +108,17 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 		transport.TLSClientConfig.InsecureSkipVerify = true
 	}
 	if tlsVerify && len(caCert) > 0 {
-		pool := x509.NewCertPool()
-		for {
-			block, rest := pem.Decode(caCert)
-			if block == nil {
-				break
-			}
-			if block.Type == "PUBLIC KEY" {
-				c, err := x509.ParseCertificate(block.Bytes)
-				if err != nil {
-					return nil, errors.Wrapf(err, ctx.Obj.Pos(), "failed to parse caCert")
-				}
-				pool.AddCert(c)
-			}
-			caCert = rest
+		pool, err := caCertPool(caCert)
+		if err != nil {
+			return nil, errors.Wrapf(err, caCertValue.Pos(), "invalid caCert")
 		}
 		transport.TLSClientConfig.RootCAs = pool
 	}
 
+	// A zero timeout means no limit, just like the default net/http client.
 	client := &http.Client{
 		Transport: transport,
-		// TODO: timeout
+		Timeout:   timeout,
 	}
 
 	// Rather clumsily, we need to also default followRedirects here because
@@ -140,7 +144,7 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 		}
 	}
 
-	req, err := http.NewRequest(method, u, r)
+	req, err := http.NewRequestWithContext(ctx.Context, method, u, r)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +168,39 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 			"trailer":    resp.Trailer,
 		},
 	}, err
+}
+
+// caCertPool collects the PEM encoded certificates in caCert into a pool of
+// root certificates. It reports an error if any of them cannot be parsed, or
+// if caCert holds none at all, as an empty pool would reject every server.
+func caCertPool(caCert []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	found := false
+	for {
+		block, rest := pem.Decode(caCert)
+		if block == nil {
+			break
+		}
+		caCert = rest
+		// x509.CertPool.AppendCertsFromPEM would do the work below, but it
+		// skips certificates it cannot parse and only accepts "CERTIFICATE".
+		// "PUBLIC KEY" holds a public key rather than a certificate, yet it
+		// was the only block type accepted here until
+		// https://cuelang.org/issue/4468, so it keeps working.
+		if block.Type != "CERTIFICATE" && block.Type != "PUBLIC KEY" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		pool.AddCert(cert)
+		found = true
+	}
+	if !found {
+		return nil, errors.New("no certificates found")
+	}
+	return pool, nil
 }
 
 func parseHeaders(obj cue.Value, label string) (http.Header, error) {

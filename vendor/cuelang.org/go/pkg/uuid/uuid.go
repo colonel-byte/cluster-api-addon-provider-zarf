@@ -15,6 +15,8 @@
 // Package uuid defines functionality for creating UUIDs as defined in RFC 4122.
 //
 // Currently only Version 5 (SHA1) and Version 3 (MD5) are supported.
+//
+//cue:pure
 package uuid
 
 import (
@@ -63,10 +65,12 @@ func FromInt(i *big.Int) (string, error) {
 }
 
 // ToInt represents a UUID string as a 128-bit value.
-func ToInt(x string) *big.Int {
-	var i big.Int
-	i.SetBytes([]byte(x[:]))
-	return &i
+func ToInt(x string) (*big.Int, error) {
+	u, err := uuid.Parse(x)
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).SetBytes(u[:]), nil
 }
 
 // Variant reports the UUID variant.

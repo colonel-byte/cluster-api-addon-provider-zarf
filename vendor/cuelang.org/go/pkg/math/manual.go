@@ -15,11 +15,13 @@
 package math
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/cockroachdb/apd/v3"
 
 	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/pkg"
 )
 
 func roundContext(rounder apd.Rounder) internal.Context {
@@ -28,104 +30,95 @@ func roundContext(rounder apd.Rounder) internal.Context {
 	return c
 }
 
-// TODO: for now we convert Decimals to int. This allows the desired type to be
-// conveyed. This has the disadvantage that a number like 1E10000 will need to be
-// expanded. Eventually it would be better to unify number types and allow
-// anything that results in an integer to pose as an integer type.
-// TODO: this is likely buggy, as we discard d.Exponent entirely.
+// toInt converts an integral d to a big.Int. Callers must round d to an
+// integral value first, so that no non-zero digits are dropped.
+//
+// TODO: converting to an int is how the desired type is conveyed, at the cost
+// of expanding a number such as 1E10000. It would be better to unify the
+// number types and let anything with an integer value pose as an integer.
 func toInt(d *internal.Decimal) *big.Int {
-	i := &d.Coeff
-	if d.Negative {
-		i.Neg(i)
+	// Rounding to an integral value brings the exponent to zero, so that the
+	// coefficient alone is the magnitude.
+	var i internal.Decimal
+	_, _ = internal.ExactContext.RoundToIntegralValue(&i, d)
+	b := i.Coeff.MathBigInt()
+	if i.Negative {
+		b.Neg(b)
 	}
-	return i.MathBigInt()
+	return b
+}
+
+// roundToInt rounds x to an integral value with round, and converts the
+// result to a big.Int. It is an error if x is an infinity or NaN, neither
+// of which has an integer value.
+func roundToInt(x *internal.Decimal, round func(d, x *internal.Decimal) (apd.Condition, error)) (*big.Int, error) {
+	if x.Form != apd.Finite {
+		return nil, fmt.Errorf("cannot convert %s to an integer", x)
+	}
+	var d internal.Decimal
+	_, err := round(&d, x)
+	return toInt(&d), err
 }
 
 // Floor returns the greatest integer value less than or equal to x.
 //
-// Special cases are:
-//
-//	Floor(±0) = ±0
-//	Floor(±Inf) = ±Inf
-//	Floor(NaN) = NaN
+// It is an error if x is an infinity or NaN.
 func Floor(x *internal.Decimal) (*big.Int, error) {
-	var d internal.Decimal
-	_, err := internal.BaseContext.Floor(&d, x)
-	_, _ = internal.BaseContext.Quantize(&d, &d, 0)
-	return toInt(&d), err
+	// apd truncates towards zero and then subtracts one, so an argument with
+	// a fraction needs a context which will not round that step away.
+	return roundToInt(x, internal.ExactContext.Floor)
 }
 
 // Ceil returns the least integer value greater than or equal to x.
 //
-// Special cases are:
-//
-//	Ceil(±0) = ±0
-//	Ceil(±Inf) = ±Inf
-//	Ceil(NaN) = NaN
+// It is an error if x is an infinity or NaN.
 func Ceil(x *internal.Decimal) (*big.Int, error) {
-	var d internal.Decimal
-	_, err := internal.BaseContext.Ceil(&d, x)
-	_, _ = internal.BaseContext.Quantize(&d, &d, 0)
-	return toInt(&d), err
+	// See the comment in [Floor]; Ceil adds one rather than subtracting it.
+	return roundToInt(x, internal.ExactContext.Ceil)
 }
 
 var roundTruncContext = roundContext(apd.RoundDown)
 
 // Trunc returns the integer value of x.
 //
-// Special cases are:
-//
-//	Trunc(±0) = ±0
-//	Trunc(±Inf) = ±Inf
-//	Trunc(NaN) = NaN
+// It is an error if x is an infinity or NaN.
 func Trunc(x *internal.Decimal) (*big.Int, error) {
-	var d internal.Decimal
-	_, err := roundTruncContext.RoundToIntegralExact(&d, x)
-	return toInt(&d), err
+	return roundToInt(x, roundTruncContext.RoundToIntegralExact)
 }
 
 var roundUpContext = roundContext(apd.RoundHalfUp)
 
 // Round returns the nearest integer, rounding half away from zero.
 //
-// Special cases are:
-//
-//	Round(±0) = ±0
-//	Round(±Inf) = ±Inf
-//	Round(NaN) = NaN
+// It is an error if x is an infinity or NaN.
 func Round(x *internal.Decimal) (*big.Int, error) {
-	var d internal.Decimal
-	_, err := roundUpContext.RoundToIntegralExact(&d, x)
-	return toInt(&d), err
+	return roundToInt(x, roundUpContext.RoundToIntegralExact)
 }
 
 var roundEvenContext = roundContext(apd.RoundHalfEven)
 
 // RoundToEven returns the nearest integer, rounding ties to even.
 //
-// Special cases are:
-//
-//	RoundToEven(±0) = ±0
-//	RoundToEven(±Inf) = ±Inf
-//	RoundToEven(NaN) = NaN
+// It is an error if x is an infinity or NaN.
 func RoundToEven(x *internal.Decimal) (*big.Int, error) {
-	var d internal.Decimal
-	_, err := roundEvenContext.RoundToIntegralExact(&d, x)
-	return toInt(&d), err
+	return roundToInt(x, roundEvenContext.RoundToIntegralExact)
 }
 
 // MultipleOf reports whether x is a multiple of y.
-func MultipleOf(x, y *internal.Decimal) (bool, error) {
+func MultipleOf(x, y *internal.Decimal) (pkg.Validator, error) {
+	if y.IsZero() {
+		// Divide rather than take the remainder, which apd reports as an
+		// invalid operation, to tell a division by zero from 0 / 0.
+		var d apd.Decimal
+		_, err := internal.BaseContext.Quo(&d, x, y)
+		return false, err
+	}
+	// A quotient would be rounded to the context's precision, so that a
+	// wide non-multiple could come back whole; the remainder is exact.
 	var d apd.Decimal
-
-	// TODO: It would be preferable to use internal.BaseContext.Rem here, and directly
-	//       check the result for 0. However, this currently fails with "division impossible".
-	//       Fix this when https://github.com/cockroachdb/apd/issues/134 is resolved.
-	_, err := internal.BaseContext.Quo(&d, x, y)
+	_, err := internal.ExactContext.Rem(&d, x, y)
 	if err != nil {
 		return false, err
 	}
-	var frac apd.Decimal
-	d.Modf(nil, &frac)
-	return frac.IsZero(), nil
+	return d.IsZero(), nil
 }

@@ -16,6 +16,8 @@ package subsume
 
 // TODO: structural subsumption has not yet been implemented.
 
+//lint:file-ignore U1000 see the TODO above
+
 import "cuelang.org/go/internal/core/adt"
 
 func (s *subsumer) subsumes(gt, lt adt.Conjunct) bool {
@@ -164,6 +166,11 @@ func (s *subsumer) structural(a, b adt.Conjunct) bool {
 			if len(x.Args) != len(y.Args) {
 				return false
 			}
+			for i := range x.Args {
+				if callArgLabel(x, i) != callArgLabel(y, i) {
+					return false
+				}
+			}
 			for i, arg := range x.Args {
 				if !s.conjunct(s.c(a.Env, arg), s.c(b.Env, y.Args[i])) {
 					return false
@@ -173,6 +180,13 @@ func (s *subsumer) structural(a, b adt.Conjunct) bool {
 		}
 	}
 	return false
+}
+
+func callArgLabel(x *adt.CallExpr, i int) adt.Feature {
+	if i < len(x.ArgLabels) {
+		return x.ArgLabels[i]
+	}
+	return adt.InvalidLabel
 }
 
 func (s *subsumer) structLit(

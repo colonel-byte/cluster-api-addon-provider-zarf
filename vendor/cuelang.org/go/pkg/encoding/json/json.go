@@ -16,13 +16,16 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Originally generated with: go run qgo.go -exclude=Compact,Indent,arshal$ extract encoding/json
-
+//cue:pure
 package json
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"cuelang.org/go/internal/pkg"
+)
 
 // Valid reports whether data is a valid JSON encoding.
-func Valid(data []byte) bool {
+func Valid(data []byte) pkg.Validator {
 	return json.Valid(data)
 }

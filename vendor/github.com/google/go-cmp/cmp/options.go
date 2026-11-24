@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/google/go-cmp/cmp/internal/function"
 )
@@ -156,7 +157,7 @@ func (f pathFilter) String() string {
 //
 // The option passed in may be an [Ignore], [Transformer], [Comparer], [Options], or
 // a previously filtered [Option].
-func FilterValues(f interface{}, opt Option) Option {
+func FilterValues(f any, opt Option) Option {
 	v := reflect.ValueOf(f)
 	if !function.IsType(v.Type(), function.ValueFilter) || v.IsNil() {
 		panic(fmt.Sprintf("invalid values filter function: %T", f))
@@ -262,7 +263,10 @@ func (validator) apply(s *state, vx, vy reflect.Value) {
 // identRx represents a valid identifier according to the Go specification.
 const identRx = `[_\p{L}][_\p{L}\p{N}]*`
 
-var identsRx = regexp.MustCompile(`^` + identRx + `(\.` + identRx + `)*$`)
+// identsRx is compiled lazily, as compiling it at init is relatively expensive.
+var identsRx = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile(`^` + identRx + `(\.` + identRx + `)*$`)
+})
 
 // Transformer returns an [Option] that applies a transformation function that
 // converts values of a certain type into that of another.
@@ -285,17 +289,17 @@ var identsRx = regexp.MustCompile(`^` + identRx + `(\.` + identRx + `)*$`)
 // transformation [PathStep] (and eventually shown in the [Diff] output).
 // The name must be a valid identifier or qualified identifier in Go syntax.
 // If empty, an arbitrary name is used.
-func Transformer(name string, f interface{}) Option {
+func Transformer(name string, f any) Option {
 	v := reflect.ValueOf(f)
 	if !function.IsType(v.Type(), function.Transformer) || v.IsNil() {
 		panic(fmt.Sprintf("invalid transformer function: %T", f))
 	}
 	if name == "" {
 		name = function.NameOf(v)
-		if !identsRx.MatchString(name) {
+		if !identsRx().MatchString(name) {
 			name = "λ" // Lambda-symbol as placeholder name
 		}
-	} else if !identsRx.MatchString(name) {
+	} else if !identsRx().MatchString(name) {
 		panic(fmt.Sprintf("invalid name: %q", name))
 	}
 	tr := &transformer{name: name, fnc: reflect.ValueOf(f)}
@@ -352,7 +356,7 @@ func (tr transformer) String() string {
 //   - Symmetric: equal(x, y) == equal(y, x)
 //   - Deterministic: equal(x, y) == equal(x, y)
 //   - Pure: equal(x, y) does not modify x or y
-func Comparer(f interface{}) Option {
+func Comparer(f any) Option {
 	v := reflect.ValueOf(f)
 	if !function.IsType(v.Type(), function.Equal) || v.IsNil() {
 		panic(fmt.Sprintf("invalid comparer function: %T", f))
@@ -427,7 +431,7 @@ func (exporter) filter(_ *state, _ reflect.Type, _, _ reflect.Value) applicableO
 // unexported fields of the specified struct types.
 //
 // See [Exporter] for the proper use of this option.
-func AllowUnexported(types ...interface{}) Option {
+func AllowUnexported(types ...any) Option {
 	m := make(map[reflect.Type]bool)
 	for _, typ := range types {
 		t := reflect.TypeOf(typ)

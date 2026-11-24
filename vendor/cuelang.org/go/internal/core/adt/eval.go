@@ -41,14 +41,6 @@ func (c *OpContext) Stats() *stats.Counts {
 	return &c.stats
 }
 
-// TODO: Note: NewContext takes essentially a cue.Value. By making this
-// type more central, we can perhaps avoid context creation.
-
-// func NewContext(r Runtime, v *Vertex) *OpContext {
-// 	e := NewUnifier(r)
-// 	return e.NewContext(v)
-// }
-
 // evaluate returns the evaluated value associated with v. It may return a
 // partial result. That is, if v was not yet unified, it may return a
 // concrete value that must be the result assuming the configuration has no
@@ -104,6 +96,9 @@ func (c *OpContext) evaluate(v *Vertex, r Resolver, state Flags) Value {
 	switch x := v.BaseValue.(type) {
 	case *Bottom:
 		if x.IsIncomplete() {
+			if state.keepIncomplete {
+				return v
+			}
 			c.AddBottom(x)
 			return nil
 		}
@@ -169,8 +164,10 @@ func (n *nodeContext) validateValue(state vertexStatus) {
 		// embedding (the comprehension), and thus does not force it either.
 		// So the resulting kind is top, not struct.
 		// As an approximation, we at least mark the node as a struct if it has
-		// any regular fields.
-		markStruct = n.kind&StructKind != 0 && !n.hasTop
+		// any regular fields, and not before its embeddings have completed:
+		// marking it early lets a reference cycle through an embedding, as in
+		// `a: {div(a, 2)}`, resolve to an empty struct.
+		markStruct = n.kind&StructKind != 0 && !n.hasTop && allNonDeferredTasksFinished(n)
 		for _, a := range n.node.Arcs {
 			// TODO(spec): we generally allow optional fields alongside embedded
 			// scalars. We probably should not. Either way this is not entirely
@@ -290,12 +287,12 @@ type nodeContext struct {
 	// TODO: also use this to communicate increasingly more concrete values.
 	notify []receiver
 
-	// sharedIDs contains all the CloseInfos that are involved in a shared node.
-	// There can be more than one if the same Vertex is shared multiple times.
-	// It is important to keep track of each instance as we need to insert each
-	// of them separately in case a Vertex is "unshared" to ensure that
+	// shared holds the conjuncts a shared node did not schedule. There can be
+	// more than one if the same Vertex is shared multiple times. It is
+	// important to keep track of each instance as we need to insert each of
+	// them separately in case a Vertex is "unshared" to ensure that
 	// closedness information is correctly computed in such cases.
-	sharedIDs []CloseInfo
+	shared []sharedConjunct
 
 	cyclicConjuncts []cyclicConjunct
 
@@ -315,6 +312,12 @@ type nodeContext struct {
 	checks []Conjunct
 
 	postChecks []envCheck // Check non-monotonic constraints, among other things.
+
+	// funcDefaultChecks holds the function literals evaluated within this
+	// node whose declared parameter defaults are checked against their
+	// constraints once the node's arcs have completed; see
+	// [Function.scheduleDefaultCheck].
+	funcDefaultChecks []funcDefaultCheck
 
 	// Disjunction handling
 	disjunctions []envDisjunct
@@ -341,16 +344,15 @@ type nodeContextState struct {
 	// node after a corresponding task has been completed.
 	toComplete bool
 
-	// trySkip, when non-nil, marks this node as a try clause body currently
-	// being finalized; a failed ?-marked reference sets *trySkip via
-	// [OpContext.markSkipTry]. See [TryClause.yield].
-	trySkip *bool
+	// tryBody, when non-nil, marks this node as a try clause body currently
+	// being finalized, which [scheduler.inTryBody] also relies on.
+	// See [TryClause.yield].
+	tryBody *tryBody
 
-	// embedClosedness tracks the strongest closedness level among vertices
-	// embedded through a spread operator. It is used to determine whether
-	// __reclose or __closeAll wrapping is needed. Higher values take
-	// precedence; use setEmbedClosedness to update.
-	embedClosedness embedClosedness
+	// embedClosedness is the strongest closing among the values embedded
+	// through a spread operator, which __reclose applies to its result.
+	// Use embedClosed to update it.
+	embedClosedness Closing
 
 	// isCompleting > 0 indicates whether a call to completeNodeTasks is in
 	// progress.
@@ -387,21 +389,24 @@ type nodeContextState struct {
 
 	isShared         bool       // set if we are currently structure sharing
 	noSharing        bool       // set if structure sharing is not allowed
-	shared           Conjunct   // the original conjunct that led to sharing
 	shareCycleType   CyclicType // keeps track of the cycle type of shared nodes
 	origBaseValue    BaseValue  // the BaseValue that structure sharing replaces
-	shareDecremented bool       // counters of sharedIDs have been decremented
+	shareDecremented bool       // the counters of n.shared have been decremented
 
-	depth           int32
+	depth int32
+	// scopeDepth is the number of ancestors of the node, set by getReqSets;
+	// see [reqSet.removedAt]. It differs from depth, which starts over at a
+	// parent whose state is gone when the node is initialized.
+	scopeDepth      int32
 	defaultMode     defaultMode    // cumulative default mode
 	origDefaultMode defaultMode    // default mode of the original disjunct
 	priority        layer.Priority // Priority corresponding to defaultMode
 	origPriority    layer.Priority // Priority of the original disjunct
 
-	// has a value filled out before the node splits into a disjunction. Aside
-	// from detecting a self-reference cycle when there is otherwise just an
-	// other error, this field is not needed. It greatly helps, however, to
-	// improve the error messages.
+	// hasFieldValue records that the node has a value of its own: a scalar,
+	// list, type, bound, or a struct literal that makes it a struct. A
+	// reference to the node from within its own conjuncts is a reference
+	// cycle until it has one; see [OpContext.evalStateCI].
 	hasFieldValue bool
 
 	// defaultAttemptInCycle indicates that a value relies on the default value
@@ -503,22 +508,23 @@ func (c *OpContext) newNodeContext(node *Vertex) *nodeContext {
 				constraintKind: TopKind,
 				defaultKind:    TopKind,
 			},
-			toFree:          n.toFree[:0],
-			arcMap:          n.arcMap[:0],
-			cyclicConjuncts: n.cyclicConjuncts[:0],
-			notify:          n.notify[:0],
-			sharedIDs:       n.sharedIDs[:0],
-			checks:          n.checks[:0],
-			postChecks:      n.postChecks[:0],
-			reqDefIDs:       n.reqDefIDs[:0],
-			replaceIDs:      n.replaceIDs[:0],
-			flatReplaceIDs:  n.flatReplaceIDs[:0],
-			conjunctInfo:    n.conjunctInfo[:0],
-			reqSets:         n.reqSets[:0],
-			disjunctions:    n.disjunctions[:0],
-			disjunctErrs:    n.disjunctErrs[:0],
-			userErrs:        n.userErrs[:0],
-			disjuncts:       n.disjuncts[:0],
+			toFree:            reuse(n.toFree),
+			arcMap:            reuse(n.arcMap),
+			cyclicConjuncts:   reuse(n.cyclicConjuncts),
+			notify:            reuse(n.notify),
+			shared:            reuse(n.shared),
+			checks:            reuse(n.checks),
+			postChecks:        reuse(n.postChecks),
+			funcDefaultChecks: reuse(n.funcDefaultChecks),
+			reqDefIDs:         reuse(n.reqDefIDs),
+			replaceIDs:        reuse(n.replaceIDs),
+			flatReplaceIDs:    reuse(n.flatReplaceIDs),
+			conjunctInfo:      reuse(n.conjunctInfo),
+			reqSets:           reuse(n.reqSets),
+			disjunctions:      reuse(n.disjunctions),
+			disjunctErrs:      reuse(n.disjunctErrs),
+			userErrs:          reuse(n.userErrs),
+			disjuncts:         reuse(n.disjuncts),
 		}
 		n.scheduler.clear()
 	} else {
@@ -547,6 +553,14 @@ func (c *OpContext) newNodeContext(node *Vertex) *nodeContext {
 	return n
 }
 
+// reuse clears the whole backing array of s and returns it empty, so that a
+// recycled [nodeContext] does not keep the previous evaluation reachable.
+func reuse[S ~[]E, E any](s S) S {
+	clear(s[:cap(s)])
+	return s[:0]
+}
+
+//lint:ignore U1000 kept for when freeing is reintroduced; see Vertex.unify
 func (n *nodeContext) free() {
 	if n.refCount--; n.refCount == 0 {
 		n.ctx.freeNodeContext(n)
@@ -578,7 +592,6 @@ func (n *nodeContext) reportConflict(v1, v2 Node, k1, k2 Kind, ids ...posInfo) {
 	err := &ConflictError{
 		baseError: baseError{
 			r:       ctx.Runtime,
-			format:  ctx.Format,
 			v:       ctx.errNode(),
 			pos:     token.NoPos,
 			altPath: ctx.makeAltPath(),
@@ -594,10 +607,12 @@ func (n *nodeContext) reportConflict(v1, v2 Node, k1, k2 Kind, ids ...posInfo) {
 	// the error is set as the BaseValue. This matches the behavior in [OpContext.NewPosf].
 	if v, ok := v1.(*Vertex); ok {
 		vcopy := *v
+		vcopy.arcMap = nil
 		v1 = &vcopy
 	}
 	if v, ok := v2.(*Vertex); ok {
 		vcopy := *v
+		vcopy.arcMap = nil
 		v2 = &vcopy
 	}
 	err.v1 = v1
@@ -631,7 +646,7 @@ func (n *nodeContext) reportFieldMismatch(p token.Pos, s *StructLit, f Feature, 
 		}
 	}
 
-	err := ctx.NewPosf(p, "cannot combine regular field %q with %v", f, scalar)
+	err := ctx.NewPosf(p, "cannot combine regular field %q with %v", f.SelectorString(ctx), scalar)
 
 	if s != nil { // important to avoid a typed nil
 		err.AddPosition(s)
@@ -764,6 +779,7 @@ func (n *nodeContext) getValidators(state vertexStatus) BaseValue {
 
 type envCheck struct {
 	env         *Environment
+	ci          CloseInfo
 	expr        Expr
 	expectError bool
 }
@@ -786,10 +802,6 @@ func (n *nodeContext) addErr(err errors.Error) {
 			Node: n.node,
 		})
 	}
-}
-
-func (n *nodeContext) insertFieldUnchecked(f Feature, mode ArcType, x Conjunct) *Vertex {
-	return n.insertArc(f, mode, x, x.CloseInfo, false)
 }
 
 func (n *nodeContext) invalidListLength(na, nb int, a, b Expr) {

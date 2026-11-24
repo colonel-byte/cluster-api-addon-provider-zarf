@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/apd/v3"
@@ -52,6 +53,19 @@ func (o *StructLit) IsFile() bool {
 	return ok
 }
 
+// hasEmbed reports whether o embeds a value or a comprehension.
+//
+// TODO(perf): precompile whether struct has embedding.
+func (o *StructLit) hasEmbed() bool {
+	for _, d := range o.Decls {
+		switch d.(type) {
+		case *Comprehension, Expr:
+			return true
+		}
+	}
+	return false
+}
+
 func (x *StructLit) Source() ast.Node { return x.Src }
 
 func (x *StructLit) evaluate(c *OpContext, state Flags) Value {
@@ -83,7 +97,7 @@ func (x *StructLit) evaluate(c *OpContext, state Flags) Value {
 	//
 	// v.completeArcs(c, state)
 
-	v.CompleteArcsOnly(c)
+	v.CompleteArcsShallow(c)
 	return v
 }
 
@@ -192,6 +206,12 @@ type ListLit struct {
 
 	// scalars, comprehensions, ...T
 	Elems []Elem
+
+	// OpenData indicates that this literal, which has no source, was created
+	// by an expression in a file that enables the OpenLists experiment, such
+	// as a builtin whose result is converted from Go. Such a list is open
+	// data, like a list literal written in that file.
+	OpenData bool
 }
 
 func (x *ListLit) Source() ast.Node {
@@ -205,7 +225,7 @@ func (x *ListLit) evaluate(c *OpContext, state Flags) Value {
 	e := c.Env(0)
 	// Pass conditions but at least set fieldSetKnown.
 	v := c.newInlineVertex(e.DerefVertex(c), nil, Conjunct{e, x, c.ci})
-	v.CompleteArcsOnly(c)
+	v.CompleteArcsShallow(c)
 
 	// TODO(evalv3): evaluating more aggressively yields some improvements, but
 	// breaks other tests. Consider using this approach, though.
@@ -262,18 +282,59 @@ type Num struct {
 func (x *Num) Source() ast.Node { return x.Src }
 func (x *Num) Kind() Kind       { return x.K }
 
+// BigInt sets z to the integer value of x and returns it, allocating a new
+// [big.Int] if z is nil. x must be of a kind which includes [IntKind].
+//
+// The coefficient alone is not the value: a decimal such as 1E+2 or 80E-1 is
+// an integer whose exponent scales its coefficient. Rounding to an integral
+// value brings the exponent to zero, and drops nothing but zeros from an
+// integer.
 func (x *Num) BigInt(z *big.Int) *big.Int {
-	if x.X.Exponent != 0 {
-		panic("cue: exponent should always be nil for integer types")
-	}
 	if z == nil {
 		z = &big.Int{}
 	}
-	z.Set(x.X.Coeff.MathBigInt())
-	if x.X.Negative {
-		z.Neg(z)
+	var d apd.Decimal
+	return z.Set(intOperand(&d, x).MathBigInt())
+}
+
+// Int64 returns the value of x as an int64, reporting whether it fits.
+// x must be of a kind which includes [IntKind].
+func (x *Num) Int64() (int64, bool) {
+	if x.X.Exponent == 0 && x.X.Coeff.IsInt64() {
+		// Fast path for the common case, avoiding a [big.Int]. A coefficient
+		// of 2^63 does not fit an int64 while its negation does, so leave
+		// that one to the general path rather than reject it here.
+		i := x.X.Coeff.Int64()
+		if x.X.Negative {
+			i = -i
+		}
+		return i, true
 	}
-	return z
+	i := x.BigInt(nil)
+	if !i.IsInt64() {
+		return 0, false
+	}
+	return i.Int64(), true
+}
+
+// Uint64 returns the value of x as a uint64, reporting whether it fits.
+// x must be of a kind which includes [IntKind].
+func (x *Num) Uint64() (uint64, bool) {
+	if x.X.Negative {
+		return 0, false
+	}
+	if x.X.Exponent == 0 {
+		// Fast path for the common case, avoiding a [big.Int].
+		if !x.X.Coeff.IsUint64() {
+			return 0, false
+		}
+		return x.X.Coeff.Uint64(), true
+	}
+	i := x.BigInt(nil)
+	if !i.IsUint64() {
+		return 0, false
+	}
+	return i.Uint64(), true
 }
 
 // String is a string value. It can be used as a Value and Expr.
@@ -300,11 +361,31 @@ func (x *Bytes) Kind() Kind       { return BytesKind }
 type ListMarker struct {
 	Src    ast.Expr
 	IsOpen bool
+
+	// NoEllipsis indicates that none of the list literals that make up this
+	// list had an ellipsis: an open list is then open only because list
+	// literals are open by default outside definitions (the OpenLists
+	// experiment). Such a list has a fixed length once finalized.
+	NoEllipsis bool
 }
 
 func (x *ListMarker) Source() ast.Node { return x.Src }
 func (x *ListMarker) Kind() Kind       { return ListKind }
 func (x *ListMarker) node()            {}
+
+// closedListMarker is shared by closed lists without an ellipsis that are
+// created outside of evaluating list literals.
+var closedListMarker = &ListMarker{}
+
+// ListMarkerAt returns the marker for a list without an ellipsis created by
+// the expression at pos, such as a builtin call. The list is open data if the
+// file at pos enables the OpenLists experiment, and closed otherwise.
+func ListMarkerAt(pos token.Pos) *ListMarker {
+	if pos.Experiment().OpenLists {
+		return &ListMarker{IsOpen: true, NoEllipsis: true}
+	}
+	return closedListMarker
+}
 
 type StructMarker struct {
 	// TODO: once we introduce open by default lists,
@@ -380,7 +461,7 @@ func (x *BoundExpr) evaluate(ctx *OpContext, state Flags) Value {
 
 	switch k := v.Kind(); k {
 	case IntKind, FloatKind, NumberKind, StringKind, BytesKind:
-	case NullKind, StructKind, ListKind:
+	case NullKind, StructKind, ListKind, BoolKind:
 		if x.Op != NotEqualOp && x.Op != EqualOp {
 			err := ctx.NewPosf(Pos(x.Expr),
 				"cannot use %s for bound %s", k, x.Op)
@@ -392,7 +473,7 @@ func (x *BoundExpr) evaluate(ctx *OpContext, state Flags) Value {
 	default:
 		mask := IntKind | FloatKind | NumberKind | StringKind | BytesKind
 		if x.Op == NotEqualOp || x.Op == EqualOp {
-			mask |= NullKind | StructKind | ListKind
+			mask |= NullKind | StructKind | ListKind | BoolKind
 		}
 		if k&mask != 0 {
 			ctx.addErrf(IncompleteError, token.NoPos, // TODO(errors): use ctx.pos()?
@@ -574,28 +655,100 @@ func (x *FieldReference) resolve(c *OpContext, state Flags) *Vertex {
 		c.errs = CombineErrors(c.src, c.errs, savedErrs)
 	}()
 
-	v := c.lookup(n, pos, x.Label, state)
-
-	return c.checkSkipTry(x.Optional, v)
+	return c.lookupRef(n, pos, x.Label, x.Optional, state)
 }
 
-func (c *OpContext) checkSkipTry(optional bool, arc *Vertex) *Vertex {
-	if arc != nil {
+// lookupRef resolves the field l of n for a reference. A failed ?-marked
+// reference may discard the enclosing try clause body instead of failing;
+// see [OpContext.retryOptionalLookup].
+func (c *OpContext) lookupRef(n *Vertex, pos token.Pos, l Feature, optional bool, flags Flags) *Vertex {
+	v := c.lookup(n, pos, l, flags)
+	if v == nil && optional {
+		v = c.retryOptionalLookup(n, pos, l, flags)
+	}
+	return v
+}
+
+// retryOptionalLookup handles a ?-marked lookup of l in base that failed. If
+// the field is absent, the enclosing try body is marked to be discarded,
+// unless the field exists in the struct the body is inserted into (see
+// [OpContext.lookupInTryTarget]).
+func (c *OpContext) retryOptionalLookup(base *Vertex, pos token.Pos, l Feature, flags Flags) *Vertex {
+	if c.errs == nil || !c.errs.IsIncomplete() {
+		return nil
+	}
+
+	savedErrs := c.errs
+	if arc := c.lookupInTryTarget(base, pos, l, flags); arc != nil {
+		c.errs = nil
 		return arc
 	}
+	c.errs = savedErrs
 
-	if optional && c.errs != nil && c.errs.IsIncomplete() {
-		c.markSkipTry()
-	}
-
+	c.markSkipTry()
 	return nil
 }
 
+// lookupInTryTarget retries a ?-marked lookup of l in base, which failed
+// during the pre-evaluation of a try body, against the struct the body will
+// be inserted into. See [TryClause.yield].
+//
+// The pre-evaluation runs in an inline vertex, so a field the body declares
+// shadows the same-named field of the enclosing struct: in
+//
+//	x: a: 1
+//	try { x: b: x.a? }
+//
+// the reference x.a resolves to the body's x, which has no a, whereas the
+// real evaluation unifies the two and finds a. To decide existence, follow
+// the path from the body root down to base in the vertex the body is inserted
+// into and look up l there. This recurses for enclosing try bodies, as that
+// vertex is itself an inline vertex for a nested body.
+//
+// Only bases reached through the body's own fields are covered. A base bound
+// by a let or for clause, or structure-shared with a rooted vertex, is not a
+// descendant of the body root, and the lookup then fails as before.
+func (c *OpContext) lookupInTryTarget(base *Vertex, pos token.Pos, l Feature, flags Flags) *Vertex {
+	root := base.tryBodyRoot()
+	if root == nil {
+		return nil
+	}
+	target := root.state.tryBody.target
+	if target == nil {
+		return nil
+	}
+
+	path, _ := relPath(base, root)
+	// The lookups below must not see the failed lookup's pending error,
+	// nor, on recursion, those of the enclosing level.
+	c.errs = nil
+	for i := len(path) - 1; i >= 0; i-- {
+		if target = c.lookup(target, pos, path[i], flags); target == nil {
+			return nil
+		}
+	}
+	if arc := c.lookup(target, pos, l, flags); arc != nil {
+		return arc
+	}
+	return c.lookupInTryTarget(target, pos, l, flags)
+}
+
+// relPath returns the labels leading from ancestor down to v, innermost
+// first, and whether v is a descendant of ancestor at all. The path is empty
+// when v is ancestor itself.
+func relPath(v, ancestor *Vertex) (path []Feature, ok bool) {
+	for ; v != ancestor; v = v.Parent {
+		if v == nil {
+			return nil, false
+		}
+		path = append(path, v.Label)
+	}
+	return path, true
+}
+
 // markSkipTry records that a ?-marked reference failed to resolve because its
-// optional field is not present. The failure is attributed to the nearest
-// enclosing try clause body by walking up the parent chain from the vertex
-// currently being evaluated until it reaches a body whose [nodeContext.trySkip]
-// is set (see [TryClause.yield]).
+// optional field is not present, so that the nearest enclosing try clause
+// body is discarded (see [Vertex.tryBodyRoot] and [TryClause.yield]).
 //
 // A single shared flag cannot distinguish which try a failed reference belongs
 // to when try bodies nest or their finalizations interleave: an inner body's
@@ -605,11 +758,8 @@ func (c *OpContext) checkSkipTry(optional bool, arc *Vertex) *Vertex {
 // affected by this interleaving, so resolving the owner by structural ancestry
 // rather than by stack order attributes the failure correctly (issue #4347).
 func (c *OpContext) markSkipTry() {
-	for v := c.vertex; v != nil; v = v.Parent {
-		if v.state != nil && v.state.trySkip != nil {
-			*v.state.trySkip = true
-			return
-		}
+	if root := c.vertex.tryBodyRoot(); root != nil {
+		root.state.tryBody.skip = true
 	}
 }
 
@@ -635,8 +785,14 @@ func (x *ValueReference) resolve(c *OpContext, state Flags) *Vertex {
 	if x.UpCount == 0 {
 		return c.vertex
 	}
-	n := c.relNode(x.UpCount - 1)
-	return n
+	// A standalone expression evaluated without a scope has no enclosing
+	// struct for self to refer to.
+	e := c.Env(x.UpCount - 1)
+	if e.DerefVertex(c) == nil {
+		c.addErrf(0, Pos(x), "self has no enclosing struct")
+		return nil
+	}
+	return c.derefNode(e)
 }
 
 // A LabelReference refers to the string or integer value of a label.
@@ -697,18 +853,6 @@ func (x *DynamicReference) Source() ast.Node {
 		return nil
 	}
 	return x.Src
-}
-
-func (x *DynamicReference) EvaluateLabel(ctx *OpContext, env *Environment) Feature {
-	env = env.up(ctx, x.UpCount)
-	frame := ctx.PushState(env, x.Src)
-	v := ctx.value(x.Label, Flags{
-		status:    partial,
-		condition: scalarKnown,
-		mode:      yield,
-	})
-	ctx.PopState(frame)
-	return ctx.Label(x, v)
 }
 
 func (x *DynamicReference) resolve(ctx *OpContext, state Flags) *Vertex {
@@ -826,8 +970,32 @@ func (x *LetReference) Source() ast.Node {
 	return x.Src
 }
 
+// ValueBinding returns the reference to an enclosing vertex which x is bound
+// to, like `self` in `let X = self`, or nil if x is bound to any other
+// expression. Such a let resolves to that vertex rather than to a let vertex.
+func (x *LetReference) ValueBinding() *ValueReference {
+	if vr, ok := x.X.(*ValueReference); ok && vr.UpCount > 0 {
+		return vr
+	}
+	return nil
+}
+
 func (x *LetReference) resolve(ctx *OpContext, state Flags) *Vertex {
 	e := ctx.Env(x.UpCount)
+
+	// A let bound to a bare value reference, like `let X = self`, denotes
+	// the identity of an enclosing vertex, not a computed value. Resolve it
+	// as ValueReference.resolve would: a pure environment lookup, which can
+	// never be incomplete. Other let expressions need the synthetic vertex
+	// below as a caching and suspension point, but evaluating a self
+	// binding there would unify the enclosing vertex into its own child.
+	// For rooted vertices structure sharing masks this; for dynamic
+	// (inline) vertices sharing is disabled and the synthetic vertex
+	// becomes a lazily populated mirror of its own parent, rebinding self
+	// to the mirror and misresolving nested references through the let.
+	if vr := x.ValueBinding(); vr != nil {
+		return ctx.derefNode(e.up(ctx, vr.UpCount-1))
+	}
 
 	// No need to Unify n, as Let references can only result from evaluating
 	// an expression within n, in which case evaluation must already have
@@ -981,9 +1149,8 @@ func (x *SelectorExpr) resolve(c *OpContext, state Flags) *Vertex {
 	if n == emptyNode {
 		return n
 	}
-	// TODO(eval): dynamic nodes should be fully evaluated here as the result
-	// will otherwise be discarded and there will be no other chance to check
-	// the struct is valid.
+	// The selected field is completed by the node reading it, see
+	// [handleDeferred]; the rest of the struct is discarded unchecked.
 
 	savedErrs := c.errs
 	c.errs = nil
@@ -992,9 +1159,7 @@ func (x *SelectorExpr) resolve(c *OpContext, state Flags) *Vertex {
 	}()
 
 	pos := x.Src.Sel.Pos()
-	result := c.lookup(n, pos, x.Sel, state)
-
-	return c.checkSkipTry(x.Optional, result)
+	return c.lookupRef(n, pos, x.Sel, x.Optional, state)
 }
 
 // IndexExpr is like a selector, but selects an index.
@@ -1030,9 +1195,8 @@ func (x *IndexExpr) resolve(ctx *OpContext, state Flags) *Vertex {
 	if n == emptyNode {
 		return n
 	}
-	// TODO(eval): dynamic nodes should be fully evaluated here as the result
-	// will otherwise be discarded and there will be no other chance to check
-	// the struct is valid.
+	// The selected field is completed by the node reading it, see
+	// [handleDeferred]; the rest of the struct is discarded unchecked.
 
 	f := ctx.Label(x.Index, i)
 
@@ -1053,9 +1217,7 @@ func (x *IndexExpr) resolve(ctx *OpContext, state Flags) *Vertex {
 	// }()
 
 	pos := x.Src.Index.Pos()
-	result := ctx.lookup(n, pos, f, state)
-
-	return ctx.checkSkipTry(x.Optional, result)
+	return ctx.lookupRef(n, pos, f, x.Optional, state)
 }
 
 // A SliceExpr represents a slice operation. (Not currently in spec.)
@@ -1120,10 +1282,18 @@ func (x *SliceExpr) evaluate(c *OpContext, state Flags) Value {
 			return c.NewErrf("invalid slice index: %d > %d", lo, hi)
 		}
 
-		n := c.newList(c.src, v.Parent)
+		// Build the result from a list literal of the elements, as a builtin
+		// does, rather than from copies of the arcs: the literal is the
+		// conjunct through which a check of the result, such as by close,
+		// finds its elements. Copied arcs carry only the evidence of the
+		// sliced list, and close would reject them as not allowed.
+		var pos token.Pos
+		if c.src != nil {
+			pos = c.src.Pos()
+		}
+		lit := &ListLit{OpenData: ListMarkerAt(pos).IsOpen}
 		for i, a := range v.Arcs[lo:hi] {
-			label, err := MakeLabel(a.Source(), int64(i), IntLabel)
-			if err != nil {
+			if _, err := MakeLabel(a.Source(), int64(i), IntLabel); err != nil {
 				c.AddBottom(&Bottom{
 					Src:  a.Source(),
 					Err:  err,
@@ -1131,19 +1301,10 @@ func (x *SliceExpr) evaluate(c *OpContext, state Flags) Value {
 				})
 				return nil
 			}
-			if v.IsDynamic {
-				// If the list is dynamic, there is no need to recompute the
-				// arcs.
-				a.Label = label
-				n.Arcs = append(n.Arcs, a)
-				continue
-			}
-			arc := *a
-			arc.Parent = n
-			arc.Label = label
-			n.Arcs = append(n.Arcs, &arc)
+			lit.Elems = append(lit.Elems, a)
 		}
-		n.status = finalized
+		n := c.newInlineVertex(v.Parent, nil, Conjunct{x: lit})
+		n.Finalize(c)
 		return n
 
 	case *Bytes:
@@ -1204,6 +1365,14 @@ func (x *Interpolation) evaluate(c *OpContext, state Flags) Value {
 			condition: scalarKnown,
 			mode:      yield,
 		})
+		// An error from a unification, such as x.blah & {}, is not
+		// recorded yet; do not let the empty string hide it.
+		if b, ok := v.(*Bottom); ok {
+			if b != c.errs {
+				c.AddBottom(b)
+			}
+			continue
+		}
 		if x.K == BytesKind {
 			sb.Write(c.ToBytes(v))
 		} else {
@@ -1326,7 +1495,7 @@ func (x *BinaryExpr) evaluate(c *OpContext, state Flags) Value {
 		if (c.inDetached == 0 && envVertex != nil && envVertex.IsDynamic) || c.inValidator > 0 {
 			v.Finalize(c)
 		} else {
-			v.CompleteArcsOnly(c)
+			v.CompleteArcsShallow(c)
 		}
 
 		return v
@@ -1406,6 +1575,992 @@ func (x *OpenExpr) evaluate(c *OpContext, state Flags) Value {
 	return c.evalState(x.X, state)
 }
 
+// A Function represents an unevaluated CUE function literal.
+type Function struct {
+	Src    *ast.Func
+	Params []FuncParam
+	Ret    Expr
+	Body   Expr
+
+	// Open marks a bodyless partial signature: the parameter list ends in
+	// "..." and may be extended by unification with other signatures. A
+	// function with an implementation body is always closed.
+	Open bool
+}
+
+// FuncParam represents a compiled function parameter.
+type FuncParam struct {
+	Src        *ast.FuncParam
+	Label      Feature
+	Local      Feature
+	Value      Expr
+	Positional bool
+
+	// Default is the parameter's declared default expression, or nil. It is
+	// compiled in the closure scope, like Value. A call may leave a parameter
+	// unbound only if it is optional or has a default; an unbound default is
+	// used as the parameter's argument, and a supplied argument makes the
+	// default irrelevant to the call.
+	Default Expr
+
+	// ArcType records the parameter's requiredness: ArcMember for a plain
+	// parameter, ArcRequired for p!, and ArcOptional for p?.
+	ArcType ArcType
+}
+
+// A FuncValue is a function closure captured in an evaluation environment.
+//
+// Types holds the function types (bodyless signatures) the value has been
+// unified with; their parameter constraints and result constraints are
+// additionally enforced on every call (see [nodeContext.scheduleFuncCall]),
+// A plain name from an attached signature supplies the contract label of a
+// matched positional slot when that slot was otherwise unnamed.
+// For a bodyless FuncValue — itself a function type — Types holds the other
+// types it has been met with.
+type FuncValue struct {
+	Src   *ast.Func
+	Fn    *Function
+	Env   *Environment
+	Types []FuncType
+
+	// args holds arguments bound by partial application, indexed by parameter;
+	// a nil expr marks an unbound parameter. When any entry is set this is a
+	// partially applied function: calling it binds the remaining parameters
+	// and, once none are unbound, evaluates the body. Each argument retains
+	// the environment it was bound in, which may differ from the environment
+	// of a later completing call.
+	args []funcArg
+
+	// born is the cycle-reference chain in effect when the closure was
+	// created. It records the calls in progress at that time, which lets
+	// [nodeContext.detectCycle] recognize a closure created by a call that
+	// is still in progress: calling it at the same call site is recursion,
+	// even though the closure has an environment of its own. Arguments are
+	// evaluated with the caller's chain (see [CycleInfo.IsFuncArg]), so a
+	// closure built by an argument is not attributed to the callee.
+	born *RefNode
+}
+
+// A funcArg is an argument bound to a function parameter by a partial
+// application, together with the environment in which it resolves.
+type funcArg struct {
+	expr Expr
+	env  *Environment
+}
+
+func (x *Function) Source() ast.Node {
+	if x.Src == nil {
+		return nil
+	}
+	return x.Src
+}
+
+func (x *Function) evaluate(c *OpContext, state Flags) Value {
+	env := c.Env(0)
+	if b := x.scheduleDefaultCheck(c, env); b != nil {
+		return b
+	}
+	return &FuncValue{
+		Src:  x.Src,
+		Fn:   x,
+		Env:  env,
+		born: c.ci.Refs,
+	}
+}
+
+// hasDefaults reports whether any parameter of x declares a default.
+func (x *Function) hasDefaults() bool {
+	for i := range x.Params {
+		if x.Params[i].Default != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// A funcDefaultCheck records a function literal whose declared parameter
+// defaults are to be checked once the enclosing vertex has completed; see
+// [Function.scheduleDefaultCheck]. holder is the vertex whose conjunct the
+// literal was evaluated for; it receives the error, so that the function
+// value itself is in error.
+type funcDefaultCheck struct {
+	fn     *Function
+	env    *Environment
+	holder *Vertex
+}
+
+// scheduleDefaultCheck arranges for the literal's declared defaults to be
+// checked against their constraints (see [Function.checkDefaults]), so that
+// an inconsistent default is reported whether or not the function is ever
+// called. The check is deferred until the enclosing vertex has completed
+// evaluating all of its arcs: a default may refer to values that are still
+// in flight, including the very field that holds the literal, and finalizing
+// such a reference would freeze it as cyclic. When the enclosing vertex has
+// already completed, nothing it holds is in flight and the check runs now,
+// making the literal itself the error.
+func (x *Function) scheduleDefaultCheck(c *OpContext, env *Environment) *Bottom {
+	if !x.hasDefaults() {
+		return nil
+	}
+	if v := env.DerefVertex(c); v != nil {
+		if n := v.state; n != nil && v.status < finalized {
+			n.funcDefaultChecks = append(n.funcDefaultChecks, funcDefaultCheck{
+				fn:     x,
+				env:    env,
+				holder: c.vertex,
+			})
+			return nil
+		}
+	}
+	return x.checkDefaults(c, env)
+}
+
+// checkDefaults checks each declared parameter default against its
+// parameter's constraint, evaluated in the closure environment, where a call
+// evaluates them too. The check runs once per literal and closure. A default
+// that is not resolvable — an incomplete value, or a cycle, as for a default
+// that calls its own function — leaves the check undone: the call that omits
+// the parameter reports the incompleteness or the cycle. A default that is
+// itself an error, or that conflicts with the constraint, is reported at the
+// default's position.
+func (x *Function) checkDefaults(c *OpContext, env *Environment) *Bottom {
+	key := funcAnchorKey{fn: x, envKey: env.key(c)}
+	if c.checkingDefaults[key] || c.funcDefaultsChecked[key] {
+		return nil
+	}
+	if c.checkingDefaults == nil {
+		c.checkingDefaults = map[funcAnchorKey]bool{}
+		c.funcDefaultsChecked = map[funcAnchorKey]bool{}
+	}
+	c.checkingDefaults[key] = true
+	defer delete(c.checkingDefaults, key)
+	c.funcDefaultsChecked[key] = true
+
+	for i := range x.Params {
+		p := &x.Params[i]
+		if p.Default == nil || p.Value == nil {
+			continue
+		}
+		if b := c.checkFuncParamDefault(env, i, p); b != nil {
+			return b
+		}
+	}
+	return nil
+}
+
+// uncheckableDefault reports whether b leaves a default check undone rather
+// than failed: an incomplete value or a cycle.
+func uncheckableDefault(b *Bottom) bool {
+	return b == nil || b.IsIncomplete() || b.Code == CycleError || b.Code == StructuralCycleError
+}
+
+// invalidDefault wraps the error b of a parameter's default as an error at
+// the default's position, retaining b's own positions.
+func (c *OpContext) invalidDefault(i int, p *FuncParam, b *Bottom) *Bottom {
+	name := funcParamName(c, i, p)
+	src := p.Default.Source()
+	var at token.Pos
+	if src != nil {
+		at = src.Pos()
+	}
+	return &Bottom{
+		Src:  src,
+		Code: b.Code,
+		Err:  errors.Wrapf(b.Err, at, "invalid default for parameter %s", name),
+	}
+}
+
+// checkFuncParamDefault unifies a parameter's default with its constraint,
+// as a call omitting the parameter would, and reports a conflict, or an
+// error in the default itself, at the default's position. Incomplete results
+// and cycles leave the check undone.
+func (c *OpContext) checkFuncParamDefault(env *Environment, i int, p *FuncParam) *Bottom {
+	savedErrs := c.errs
+	c.errs = nil
+	defer func() { c.errs = savedErrs }()
+
+	s := c.PushState(env, p.Default.Source())
+	defer c.PopState(s)
+
+	// Evaluate the default on its own first: an error in the default itself
+	// is reported as such, and an unresolvable default leaves the check
+	// undone without consulting the constraint.
+	flags := Flags{status: partial, mode: yield}
+	def := c.evalState(p.Default, flags)
+	b := bottom(def)
+	if b == nil && def == nil {
+		return nil
+	}
+	if b == nil {
+		b = c.errs
+	}
+	if b != nil {
+		if uncheckableDefault(b) {
+			return nil
+		}
+		return c.invalidDefault(i, p, b)
+	}
+	con := c.evalState(p.Value, flags)
+	if b := bottom(con); b != nil || con == nil || c.errs != nil {
+		return nil
+	}
+
+	v := c.newInlineVertex(nil, nil,
+		MakeConjunct(env, p.Default, c.ci),
+		MakeConjunct(env, p.Value, c.ci))
+	v.Finalize(c)
+
+	b = v.Bottom()
+	if b == nil {
+		b = c.errs
+	}
+	if uncheckableDefault(b) {
+		return nil
+	}
+	return c.invalidDefault(i, p, b)
+}
+
+// funcParamName names a parameter in a diagnostic: its callable label, else
+// its body-local name, else its 1-based position.
+func funcParamName(c *OpContext, i int, p *FuncParam) string {
+	switch {
+	case p.Label != InvalidLabel:
+		return p.Label.SelectorString(c)
+	case p.Local != InvalidLabel:
+		return p.Local.SelectorString(c)
+	}
+	return strconv.Itoa(i + 1)
+}
+
+// hasDefault reports whether parameter i of x has a declared default: its own,
+// or one declared by an attached signature for the parameter it matched. A
+// defaulted parameter may be left unbound by a call.
+func (x *FuncValue) hasDefault(i int) bool {
+	return FuncParamHasDefault(x.Fn, x.Types, i)
+}
+
+// FuncParamHasDefault reports whether parameter i of fn declares a default,
+// itself or through one of the signatures in types attached to it. Such a
+// parameter is omittable: a call may leave it unbound, and it is admitted
+// beyond a closed signature like an optional one.
+func FuncParamHasDefault(fn *Function, types []FuncType, i int) bool {
+	if fn.Params[i].Default != nil {
+		return true
+	}
+	for _, t := range types {
+		matches := matchFuncParamsToValue(t.Fn, fn, types)
+		for j, tp := range t.Fn.Params {
+			if tp.Default != nil && matches[j] == i {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// FuncParamArcType returns the requiredness of parameter i of fn under the
+// signatures in types attached to it: the strictest marking among fn's own
+// parameter and the parameters of types that match it. As for struct fields,
+// a plain parameter is stricter than a required one, which is stricter than
+// an optional one, so a parameter is optional only if every signature that
+// declares it marks it optional.
+func FuncParamArcType(fn *Function, types []FuncType, i int) ArcType {
+	a := fn.Params[i].ArcType
+	for _, t := range types {
+		matches := matchFuncParamsToValue(t.Fn, fn, types)
+		for j, tp := range t.Fn.Params {
+			if matches[j] == i && tp.ArcType < a {
+				a = tp.ArcType
+			}
+		}
+	}
+	return a
+}
+
+// composedParam reports whether parameter i of x is declared by every
+// function composed with x. A composed function only admits the parameters
+// all its functions declare, as a closed type admits only its own.
+func composedParam(x *FuncValue, i int) bool {
+	for _, t := range x.Types {
+		if t.Fn.Body != nil && !slices.Contains(matchFuncParamsToValue(t.Fn, x.Fn, x.Types), i) {
+			return false
+		}
+	}
+	return true
+}
+
+// funcArgBound reports whether an activation arc holds an argument. The
+// conjuncts scheduleFuncCall adds to an arc are exactly the constraint and
+// default expressions of the function's own signature and of the signatures
+// attached to it, so any other conjunct is the argument a call bound to the
+// parameter. An arc without an argument belongs to a parameter the call left
+// unbound. (The IsFuncArg mark of an argument conjunct is not used here: it
+// is inherited by the conjuncts of a call made as an argument of another.)
+func funcArgBound(a *Vertex, fn *Function, types []FuncType) bool {
+	for _, c := range a.Conjuncts {
+		if !isFuncSignatureExpr(c.x, fn, types) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFuncSignatureExpr reports whether x is a constraint or default expression
+// of fn or of one of the signatures in types.
+func isFuncSignatureExpr(x Node, fn *Function, types []FuncType) bool {
+	for i := range fn.Params {
+		p := &fn.Params[i]
+		if (p.Value != nil && x == p.Value) || (p.Default != nil && x == p.Default) {
+			return true
+		}
+	}
+	for _, t := range types {
+		for i := range t.Fn.Params {
+			p := &t.Fn.Params[i]
+			if (p.Value != nil && x == p.Value) || (p.Default != nil && x == p.Default) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (x *FuncValue) Source() ast.Node {
+	if x.Src == nil {
+		return nil
+	}
+	return x.Src
+}
+
+func (x *FuncValue) Kind() Kind { return FuncKind }
+
+// scheduleFuncCall schedules the payload of a function call once its call
+// reference has resolved to the function's anchor vertex and passed cycle
+// detection. env is the call's body environment: env.Vertex holds the
+// activation (one arc per parameter, seeded with the argument conjuncts) and
+// env.Up is the closure environment.
+//
+// The body is scheduled under env, so its parameter references resolve
+// against the activation, exactly as they resolved against the parameter
+// fields of the former template struct: the activation stands in for the one
+// struct level assumed by the compiled UpCounts. Parameter constraints and
+// the return type are compiled in the closure scope and are therefore pinned
+// to env.Up, preserving the documented scoping (e.g. `b: a` refers to an
+// outer `a`, not the sibling parameter).
+//
+// The constraint and body conjuncts carry ci, which by now includes the
+// anchor's cycle reference, so recursive calls in either the body or a
+// parameter constraint (e.g. `f: func(a: f(1)) -> int: 1`) participate in
+// structural cycle detection. The argument conjuncts, in contrast, were
+// created with the caller's CloseInfo and never inherit the anchor's cycle
+// references: an argument that calls the same function (twice(twice(2))) is
+// nesting, not recursion.
+func (n *nodeContext) scheduleFuncCall(ref *FuncCallRef, env *Environment, ci CloseInfo) {
+	fn := ref.fn
+	if act := env.Vertex; act != nil {
+		// The activation arcs are built in parameter order (see
+		// [FuncValue.call]), so walk them in lockstep with the parameters
+		// instead of rescanning the arc list for every parameter.
+		k := 0
+		for i, p := range fn.Params {
+			if p.Value == nil && p.Default == nil {
+				continue
+			}
+			local := p.Local
+			if local == InvalidLabel {
+				// Anonymous parameters bind their argument to a synthetic
+				// activation arc; see [anonParamLabel].
+				local = anonParamLabel(n.ctx, i)
+			}
+			for k < len(act.Arcs) && act.Arcs[k].Label != local {
+				k++
+			}
+			if k < len(act.Arcs) {
+				a := act.Arcs[k]
+				// A parameter the call left unbound takes its declared
+				// default as the argument. Like the constraint, the default
+				// is compiled in the closure scope and carries the anchored
+				// ci, so a default that calls the function itself is a
+				// structural cycle rather than unbounded recursion. A bound
+				// parameter never sees its default.
+				if p.Default != nil && !funcArgBound(a, fn, ref.types) {
+					a.addConjunctUnchecked(MakeConjunct(env.Up, p.Default, ci))
+				}
+				if p.Value != nil {
+					a.addConjunctUnchecked(MakeConjunct(env.Up, p.Value, ci))
+				}
+			}
+		}
+	}
+	// The function types the called value was unified with contribute their
+	// parameter constraints and result constraints as well. A type parameter
+	// constrains the value parameter it statically matched: positional slots
+	// align by ordinal and name-only parameters match by label (see
+	// [checkFuncTightening]). Like the value's own constraints,
+	// the type's constraints are compiled in the type's closure scope and are
+	// therefore pinned to the type's environment, with the same anchored ci.
+	//
+	// A type's parameters do not follow the activation's arc order, so for
+	// them the arcs are indexed by label first.
+	var argArcs map[Feature]*Vertex
+	if act := env.Vertex; act != nil && len(ref.types) > 0 {
+		argArcs = make(map[Feature]*Vertex, len(act.Arcs))
+		for _, a := range act.Arcs {
+			argArcs[a.Label] = a
+		}
+	}
+	for _, t := range ref.types {
+		if argArcs != nil {
+			matches := matchFuncParamsToValue(t.Fn, fn, ref.types)
+			for i, tp := range t.Fn.Params {
+				if tp.Value == nil && tp.Default == nil {
+					continue
+				}
+				vi := matches[i]
+				if vi < 0 {
+					// An unmatched optional type parameter has no value
+					// parameter, so there is no activation arc to constrain.
+					continue
+				}
+				vp := fn.Params[vi]
+				local := vp.Local
+				if local == InvalidLabel {
+					// Anonymous value parameters bind their argument to a
+					// synthetic activation arc; see [anonParamLabel].
+					local = anonParamLabel(n.ctx, vi)
+				}
+				if a := argArcs[local]; a != nil {
+					// A default declared by the type carries over to an
+					// unbound parameter; when the value declares one too,
+					// the two unify in the arc.
+					if tp.Default != nil && !funcArgBound(a, fn, ref.types) {
+						a.addConjunctUnchecked(MakeConjunct(t.Env, tp.Default, ci))
+					}
+					if tp.Value != nil {
+						a.addConjunctUnchecked(MakeConjunct(t.Env, tp.Value, ci))
+					}
+				}
+			}
+		}
+		if t.Fn.Ret != nil {
+			n.scheduleConjunct(MakeConjunct(t.Env, t.Fn.Ret, ci), ci)
+		}
+	}
+	// A signature with an implementation was composed with the called value:
+	// its body is evaluated as well and unifies with the result. It gets its
+	// own activation, binding its own local names, whose arcs hold the same
+	// conjuncts as the arcs of the parameters they matched, so that all
+	// implementations see the same arguments, constraints, and defaults.
+	for _, t := range ref.types {
+		if t.Fn.Body != nil {
+			n.scheduleComposedBody(t, fn, ref.types, argArcs, ci)
+		}
+	}
+	n.scheduleConjunct(MakeConjunct(env, fn.Body, ci), ci)
+	if fn.Ret != nil {
+		n.scheduleConjunct(MakeConjunct(env.Up, fn.Ret, ci), ci)
+	}
+}
+
+// scheduleComposedBody schedules the body of t, a function composed with the
+// called function fn, in an activation derived from argArcs, the activation
+// arcs of fn indexed by label. A parameter of t that matched no parameter of
+// fn is omittable (see [mergeFuncValues]) and is never bound by a call: it
+// takes its default, if any, or is absent.
+func (n *nodeContext) scheduleComposedBody(t FuncType, fn *Function, types []FuncType, argArcs map[Feature]*Vertex, ci CloseInfo) {
+	act := n.ctx.newInlineVertex(nil, nil)
+	matches := matchFuncParamsToValue(t.Fn, fn, types)
+	for i, p := range t.Fn.Params {
+		local := p.Local
+		if local == InvalidLabel {
+			local = anonParamLabel(n.ctx, i)
+		}
+		arc := &Vertex{
+			Parent:    act,
+			Label:     local,
+			ArcType:   ArcMember,
+			IsDynamic: true,
+		}
+		var src *Vertex
+		if vi := matches[i]; vi >= 0 {
+			vlocal := fn.Params[vi].Local
+			if vlocal == InvalidLabel {
+				vlocal = anonParamLabel(n.ctx, vi)
+			}
+			src = argArcs[vlocal]
+		}
+		switch {
+		case src != nil:
+			arc.ArcType = src.ArcType
+			arc.Conjuncts = slices.Clone(src.Conjuncts)
+		case p.Default != nil:
+			arc.addConjunctUnchecked(MakeConjunct(t.Env, p.Default, ci))
+			if p.Value != nil {
+				arc.addConjunctUnchecked(MakeConjunct(t.Env, p.Value, ci))
+			}
+		case p.Value != nil:
+			arc.ArcType = ArcOptional
+			arc.addConjunctUnchecked(MakeConjunct(t.Env, p.Value, ci))
+		default:
+			continue
+		}
+		act.Arcs = append(act.Arcs, arc)
+	}
+	env := &Environment{Up: t.Env, Vertex: act}
+	n.scheduleConjunct(MakeConjunct(env, t.Fn.Body, ci), ci)
+}
+
+// funcAnchorKey identifies the cached anchor vertex for a function literal
+// captured in a particular closure environment.
+type funcAnchorKey struct {
+	fn *Function
+	envKey
+}
+
+// funcCallRefKey identifies the cached call references for a function call
+// site reaching a particular anchor vertex, which stands for a function
+// literal in a closure environment (see [OpContext.funcAnchor]).
+type funcCallRefKey struct {
+	call   *CallExpr
+	anchor *Vertex
+}
+
+// funcCallResultKey identifies the memo bucket of a call site: the AST call
+// node and the caller environment in which the call's arguments resolve. The
+// callee is a value resolved at each call rather than part of the key; the
+// entries within a bucket record the callee that produced them and are
+// matched on that identity. See [OpContext.funcCallResults].
+type funcCallResultKey struct {
+	call *CallExpr
+	envKey
+}
+
+// A funcCallResult memoizes the finalized result of a completed function
+// call together with the identity of the callee that produced it. The callee
+// is matched much as [equalTerminal] compares function values: the function
+// literal, its closure environment (as an [envKey]), its recorded type
+// constraints, and the arguments bound by partial application.
+type funcCallResult struct {
+	fn     *Function
+	env    envKey
+	types  []FuncType
+	args   []funcArg
+	result *Vertex
+}
+
+// matches reports whether a memoized result was produced by the given
+// callee, whose closure environment is identified by env.
+func (r *funcCallResult) matches(x *FuncValue, env envKey) bool {
+	return r.fn == x.Fn &&
+		r.env == env &&
+		equalFuncTypes(r.types, x.Types) &&
+		equalFuncArgs(r.args, x.args)
+}
+
+// A FuncCallRef is a stable reference to a function's anchor vertex, carrying
+// the function whose call it schedules. Unlike [NodeLink] it is a pure
+// [Resolver] (not also a [Value]), so it is scheduled through handleResolver
+// and routes through [nodeContext.detectCycle]; the payload of the call is
+// then dispatched by [nodeContext.scheduleFuncCall]. Reusing the same
+// FuncCallRef across (recursive) calls is what lets the detector recognize
+// re-entry as a structural cycle, while distinct call sites reaching the same
+// anchor are treated as ordinary nesting.
+type FuncCallRef struct {
+	src    ast.Node
+	fn     *Function
+	types  []FuncType // extra signature constraints of the called value
+	target *Vertex
+
+	// born is the creation chain of the called closure; see [FuncValue.born].
+	born *RefNode
+}
+
+func (x *FuncCallRef) Source() ast.Node { return x.src }
+
+// Func returns the function whose call this reference schedules. It allows
+// traversals outside this package, such as feature marking in export, to
+// descend into the function's expressions.
+func (x *FuncCallRef) Func() *Function { return x.fn }
+
+// Types returns the extra signature constraints of the called value. Their
+// parameter and result constraints are scheduled alongside the function's
+// own (see [nodeContext.scheduleFuncCall]), so, like the function returned
+// by [FuncCallRef.Func], their expressions are reachable through the call
+// and must be visited by traversals outside this package.
+func (x *FuncCallRef) Types() []FuncType { return x.types }
+
+// calledAt reports whether the in-progress reference r, recorded in the
+// cycle-reference chain, is a call of the function literal of x at the call
+// site of x, other than through x itself.
+//
+// Calls reach the structural cycle detector through an anchor per function
+// literal and closure environment (see [OpContext.funcAnchor]), so a closure
+// with an environment of its own gets an anchor of its own. Every call
+// creates a fresh environment, though, so a call that creates a closure of
+// its own literal and calls it at the same call site — as a fixed-point
+// combinator does on every unrolling — would never re-reach an anchor. Such
+// a closure is recognized instead by its creation chain (x.born) containing
+// r: it was created while r was in progress, so calling it at the call site
+// of r is recursion, and a structural cycle like any other. See
+// [nodeContext.detectCycle].
+//
+// A closure of the same literal created before r started, such as one of a
+// nested composition comp(comp(f, g), h), is ordinary nesting.
+func (x *FuncCallRef) calledAt(r *RefNode) bool {
+	y, ok := r.Ref.(*FuncCallRef)
+	return ok && y != x && y.fn == x.fn && y.src == x.src
+}
+
+func (x *FuncCallRef) resolve(c *OpContext, state Flags) *Vertex {
+	return x.target
+}
+
+// unresolvedDisjunction returns the disjunction underlying v if v does not
+// resolve to a single value, following the same traversal as
+// [OpContext.getDefault]. It returns nil if v resolves (getDefault succeeds)
+// or is not a disjunction.
+func unresolvedDisjunction(v Value) *Disjunction {
+	_, d := resolveDefault(v)
+	return d
+}
+
+func (x *FuncValue) call(c *OpContext, call *CallExpr, state Flags) Value {
+	if x.Fn == nil || x.Fn.Body == nil {
+		c.AddErrf("cannot call function without implementation")
+		return nil
+	}
+
+	callEnv := c.Env(0)
+	// site is the vertex holding the call, at whose path errors arising in
+	// the call are reported (see [OpContext.atCallSite]).
+	site := c.vertex
+
+	// A call's result is fully determined by its call site, the caller
+	// environment in which its arguments resolve, and the callee. If this
+	// combination has already produced a finalized, error-free result, reuse
+	// it: a parameter referenced N times, or a call nested as an argument and
+	// re-scheduled once per use of the enclosing parameter, would otherwise
+	// rebuild the activation and re-finalize the body every time, making
+	// deeply nested calls exponential in their nesting depth. Only completed
+	// error-free results are memoized (see the write below), so a call
+	// re-entered through recursion — which the structural cycle detector must
+	// observe on the shared anchor — has no entry and is never
+	// short-circuited here.
+	resultKey := funcCallResultKey{call: call, envKey: callEnv.key(c)}
+	calleeEnv := x.Env.key(c)
+	results := c.funcCallResults[resultKey]
+	for i := range results {
+		if r := &results[i]; r.matches(x, calleeEnv) {
+			return r.result
+		}
+	}
+
+	// Phase 1: bind arguments to parameters. bindings[i] is the argument bound
+	// to parameter i — by an earlier partial application (x.args) or by this
+	// call — with the environment it resolves in; a nil expr marks an unbound
+	// parameter. Labeled arguments resolve through the value's declared
+	// contract labels, including one supplied by an attached signature for an
+	// otherwise unnamed positional slot.
+	bindings := make([]funcArg, len(x.Fn.Params))
+	copy(bindings, x.args)
+	used := make([]bool, len(call.Args))
+	byLabel, _ := funcParamLabels(x.Fn, x.Types)
+
+	nextPos := 0
+	for i, p := range x.Fn.Params {
+		if bindings[i].expr != nil {
+			continue // already bound by an earlier partial application
+		}
+		var arg Expr
+
+		if p.Positional {
+			for nextPos < len(call.Args) && nextPos < len(call.ArgLabels) && call.ArgLabels[nextPos] != InvalidLabel {
+				nextPos++
+			}
+			if nextPos < len(call.Args) && (nextPos >= len(call.ArgLabels) || call.ArgLabels[nextPos] == InvalidLabel) {
+				arg = call.Args[nextPos]
+				used[nextPos] = true
+				nextPos++
+			}
+		}
+
+		var boundLabel Feature
+		for j, label := range call.ArgLabels {
+			param, ok := byLabel[label]
+			if !ok || param != i {
+				continue
+			}
+			switch {
+			case boundLabel != InvalidLabel:
+				c.AddErrf("duplicate argument %s", label.SelectorString(c))
+				return nil
+			case arg != nil:
+				c.AddErrf("argument %s provided by position and label", label.SelectorString(c))
+				return nil
+			}
+			arg = call.Args[j]
+			used[j] = true
+			boundLabel = label
+		}
+
+		if arg != nil && !composedParam(x, i) {
+			// A function composed with x declares no such parameter, so no
+			// call can bind it, whichever of the functions is the head.
+			if boundLabel != InvalidLabel {
+				c.AddErrf("unknown argument %s", boundLabel.SelectorString(c))
+			} else {
+				c.AddErrf("too many positional arguments in function call")
+			}
+			return nil
+		}
+		if arg != nil {
+			if b := c.checkEntitlement(x, i, arg, callEnv); b != nil {
+				c.AddBottom(b)
+				return nil
+			}
+			bindings[i] = funcArg{expr: arg, env: callEnv}
+		}
+	}
+
+	// reportUnusedArg reports an argument that bound no parameter. A missing
+	// required or non-defaulted argument (checked below in phase 2) takes
+	// precedence for a completing call, so this runs after that check there,
+	// but before returning a partial application.
+	reportUnusedArg := func() bool {
+		for i := range call.Args {
+			if !used[i] {
+				if i < len(call.ArgLabels) && call.ArgLabels[i] != InvalidLabel {
+					c.AddErrf("unknown argument %s", call.ArgLabels[i].SelectorString(c))
+				} else {
+					c.AddErrf("too many positional arguments in function call")
+				}
+				return true
+			}
+		}
+		return false
+	}
+
+	// A partial application binds the given arguments and yields a function
+	// over the remaining parameters, rather than evaluating the body. The
+	// bound arguments are carried on the returned value and combined with a
+	// later call's arguments when the function is called to completion.
+	if call.Partial {
+		if reportUnusedArg() {
+			return nil
+		}
+		return &FuncValue{Src: x.Src, Fn: x.Fn, Env: x.Env, Types: x.Types, args: bindings, born: x.born}
+	}
+
+	// Phase 2: complete the call.
+	//
+	// anchor is the stable vertex representing this function literal. Every
+	// call re-references it, so the regular structural cycle detector
+	// observes recursive re-entry the same way it does for the hand-written
+	// `(f & {...}).out` pattern. It carries no conjuncts: the payload of a
+	// call travels on the reference and is dispatched by scheduleFuncCall.
+	//
+	// ref is the reference used to reach the anchor. It is stable per call
+	// site (this *CallExpr), not merely per function: the detector treats a
+	// re-occurring arc reached by the SAME reference (r.Ref == x) as a cycle,
+	// but a different reference (r.Ref != x) as ordinary nesting. Distinct
+	// call sites therefore nest freely (e.g. twice(twice(2))), while a single
+	// call site re-entered through recursion is flagged as a structural
+	// cycle. This mirrors `(f & {n: (f & {...}).out}).out`, where the two `f`
+	// references are distinct AST nodes.
+	anchor := c.funcAnchor(x.Fn, calleeEnv)
+	ref := c.funcCallRef(call, anchor, x)
+
+	arcs := make([]*Vertex, 0, len(x.Fn.Params))
+	for i, p := range x.Fn.Params {
+		arg := bindings[i].expr
+		argEnv := bindings[i].env
+
+		// A parameter may be left unbound only if it is optional or has a
+		// declared default; a required parameter (p!) is the name-only
+		// counterpart of a plain one and takes a default the same way.
+		// Requiredness combines across the attached signatures as for struct
+		// fields, so a parameter is optional only if every signature marks it
+		// so. Whatever its constraint evaluates to plays no part in this
+		// decision: a default reached through a reference is an ordinary
+		// part of the constraint. An unbound default is added to the
+		// parameter's arc by scheduleFuncCall.
+		arcType := FuncParamArcType(x.Fn, x.Types, i)
+		if arg == nil && arcType != ArcOptional && !x.hasDefault(i) {
+			switch {
+			case arcType == ArcRequired:
+				c.AddErrf("missing required argument %s", p.Label.SelectorString(c))
+			case p.Label != InvalidLabel:
+				c.AddErrf("missing argument %s", p.Label.SelectorString(c))
+			default:
+				c.AddErrf("not enough arguments in function call")
+			}
+			return nil
+		}
+		local := p.Local
+		if local == InvalidLabel {
+			// Anonymous positional parameters are not referenceable from the
+			// function body, but their arguments are still checked against
+			// the parameter constraint and any type constraints matched to
+			// the parameter: the argument is bound to a synthetic activation
+			// arc that scheduleFuncCall addresses by the parameter's index.
+			local = anonParamLabel(c, i)
+		}
+		if arg == nil && p.Value == nil && !x.hasDefault(i) {
+			// Nothing binds this parameter: no argument was provided and
+			// there is neither a constraint nor a default.
+			continue
+		}
+		if arg == nil {
+			// A default supplies the argument and is checked like one.
+			if b := c.checkDefaultEntitlement(x, i); b != nil {
+				c.AddBottom(b)
+				return nil
+			}
+		}
+
+		// The activation carries one arc per parameter. The argument is
+		// evaluated in the environment it was bound in — the caller's, or an
+		// earlier partial application's — mirroring the original
+		// `(f & {param: arg})` binding. The parameter constraint is appended
+		// by scheduleFuncCall with the anchored CloseInfo once the call
+		// reference passes cycle detection.
+		arc := &Vertex{
+			Label:     local,
+			ArcType:   ArcMember,
+			IsDynamic: true,
+		}
+		if arg == nil && p.ArcType == ArcOptional && !x.hasDefault(i) {
+			// An omitted optional parameter is an optional field of the
+			// activation, holding only its constraint: a reference to it
+			// from the body reports the error a reference to an absent
+			// optional field reports, rather than seeing the bare
+			// constraint.
+			arc.ArcType = ArcOptional
+		}
+		if arg != nil {
+			// IsFuncArg pins the caller's cycle-reference chain to the
+			// argument, so that its (lazy) evaluation never adopts the
+			// callee body's chain; see [CycleInfo.IsFuncArg].
+			ci := c.ci
+			ci.IsFuncArg = true
+			arc.Conjuncts = ConjunctGroup{MakeConjunct(argEnv, arg, ci)}
+		}
+		arcs = append(arcs, arc)
+	}
+
+	if reportUnusedArg() {
+		return nil
+	}
+
+	// Assemble the per-call activation and evaluate the call as a fresh
+	// inline vertex holding only the call reference. The vertex is
+	// non-rooted, so a recursive call that re-reaches the anchor through ref
+	// while this call is in progress is flagged as a structural cycle. The
+	// reference's payload — body, return type, and parameter constraints —
+	// is dispatched by scheduleFuncCall once the reference passes cycle
+	// detection. The result is the vertex itself: there is no result arc to
+	// select, and parameters live on the separate activation, so unifying
+	// two call results does not unify their arguments.
+	// The activation is created through newInlineVertex so that it is
+	// registered for scope-based reclamation: deferred body tasks may touch
+	// it after this function returns, so its node context can only be
+	// released once the enclosing evaluation completes.
+	activation := c.newInlineVertex(nil, nil)
+	activation.Arcs = arcs
+	for _, a := range arcs {
+		a.Parent = activation
+	}
+	bodyEnv := &Environment{Up: x.Env, Vertex: activation}
+	result := c.newInlineVertex(anchor, nil, MakeConjunct(bodyEnv, ref, c.ci))
+	result.Finalize(c)
+	if b := result.Bottom(); b != nil && !b.IsIncomplete() {
+		return c.atCallSite(b, site, activation, result)
+	}
+
+	// Force validation of parameters the body did not reference: an argument
+	// conflicting with its constraint must fail the call even if the result
+	// does not depend on it. An arc that finalizes to an incomplete error —
+	// typically an argument referencing a field that is not yet defined —
+	// makes the call itself incomplete, so that evaluation can retry once
+	// more information arrives, exactly as it would for len(y.q). Note that
+	// an unprovided optional or defaulted parameter does not qualify: its arc
+	// holds only the (non-bottom) constraint.
+	for _, a := range arcs {
+		a.Finalize(c)
+		if b := a.Bottom(); b != nil {
+			return c.atCallSite(b, site, activation, result)
+		}
+	}
+
+	// Memoize only a finalized, error-free result. An incomplete result may
+	// resolve differently once more information is available on a later
+	// evaluation, so it must not be cached (an incomplete argument arc
+	// already returned above); a recursion cycle produces a (non-incomplete)
+	// bottom above and likewise leaves no entry, which is what keeps
+	// memoization from short-circuiting cycle detection.
+	if result.Bottom() == nil {
+		if c.funcCallResults == nil {
+			c.funcCallResults = map[funcCallResultKey][]funcCallResult{}
+		}
+		c.funcCallResults[resultKey] = append(c.funcCallResults[resultKey],
+			funcCallResult{fn: x.Fn, env: calleeEnv, types: x.Types, args: x.args, result: result})
+	}
+
+	return result
+}
+
+// funcAnchor returns the stable anchor vertex for the given function literal
+// captured in the environment identified by env. The anchor deliberately
+// carries no conjuncts — the payload of a call travels on the FuncCallRef and
+// is dispatched by scheduleFuncCall — but creating it once per (literal,
+// closure) and reusing it across (recursive) calls lets the structural cycle
+// detector observe re-entry, because every call reaches the same arc.
+func (c *OpContext) funcAnchor(fn *Function, env envKey) *Vertex {
+	if c.funcAnchors == nil {
+		c.funcAnchors = map[funcAnchorKey]*Vertex{}
+	}
+	key := funcAnchorKey{fn: fn, envKey: env}
+	if v := c.funcAnchors[key]; v != nil {
+		return v
+	}
+
+	v := &Vertex{
+		Parent:    env.vertex,
+		ArcType:   ArcMember,
+		IsDynamic: true,
+	}
+	c.funcAnchors[key] = v
+	return v
+}
+
+// funcCallRef returns the stable reference used to reach the anchor vertex
+// from a particular call site. It is cached per (call site, anchor) so that
+// re-entry through the SAME call site (recursion) is detected as a cycle
+// (r.Ref == x), while distinct call sites reaching the same anchor (nesting,
+// e.g. twice(twice(2))) are treated as ordinary structure (r.Ref != x).
+//
+// The reference also carries the signature constraints of the called value,
+// dispatched together with the call payload by scheduleFuncCall. A call site
+// may in principle reach FuncValues that share a literal and closure but
+// were tightened by different types, so refs are matched on those
+// constraints as well; refs for the same (call site, anchor) are kept in a
+// small list. Recursion through a consistently tightened value reuses one
+// ref, preserving cycle detection.
+func (c *OpContext) funcCallRef(call *CallExpr, anchor *Vertex, x *FuncValue) *FuncCallRef {
+	if c.funcCallRefs == nil {
+		c.funcCallRefs = map[funcCallRefKey][]*FuncCallRef{}
+	}
+	key := funcCallRefKey{call: call, anchor: anchor}
+	for _, r := range c.funcCallRefs[key] {
+		if slices.Equal(r.types, x.Types) {
+			return r
+		}
+	}
+	r := &FuncCallRef{src: call.Source(), fn: x.Fn, types: x.Types, target: anchor, born: x.born}
+	c.funcCallRefs[key] = append(c.funcCallRefs[key], r)
+	return r
+}
+
 func (c *OpContext) validate(env *Environment, src ast.Node, x Expr, op Op, flags Flags) (r Value) {
 	state := flags.status
 
@@ -1448,7 +2603,7 @@ func (c *OpContext) validate(env *Environment, src ast.Node, x Expr, op Op, flag
 		case IncompleteError:
 			// The referenced node is actively being computed and still has
 			// value-producing tasks pending; yield until valueKnown is met.
-			// schedRUNNING (not schedREADY) avoids deadlocking on a task that
+			// Requiring a running scheduler avoids deadlocking on a task that
 			// nobody else will trigger — a genuine cycle. The same yield
 			// serves both ArcPending (load-bearing: the comp body will fire
 			// and materialize the arc) and ArcOptional (usually a no-op, but
@@ -1456,7 +2611,7 @@ func (c *OpContext) validate(env *Environment, src ast.Node, x Expr, op Op, flag
 			// before valueKnown).
 			if v.Node != nil {
 				ns := v.Node.state
-				if ns != nil && ns.state == schedRUNNING &&
+				if ns != nil && ns.running &&
 					!ns.meets(valueKnown) &&
 					ns.provided&valueKnown != 0 {
 					if t := c.current(); t != nil {
@@ -1551,6 +2706,7 @@ func (c *OpContext) verifyNonMonotonicResult(env *Environment, x Expr, expectErr
 	if n := env.DerefVertex(c).state; n != nil {
 		n.postChecks = append(n.postChecks, envCheck{
 			env:         env,
+			ci:          c.ci,
 			expr:        x,
 			expectError: expectError,
 		})
@@ -1562,9 +2718,15 @@ func (c *OpContext) verifyNonMonotonicResult(env *Environment, x Expr, expectErr
 //	len(x)
 //	strings.ToLower(x)
 type CallExpr struct {
-	Src  *ast.CallExpr
-	Fun  Expr
-	Args []Expr
+	Src       *ast.CallExpr
+	Fun       Expr
+	Args      []Expr
+	ArgLabels []Feature
+
+	// Partial marks a call written with a trailing "..." (f(a: 1, ...)). Such
+	// a call binds the given arguments and yields a function over the
+	// remaining parameters instead of evaluating the body.
+	Partial bool
 }
 
 func (x *CallExpr) Source() ast.Node {
@@ -1574,17 +2736,77 @@ func (x *CallExpr) Source() ast.Node {
 	return x.Src
 }
 
+func (x *CallExpr) hasArgLabels() bool {
+	for _, label := range x.ArgLabels {
+		if label != InvalidLabel {
+			return true
+		}
+	}
+	return false
+}
+
 func (x *CallExpr) evaluate(c *OpContext, state Flags) Value {
-	fun := c.value(x.Fun, Flags{
+	v := c.evalState(x.Fun, Flags{
 		status:    partial,
 		condition: concreteKnown,
 		mode:      yield,
+		concrete:  true,
 	})
+	if d := unresolvedDisjunction(v); d != nil {
+		// Calling an unresolved disjunction is ambiguous: it is not known
+		// which disjunct to call. Further unification may still resolve
+		// the disjunction to a single value, so this is an incomplete
+		// error, consistent with other uses of unresolved disjunctions.
+		c.addErrf(IncompleteError, Pos(x.Fun),
+			"cannot call %s: unresolved disjunction %v (type %s)", x.Fun, d, d.Kind())
+		return nil
+	}
+	fun, _ := c.getDefault(v)
+	fun = Unwrap(fun)
 	switch f := fun.(type) {
 	case *Builtin:
+		if x.Partial {
+			c.AddErrf("partial application of builtin %s is not supported", x.Fun)
+			return nil
+		}
+		if x.hasArgLabels() {
+			// The legacy validator-constructor form leaves raw slot zero for
+			// the value validated later. Its argument list is not represented
+			// by an attached function type, so applying full-call labels here
+			// could silently bind a constructor argument to the wrong raw slot.
+			if f.IsValidator(len(x.Args)) {
+				c.AddErrf("labeled arguments are not supported for validator constructor %s", x.Fun)
+				return nil
+			}
+			// A labeled argument binds through the parameter names of
+			// the builtin's declared signature; the call proceeds with
+			// the arguments in positional order.
+			args, ok := bindBuiltinArgs(c, f, x)
+			if !ok {
+				return nil
+			}
+			x2 := *x
+			x2.Args = args
+			x2.ArgLabels = nil
+			return f.rawCall(c, &x2, state)
+		}
 		return f.rawCall(c, x, state)
 
+	case *FuncValue:
+		return f.call(c, x, state)
+
 	case *BuiltinValidator:
+		if x.hasArgLabels() {
+			// A bare validator's argument is the value it validates; its
+			// declared signature names at most that one parameter, so a
+			// labeled call has no position left to select.
+			c.AddErrf("labeled arguments are not supported for validator %s", x.Fun)
+			return nil
+		}
+		if x.Partial {
+			c.AddErrf("partial application of builtin %s is not supported", x.Fun)
+			return nil
+		}
 		// We allow a validator that takes no arguments except the validated
 		// value to be called with zero arguments.
 		switch {
@@ -1600,6 +2822,21 @@ func (x *CallExpr) evaluate(c *OpContext, state Flags) Value {
 		default:
 			return f.Builtin.rawCall(c, x, state)
 		}
+
+	case *Bottom:
+		// The callee is an error: propagate it instead of complaining that
+		// an error is not a function.
+		return f
+
+	case nil:
+		// The callee did not evaluate to a value. The cause, if any, has
+		// already been reported through the context.
+		if !c.HasErr() {
+			c.addErrf(IncompleteError, Pos(x.Fun),
+				"cannot call incomplete value %s", x.Fun)
+		}
+		return nil
+
 	default:
 		if !IsConcrete(fun) && fun.Kind()&FuncKind != 0 {
 			c.addErrf(IncompleteError, Pos(x.Fun), "cannot call non-concrete value %s (type %s)", x.Fun, kind(fun))
@@ -1620,7 +2857,10 @@ func (builtin *Builtin) rawCall(c *OpContext, call *CallExpr, state Flags) Value
 		if !builtin.checkArgs(c, Pos(call), len(call.Args)) {
 			return nil
 		}
-		return builtin.RawFunc(callCtx)
+		// RawFunc builtins evaluate their arguments themselves, so the
+		// parameter constraints of any recorded function types are not
+		// enforced for them; the result constraints are.
+		return builtin.applyResultTypes(c, builtin.RawFunc(callCtx))
 	}
 	// Arguments to functions are open. This mostly matters for NonConcrete
 	// builtins.
@@ -1646,11 +2886,19 @@ func (builtin *Builtin) rawCall(c *OpContext, call *CallExpr, state Flags) Value
 				mode:      state.mode,
 			})
 		} else {
-			expr = c.value(a, Flags{
+			flags := Flags{
 				status:    state.status,
 				condition: state.condition | fieldSetKnown | concreteKnown | disjunctionTask,
 				mode:      state.mode,
-			})
+			}
+			switch {
+			case builtin.Closes != NoClosing:
+				expr = c.closedArg(a, flags)
+			case builtin.PerDisjunct:
+				expr = c.valueOrDisjunction(a, flags)
+			default:
+				expr = c.value(a, flags)
+			}
 		}
 
 		switch v := expr.(type) {
@@ -1692,15 +2940,49 @@ func (builtin *Builtin) rawCall(c *OpContext, call *CallExpr, state Flags) Value
 		return nil
 	}
 	if builtin.IsValidator(len(args)) {
-		return &BuiltinValidator{call, builtin, args}
+		return &BuiltinValidator{
+			Src:     call,
+			Builtin: builtin,
+			Args:    args,
+			Env:     c.Env(0),
+		}
 	}
+
+	// Materialize defaults before applying attached signature constraints,
+	// so that an omitted defaulted argument is constrained just like an
+	// explicit argument.
+	args, ok := builtin.completeArgs(c, Pos(call), args, Flags{
+		status:    state.status,
+		condition: state.condition | fieldSetKnown | concreteKnown | disjunctionTask,
+		mode:      state.mode,
+	})
+	if !ok {
+		return nil
+	}
+
+	if builtin.PerDisjunct {
+		if d := disjunctionOf(args[0]); d != nil {
+			return builtin.callPerDisjunct(c, callCtx, args, d, state)
+		}
+	}
+	return builtin.finishCall(c, callCtx, args, state)
+}
+
+// finishCall applies the attached function types to args, calls the
+// builtin with them, and evaluates its result.
+func (builtin *Builtin) finishCall(c *OpContext, callCtx BuiltinCallContext, args []Value, state Flags) Value {
+	args, b := builtin.applyParamTypes(c, args)
+	if b != nil {
+		return b
+	}
+
 	callCtx.args = args
 	result := builtin.call(callCtx)
 	switch result := result.(type) {
 	case nil:
 		return nil
 	case *Bottom:
-		vErr := c.NewPosf(Pos(call), "error in call to %s", builtin.qualifiedName(c))
+		vErr := c.NewPosf(Pos(callCtx.call), "error in call to %s", builtin.qualifiedName(c))
 		return &Bottom{
 			Code: result.Code,
 			Err:  errors.Wrap(vErr, result.Err),
@@ -1709,8 +2991,189 @@ func (builtin *Builtin) rawCall(c *OpContext, call *CallExpr, state Flags) Value
 	}
 	v, ci := c.evalStateCI(result, Flags{status: partial, condition: state.condition, mode: state.mode})
 	c.ci = ci
-	return v
+	return builtin.applyResultTypes(c, v)
 }
+
+// callPerDisjunct calls the builtin once per disjunct of d, the disjunction
+// its first argument holds, and returns the disjunction of the results with
+// the defaults kept, so that f(a | b) is f(a) | f(b). A disjunct whose call
+// fails is eliminated, as unification would eliminate it; the errors are
+// reported only when every disjunct fails.
+func (builtin *Builtin) callPerDisjunct(c *OpContext, callCtx BuiltinCallContext, args []Value, d *Disjunction, state Flags) Value {
+	vals := make([]Value, 0, len(d.Values))
+	numDefaults := 0
+	var errs *Bottom
+	for i, v := range d.Values {
+		a := slices.Clone(args)
+		a[0] = v
+		saved := c.errs
+		c.errs = nil
+		r := builtin.finishCall(c, callCtx, a, state)
+		if r == nil && c.errs != nil {
+			r = c.errs
+		}
+		c.errs = saved
+		switch r := r.(type) {
+		case nil:
+			return nil
+		case *Bottom:
+			errs = CombineErrors(nil, errs, r)
+		default:
+			if i < d.NumDefaults {
+				numDefaults++
+			}
+			vals = append(vals, r)
+		}
+	}
+	switch len(vals) {
+	case 0:
+		return errs
+	case 1:
+		return vals[0]
+	}
+	return &Disjunction{
+		Src:         d.Src,
+		Values:      vals,
+		Errors:      d.Errors,
+		NumDefaults: numDefaults,
+		HasDefaults: d.HasDefaults,
+	}
+}
+
+// applyParamTypes applies every attached function type's parameter
+// constraints to args, which are indexed by raw builtin position.
+// Positionally bindable parameters map by ordinal; a name-only parameter may
+// map through the contract label supplied by another attached signature.
+// Like native function constraints, these expressions are
+// evaluated in the environment in which their signature was declared.
+func (builtin *Builtin) applyParamTypes(c *OpContext, args []Value) ([]Value, *Bottom) {
+	if len(builtin.Types) == 0 {
+		return args, nil
+	}
+	// This runs on every call. The parameter matches depend on the builtin
+	// and its types only, so they are computed once for both passes below.
+	matches := make([][]int, len(builtin.Types))
+	for k, t := range builtin.Types {
+		matches[k] = matchBuiltinParams(t.Fn, builtin)
+	}
+
+	// A parameter typed by a signature entitles the builtin to call its
+	// argument accordingly; the argument's own signatures must permit that,
+	// as for a call to a function value (see [OpContext.checkEntitlement]).
+	// The signatures of all types constraining an argument are gathered
+	// first, so that a label one of them introduces takes part in matching
+	// the clauses against another, and the arguments are checked as
+	// supplied, before any type's constraints are applied to them. Only a
+	// function argument has signatures to check, so any other argument
+	// skips the search for function types.
+	var argSigs [][]FuncType
+	var argNames []string
+	for k, t := range builtin.Types {
+		for j, tp := range t.Fn.Params {
+			i := matches[k][j]
+			if tp.Value == nil || i < 0 || i >= len(args) || args[i] == nil ||
+				args[i].Kind()&FuncKind == 0 {
+				continue
+			}
+			sigs := c.funcTypeConstraints(t.Env, tp.Value)
+			if len(sigs) == 0 {
+				continue
+			}
+			if argSigs == nil {
+				argSigs = make([][]FuncType, len(args))
+				argNames = make([]string, len(args))
+			}
+			argSigs[i] = append(argSigs[i], sigs...)
+			if argNames[i] == "" {
+				argNames[i] = funcParamName(c, j, &tp)
+			}
+		}
+	}
+	for i, sigs := range argSigs {
+		if len(sigs) > 0 {
+			if b := c.checkSuppliedEntitlement(sigs, args[i], argNames[i]); b != nil {
+				return nil, b
+			}
+		}
+	}
+	for k, t := range builtin.Types {
+		for j, tp := range t.Fn.Params {
+			i := matches[k][j]
+			if tp.Value == nil || i < 0 || i >= len(args) || args[i] == nil {
+				continue
+			}
+			// A constraint that only restricts the kind is already enforced
+			// by the builtin's own parameter kind, which was checked against
+			// the type when the two were unified. Skip it rather than
+			// materialize the argument (see kindOnlyConstraint).
+			if k, ok := kindOnlyConstraint(tp.Value); ok &&
+				i < len(builtin.Params) && builtin.Params[i].Kind()&^k == 0 {
+				continue
+			}
+			w := c.newInlineVertex(nil, nil,
+				MakeConjunct(t.Env, tp.Value, c.ci),
+				MakeConjunct(nil, args[i], c.ci))
+			w.Finalize(c)
+			if b := w.Bottom(); b != nil && !b.IsIncomplete() {
+				return nil, c.atCallSite(b, c.vertex, w, nil)
+			}
+			args[i] = w
+		}
+	}
+	return args, nil
+}
+
+// applyResultTypes unifies the result of a builtin call with the result
+// constraints of the function types the builtin was unified with. The
+// constraints are evaluated in their type's environment.
+func (x *Builtin) applyResultTypes(c *OpContext, v Value) Value {
+	if len(x.Types) == 0 || v == nil {
+		return v
+	}
+	if _, ok := v.(*Bottom); ok {
+		return v
+	}
+	a := make([]Conjunct, 0, len(x.Types)+1)
+	a = append(a, MakeConjunct(nil, v, c.ci))
+	for _, t := range x.Types {
+		if t.Fn.Ret == nil {
+			continue
+		}
+		// As for arguments: a constraint that only restricts the kind cannot
+		// reject a result the builtin can produce, since its result kind was
+		// checked against the type at unification (see kindOnlyConstraint).
+		if k, ok := kindOnlyConstraint(t.Fn.Ret); ok && x.Result&^k == 0 {
+			continue
+		}
+		a = append(a, MakeConjunct(t.Env, t.Fn.Ret, c.ci))
+	}
+	if len(a) == 1 {
+		return v
+	}
+	w := c.newInlineVertex(nil, nil, a...)
+	w.Finalize(c)
+	return w
+}
+
+// Closing is how a builtin marked with [Builtin.Closes] closes its argument.
+type Closing uint8
+
+const (
+	NoClosing Closing = iota
+
+	// ClosesOnce closes the argument at one level, as close does.
+	ClosesOnce
+
+	// ClosesRecursively closes the argument and every struct within it, as
+	// __closeAll does.
+	ClosesRecursively
+
+	// ClosesByEmbedding closes the argument as the values it embeds through
+	// the spread operator are closed, as __reclose does: recursively for a
+	// definition, at one level for a value closed by close, and not at all
+	// otherwise.
+	ClosesByEmbedding
+)
 
 // A Builtin is a value representing a native function call.
 type Builtin struct {
@@ -1718,9 +3181,37 @@ type Builtin struct {
 	Params []Param
 	Result Kind
 
+	// ResultValue is the declared result, when it is more precise than the
+	// kind Result: a builtin registered for a Go function with a sized
+	// integer result declares that range. It is nil for a kind-level
+	// declaration.
+	ResultValue Value
+
+	// Foreign marks a builtin registered by the program embedding the
+	// evaluator rather than by a built-in package. It has no package
+	// identity and cannot be referred to by name from CUE source, so it is
+	// not exportable.
+	Foreign bool
+
 	// NonConcrete should be set to true if a builtin supports non-concrete
 	// arguments. By default, all arguments are checked to be concrete.
 	NonConcrete bool
+
+	// PerDisjunct marks a builtin which applies to each disjunct of an
+	// unresolved disjunction argument, so that f(a | b) is f(a) | f(b).
+	// Its Func receives such an argument as a [Disjunction], defaults and
+	// all, where other builtins report it as ambiguous.
+	PerDisjunct bool
+
+	// Closes marks a builtin which returns its struct or list argument
+	// closed, at one level or recursively. A call which applies it to a
+	// struct literal is unified where the call appears as that literal,
+	// closed, rather than evaluating the literal on its own first, so that
+	// a comprehension in the literal reads the fields unified with it; see
+	// [nodeContext.scheduleClosedLiteral]. A reference passed to it is
+	// taken as the vertex it resolves to even when that vertex is
+	// incomplete, for the same reason; see [OpContext.closedArg].
+	Closes Closing
 
 	Func func(call BuiltinCallContext) Expr
 
@@ -1739,6 +3230,29 @@ type Builtin struct {
 
 	Package Feature
 	Name    string
+
+	// Types holds the function types (bodyless signatures) this builtin has
+	// been unified with; their parameter constraints and result constraints
+	// are additionally enforced on every ordinary full call (see
+	// [Builtin.rawCall]). The legacy validator-constructor path remains
+	// separate. A
+	// Builtin carrying Types is a clone of a package-level builtin, which
+	// remains identified through orig.
+	Types []FuncType
+
+	// orig points to the package-level builtin from which a tightened clone
+	// (a builtin carrying Types) was derived. It is nil for an original
+	// builtin. See [Builtin.self].
+	orig *Builtin
+}
+
+// self returns the identity of the builtin: the package-level builtin from
+// which a tightened clone was derived, or the builtin itself.
+func (x *Builtin) self() *Builtin {
+	if x.orig != nil {
+		return x.orig
+	}
+	return x
 }
 
 type Param struct {
@@ -1772,7 +3286,7 @@ func (x *Builtin) Kind() Kind {
 }
 
 func (x *Builtin) BareValidator() *BuiltinValidator {
-	if len(x.Params) != 1 ||
+	if x.Foreign || len(x.Params) != 1 ||
 		(x.Result != BoolKind && x.Result != BottomKind) {
 		return nil
 	}
@@ -1780,9 +3294,10 @@ func (x *Builtin) BareValidator() *BuiltinValidator {
 }
 
 // IsValidator reports whether b should be interpreted as a Validator for the
-// given number of arguments.
+// given number of arguments. A foreign builtin never is: the embedding
+// program registers validators separately (see [ExternalValidator]).
 func (b *Builtin) IsValidator(numArgs int) bool {
-	return numArgs == len(b.Params)-1 &&
+	return !b.Foreign && numArgs == len(b.Params)-1 &&
 		b.Result&^BoolKind == 0 &&
 		b.Params[numArgs].Default() == nil
 }
@@ -1815,6 +3330,59 @@ func (x *Builtin) checkArgs(c *OpContext, p token.Pos, numArgs int) bool {
 	return true
 }
 
+// completeArgs appends the arguments for the parameters a call omits. The
+// CUE signatures of a builtin are the source of truth for its defaults: an
+// omitted argument takes the default that a signature unified with the
+// builtin declares for the parameter, or else the builtin's own default,
+// which such a signature must agree with.
+func (x *Builtin) completeArgs(c *OpContext, p token.Pos, args []Value, flags Flags) ([]Value, bool) {
+	n := len(args)
+	if n > len(x.Params) {
+		c.addErrf(0, p,
+			"too many arguments in call to %v (have %d, want %d)",
+			x, n, len(x.Params))
+		return nil, false
+	}
+	for i := n; i < len(x.Params); i++ {
+		v, ok := x.signatureDefault(c, i, flags)
+		if !ok {
+			v = x.Params[i].Default()
+		} else if v == nil || bottom(v) != nil {
+			if b := bottom(v); b != nil {
+				c.AddBottom(b)
+			}
+			return nil, false
+		}
+		if v == nil {
+			c.addErrf(0, p,
+				"not enough arguments in call to %v (have %d, want %d)",
+				x, n, len(x.Params))
+			return nil, false
+		}
+		args = append(args, v)
+	}
+	return args, true
+}
+
+// signatureDefault evaluates the default that a signature unified with the
+// builtin declares for its parameter at position pos, and reports whether
+// there is one.
+func (x *Builtin) signatureDefault(c *OpContext, pos int, flags Flags) (Value, bool) {
+	for _, t := range x.Types {
+		for k, j := range matchBuiltinParams(t.Fn, x) {
+			d := t.Fn.Params[k].Default
+			if j != pos || d == nil {
+				continue
+			}
+			s := c.PushState(t.Env, d.Source())
+			v := c.value(d, flags)
+			c.PopState(s)
+			return v, true
+		}
+	}
+	return nil, false
+}
+
 func (x *Builtin) call(call BuiltinCallContext) Expr {
 	c := call.ctx
 	p := call.Pos()
@@ -1827,6 +3395,11 @@ func (x *Builtin) call(call BuiltinCallContext) Expr {
 		call.args = append(call.args, x.Params[i].Default())
 	}
 	for i, a := range call.args {
+		if x.Closes != NoClosing && isIncompleteVertex(a) {
+			// An incomplete vertex is closed and unified where the result
+			// is; see [OpContext.closedArg].
+			continue
+		}
 		if b := bottom(a); b != nil {
 			return b
 		}
@@ -1859,15 +3432,15 @@ func (x *Builtin) call(call BuiltinCallContext) Expr {
 
 	// Arguments to functions are open. This mostly matters for NonConcrete
 	// builtins.
-	saved := c.IsValidator
-	c.IsValidator = call.isValidator
+	saved := c.isValidator
+	c.isValidator = call.isValidator
 	ci := c.ci
 	c.ci.FromEmbed = false
 	c.ci.FromDef = false
 	defer func() {
 		c.ci.FromDef = ci.FromDef
 		c.ci.FromEmbed = ci.FromEmbed
-		c.IsValidator = saved
+		c.isValidator = saved
 	}()
 
 	if x.RawFunc != nil {
@@ -1878,6 +3451,23 @@ func (x *Builtin) call(call BuiltinCallContext) Expr {
 
 func (x *Builtin) Source() ast.Node { return nil }
 
+// ExternalValidator is a validator supplied by the program embedding the
+// evaluator rather than by a built-in package; a function supplied that way
+// is a [Builtin] marked Foreign. When unified with a concrete value,
+// Validate is called with it.
+type ExternalValidator struct {
+	Validate func(ctx *OpContext, v Value) *Bottom
+
+	Name string
+}
+
+func (f *ExternalValidator) Source() ast.Node { return nil }
+func (f *ExternalValidator) Kind() Kind       { return TopKind }
+
+func (f *ExternalValidator) validate(c *OpContext, v Value) *Bottom {
+	return f.Validate(c, v)
+}
+
 // A BuiltinValidator is a Value that results from evaluation a partial call
 // to a builtin (using CallExpr).
 //
@@ -1886,6 +3476,8 @@ type BuiltinValidator struct {
 	Src     *CallExpr
 	Builtin *Builtin
 	Args    []Value // any but the first value
+
+	Env *Environment
 }
 
 func (x *BuiltinValidator) Source() ast.Node {
@@ -2040,6 +3632,15 @@ type Disjunction struct {
 	// NumDefaults indicates the number of default values.
 	NumDefaults int
 	HasDefaults bool
+
+	// owner, if set, is the Vertex whose disjuncts Values holds. Cloned
+	// vertices share BaseValue with the vertex they were cloned from; only
+	// the owner may reclaim the Values. See
+	// [reclaimer.reclaimBaseValueBuffers].
+	//
+	// TODO(mem): consider deriving ownership on the reclaim side instead of
+	// storing it here.
+	owner *Vertex
 }
 
 func (x *Disjunction) Source() ast.Node { return x.Src }
@@ -2110,13 +3711,22 @@ func (c *OpContext) forSource(x Expr) *Vertex {
 
 	node, ok := v.(*Vertex)
 	if ok {
-		// We do not request to "yield" here, but rather rely on the
-		// call-by-need behavior in combination with the freezing mechanism.
+		// By default we rely on the call-by-need behavior in combination
+		// with the freezing mechanism as the cycle-breaker, rather than
+		// yielding. The exception is a source that a sibling parent task
+		// (e.g. an if-comprehension whose guard is still being evaluated)
+		// may yet add fields to: finalizing now would freeze an incomplete
+		// field set, so yield and retry once the sibling completes.
 		// TODO: this seems a bit fragile. At some point we need to make this
 		// more robust by moving to a pure call-by-need mechanism, for instance.
 		// TODO: using attemptOnly here will remove the cyclic reference error
 		// of comprehension.t1.ok (which also errors in V2),
-		node.unify(c, Flags{condition: state.condition, mode: finalize, checkTypos: true})
+		mode := finalize
+		if s := node.state; s != nil && s.frozen&fieldSetKnown == 0 &&
+			s.hasRunningSiblingParentTask() {
+			mode = yield
+		}
+		node.unify(c, Flags{condition: state.condition, mode: mode, checkTypos: true})
 	}
 
 	v, ok = c.getDefault(v)
@@ -2185,7 +3795,7 @@ func (x *ForClause) yield(s *compState) {
 	n := c.forSource(x.Src)
 
 	if s := n.getState(c); s != nil {
-		s.freeze(fieldSetKnown)
+		s.freeze(fieldSetKnown, x)
 	}
 
 	for _, a := range n.Arcs {
@@ -2205,6 +3815,10 @@ func (x *ForClause) yield(s *compState) {
 			continue
 		default:
 			continue
+		}
+
+		for v := a; v != nil && !v.escapes && v.status != finalized; v = v.Parent {
+			v.escapes = true
 		}
 
 		// "for" clauses tend to yield many values;
@@ -2339,7 +3953,11 @@ func (x *LetClause) yield(s *compState) {
 //
 //	try { ... }
 //
-// TryClause represents a try clause in a comprehension.
+// The body is pre-evaluated in isolation in an inline vertex, which only
+// approximates its real evaluation; see [OpContext.markSkipTry],
+// [scheduler.inTryBody] and [OpContext.lookupInTryTarget] for what
+// compensates for the differences.
+//
 // It can have two forms:
 //   - try { struct } - Value is set, Label/Expr are zero/nil
 //   - try x = expr   - Label/Expr are set, Value is nil
@@ -2348,6 +3966,19 @@ type TryClause struct {
 	Label Feature // identifier for assignment form (InvalidLabel for struct form)
 	Expr  Expr    // expression for assignment form (nil for struct form)
 	// Struct form: body is in Comprehension.Value
+}
+
+// tryBody is the state of the pre-evaluation of a try clause body, held by the
+// [nodeContext] of the inline vertex evaluating it.
+type tryBody struct {
+	// skip records that a ?-marked reference in the body failed to resolve.
+	// See [OpContext.markSkipTry].
+	skip bool
+
+	// target is the vertex a struct-form body is inserted into when it
+	// yields, and nil for the binding form, whose expression is not inserted
+	// anywhere. See [OpContext.lookupInTryTarget].
+	target *Vertex
 }
 
 func (x *TryClause) Source() ast.Node {
@@ -2372,24 +4003,28 @@ func (x *TryClause) yield(s *compState) {
 	// the try expression early.
 
 	var expr Expr
+	tb := &tryBody{}
 	if x.Expr != nil {
 		expr = x.Expr
 	} else {
-		// Struct form: body is in Comprehension.Value
+		// Struct form: the body is inserted into the node the comprehension
+		// runs on, which [OpContext.yield] set as the current vertex.
 		expr = s.comp.Value
+		tb.target = c.vertex
 	}
 
 	v := c.newInlineVertex(env.DerefVertex(c), nil, Conjunct{env, expr, c.ci})
 
 	// Mark this body so a failed ?-marked reference is attributed to this try
-	// rather than an enclosing or interleaving one. See markSkipTry.
-	var skip bool
-	v.getState(c).trySkip = &skip
+	// rather than an enclosing or interleaving one (see markSkipTry), and so
+	// that finalizing it leaves tasks blocked on rooted vertices alone (see
+	// [scheduler.inTryBody]).
+	v.getState(c).tryBody = tb
 	v.Finalize(c)
 
 	// If any ?-marked reference belonging to this body failed, don't yield -
 	// the else clause (if present) runs instead.
-	if skip {
+	if tb.skip {
 		return
 	}
 

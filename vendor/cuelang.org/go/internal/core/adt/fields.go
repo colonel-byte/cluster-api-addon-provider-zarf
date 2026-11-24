@@ -149,18 +149,59 @@ package adt
 // - the data structures could probably be collapsed with Conjunct. and the
 //   Vertex inserted into the Conjuncts could be a special ConjunctGroup.
 
+// arcMapThreshold is the number of arcs from which a Vertex indexes its arcs
+// by label rather than scanning them. Below it the scan is cheaper than the
+// map, and the vast majority of vertices stay well below it.
+const arcMapThreshold = 16
+
+// lookupArc returns the arc of v labeled f, or nil if there is none.
+//
+// A vertex with many arcs indexes them by label: without an index, building
+// one arc at a time scans every arc already present, making the construction
+// of a vertex with n arcs quadratic. A large list is exactly that shape.
+//
+// The index is a cache, not an invariant. Arcs are appended and removed
+// outside this path, and a Vertex is sometimes copied wholesale, so the index
+// is used only when it accounts for exactly the arcs present and is rebuilt
+// otherwise. Labels are unique within a vertex, so agreeing in length means
+// agreeing entry for entry.
+//
+// TODO(perf): unify the scan and the map into a single representation by
+// keeping Arcs sorted by Feature and binary searching, removing the side
+// index and its rebuilds.
+func (v *Vertex) lookupArc(f Feature) *Vertex {
+	if len(v.Arcs) < arcMapThreshold {
+		for _, a := range v.Arcs {
+			if a.Label == f {
+				return a
+			}
+		}
+		return nil
+	}
+	if len(v.arcMap) != len(v.Arcs) {
+		m := make(map[Feature]int32, 2*len(v.Arcs))
+		for i, a := range v.Arcs {
+			m[a.Label] = int32(i)
+		}
+		v.arcMap = m
+	}
+	if i, ok := v.arcMap[f]; ok {
+		return v.Arcs[i]
+	}
+	return nil
+}
+
 func (n *nodeContext) getArc(f Feature, mode ArcType) (arc *Vertex, isNew bool) {
 	// TODO(disjunct,perf): CopyOnRead
 	v := n.node
-	for _, a := range v.Arcs {
-		if a.Label == f {
-			if f.IsLet() {
-				a.MultiLet = true
-				// TODO: add return here?
-			}
-			a.updateArcType(mode)
-			return a, false
+	if a := v.lookupArc(f); a != nil {
+		if f.IsLet() {
+			// See insertArc for why a further instance of the
+			// same let declaration adds no conjunct to the arc.
+			a.MultiLet = true
 		}
+		a.updateArcType(mode)
+		return a, false
 	}
 
 	// getArc is immediately followed by inserting one conjunct,
@@ -179,13 +220,32 @@ func (n *nodeContext) getArc(f Feature, mode ArcType) (arc *Vertex, isNew bool) 
 		anonymous: v.anonymous || v.Label.IsLet(),
 		Conjuncts: alloc.conjuncts[:0],
 	}
-	if n.scheduler.frozen&fieldSetKnown != 0 {
-		b := n.ctx.NewErrf("adding field %v not allowed as field set was already referenced", f)
+	// A let arc is only reachable from references within its lexical scope,
+	// never through iteration or lookup of the enclosing struct, so adding
+	// one cannot change what a referrer of the frozen field set observed.
+	// Lets inside comprehension bodies are inserted when the body yields,
+	// after the source of a self-referencing comprehension has been frozen.
+	if n.scheduler.frozen&fieldSetKnown != 0 && !f.IsLet() {
+		by := n.scheduler.frozenBy
+		p := n.ctx.markPositions()
+		n.ctx.AddPosition(by)
+		var b *Bottom
+		if _, ok := by.(*ForClause); ok {
+			b = n.ctx.NewErrf("adding field %v not allowed as field set was already iterated over by comprehension", f)
+		} else {
+			b = n.ctx.NewErrf("adding field %v not allowed as field set was already referenced", f)
+		}
+		n.ctx.releasePositions(p)
 		n.ctx.AddBottom(b)
 		// This may panic for list arithmetic. Safer to leave out for now.
 		arc.ArcType = ArcNotPresent
 	}
 	v.Arcs = append(v.Arcs, arc)
+	if v.arcMap != nil {
+		// Extend rather than invalidate the index: rebuilding it on every
+		// append would restore the quadratic behavior it exists to avoid.
+		v.arcMap[f] = int32(len(v.Arcs) - 1)
+	}
 	return arc, true
 }
 
@@ -271,6 +331,35 @@ func (n *nodeContext) insertArc(f Feature, mode ArcType, c Conjunct, id CloseInf
 
 	v, insertedArc := n.getArc(f, mode)
 
+	if !insertedArc && f.IsLet() {
+		// Let labels are unique per declaration, so an existing let arc
+		// means the same declaration is instantiated again, in a different
+		// Environment: for instance when a struct literal from a
+		// comprehension is copied into a node by embedding one of its
+		// earlier results. Such instances may evaluate to different values,
+		// so unifying them in the arc would be wrong.
+		//
+		// The arc keeps the conjunct of its first instance only. No
+		// instance is inherently more correct than another: they all share
+		// the same expression and differ only in their Environment. But the
+		// arc's own value is only ever observed through the first instance:
+		// LetReference.resolve returns the arc directly only while MultiLet
+		// is unset, that is, while the first instance is the sole one, and
+		// anything that used the arc then, such as a node that embedded it
+		// and subscribed to its conjuncts, expects it to keep that value.
+		// Once getArc has marked the arc MultiLet, LetReference.resolve
+		// evaluates the let expression per Environment instead and never
+		// consults the arc's value again, only its expression, which is the
+		// same for every instance.
+		//
+		// TODO: consider associating lets with their Environment directly
+		// instead of storing them as arcs of the enclosing node. Now that
+		// comprehensions are implemented more simply, this should be more
+		// feasible, and it would remove the need for MultiLet and for the
+		// per-Environment let cache.
+		return v
+	}
+
 	defer n.ctx.PopArc(n.ctx.PushArc(v))
 
 	_, added := v.insertConjunct(n.ctx, c, id, mode, check, true)
@@ -334,8 +423,38 @@ func (n *nodeContext) addConstraint(arc *Vertex, mode ArcType, c Conjunct, check
 	arc.insertConjunct(n.ctx, c, c.CloseInfo, mode, check, false)
 }
 
+// completePatternValue evaluates any vertices held by a pattern value before
+// it is registered as a pattern constraint. Values returned by builtins, such
+// as a Disjunction returned by or(), may hold vertices that have not been
+// evaluated yet. If their evaluation were left to matchPatternValue, it could
+// be forced at a point where a node they depend on is mid-evaluation, locking
+// in results computed from a partial field set. Evaluating them here, while
+// dependencies can still be run or block the calling task, avoids that.
+// See https://cuelang.org/issue/4399.
+//
+// The traversal mirrors the Value kinds that matchPatternValue fast-tracks;
+// values it does not descend into, such as the arguments of a
+// BuiltinValidator, are still finalized late by matchPatternValue.
+func completePatternValue(ctx *OpContext, v Value) {
+	var vals []Value
+	switch x := v.(type) {
+	case *Vertex:
+		x.unify(ctx, Flags{condition: scalarValue, mode: yield})
+		return
+	case *Disjunction:
+		vals = x.Values
+	case *Conjunction:
+		vals = x.Values
+	}
+	for _, a := range vals {
+		completePatternValue(ctx, a)
+	}
+}
+
 func (n *nodeContext) insertPattern(pattern Value, c Conjunct) {
 	n.assertInitialized()
+
+	completePatternValue(n.ctx, pattern)
 
 	// Collect patterns in root vertex. This allows comparing disjuncts for
 	// equality as well as inserting new arcs down the line as they are
@@ -366,18 +485,6 @@ func (n *nodeContext) insertPattern(pattern Value, c Conjunct) {
 	// TODO: we could still try to accumulate patterns.
 }
 
-// isTotal reports whether pattern value p represents a full domain, that is,
-// whether it is of type BasicType or Top.
-func isTotal(p Value) bool {
-	switch p.(type) {
-	case *BasicType:
-		return true
-	case *Top:
-		return true
-	}
-	return false
-}
-
 func (ctx *OpContext) addPositions(c Conjunct) {
 	if x, ok := c.x.(*ConjunctGroup); ok {
 		for _, c := range *x {
@@ -394,7 +501,7 @@ func (ctx *OpContext) addPositions(c Conjunct) {
 func (ctx *OpContext) notAllowedError(arc *Vertex) *Bottom {
 	defer ctx.PopArc(ctx.PushArc(arc))
 
-	defer ctx.ReleasePositions(ctx.MarkPositions())
+	defer ctx.releasePositions(ctx.markPositions())
 
 	for _, c := range arc.Conjuncts {
 		ctx.addPositions(c)
@@ -431,41 +538,4 @@ func (ctx *OpContext) notAllowedError(arc *Vertex) *Bottom {
 	// TODO: create a special kind of error that gets the positions
 	// of the relevant locations upon request from the arc.
 	return err
-}
-
-// mergeConjunctions combines two values into one. It never modifies an
-// existing conjunction.
-//
-// TODO: this was used in the closeContext code. We can still use it to
-// construct pattern constraint conjunction in the future. This is currently
-// unimplemented.
-func mergeConjunctions(a, b Value) Value {
-	if a == nil {
-		return b
-	}
-	if b == nil {
-		return a
-	}
-	ca, _ := a.(*Conjunction)
-	cb, _ := b.(*Conjunction)
-	n := 2
-	if ca != nil {
-		n += len(ca.Values) - 1
-	}
-	if cb != nil {
-		n += len(cb.Values) - 1
-	}
-	vs := make([]Value, 0, n)
-	if ca != nil {
-		vs = append(vs, ca.Values...)
-	} else {
-		vs = append(vs, a)
-	}
-	if cb != nil {
-		vs = append(vs, cb.Values...)
-	} else {
-		vs = append(vs, b)
-	}
-	// TODO: potentially order conjuncts to make matching more likely.
-	return &Conjunction{Values: vs}
 }
