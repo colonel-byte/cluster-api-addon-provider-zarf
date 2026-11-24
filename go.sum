@@ -1365,8 +1365,8 @@ github.com/prometheus/procfs v0.0.2/go.mod h1:TjEm7ze935MbeOT/UhFTIMYKhuLP4wbCsT
 github.com/prometheus/procfs v0.0.8/go.mod h1:7Qr8sr6344vo1JqZ6HhLceV9o3AJ1Ff+GxbHq6oeK9A=
 github.com/prometheus/procfs v0.21.1 h1:GljZCt+zSTS+NZq88cyQ1LjZ+RCHp3uVuabBWA5+OJI=
 github.com/prometheus/procfs v0.21.1/go.mod h1:aB55Cww9pdSJVHk0hUf0inxWyyjPogFIjmHKYgMKmtY=
-github.com/protocolbuffers/txtpbfmt v0.0.0-20260420112717-c39628bde8b5 h1:Mckui8l+Wqz2Ve7XQvsE8SbHNmDWu8NA7Xce5NFJ/kM=
-github.com/protocolbuffers/txtpbfmt v0.0.0-20260420112717-c39628bde8b5/go.mod h1:JSbkp0BviKovYYt9XunS95M3mLPibE9bGg+Y95DsEEY=
+github.com/protocolbuffers/txtpbfmt v0.0.0-20261116065023-f6f26894e769 h1:fYa4fQKC5qTwoD6Yv8/WZqdSWcipIjrYK+k57mrr6hI=
+github.com/protocolbuffers/txtpbfmt v0.0.0-20261116065023-f6f26894e769/go.mod h1:JSbkp0BviKovYYt9XunS95M3mLPibE9bGg+Y95DsEEY=
 github.com/pterm/pterm v0.12.27/go.mod h1:PhQ89w4i95rhgE+xedAoqous6K9X+r6aSOI2eFF7DZI=
 github.com/pterm/pterm v0.12.29/go.mod h1:WI3qxgvoQFFGKGjGnJR849gU0TsEOvKn5Q8LlY1U7lg=
 github.com/pterm/pterm v0.12.30/go.mod h1:MOqLIyMOgmTDz9yorcYbcw+HsgoZo3BQfg2wtl3HEFE=
