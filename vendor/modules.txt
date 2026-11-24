@@ -202,6 +202,10 @@ cuelang.org/go/tools/flow
 # dario.cat/mergo v1.0.2
 ## explicit; go 1.13
 dario.cat/mergo
+# filippo.io/edwards25519 v1.2.0
+## explicit; go 1.24.0
+filippo.io/edwards25519
+filippo.io/edwards25519/field
 # github.com/AlecAivazis/survey/v2 v2.3.7
 ## explicit; go 1.13
 github.com/AlecAivazis/survey/v2
@@ -390,7 +394,7 @@ github.com/Microsoft/hcsshim/pkg/ociwclayer
 # github.com/OneOfOne/xxhash v1.2.8
 ## explicit; go 1.11
 github.com/OneOfOne/xxhash
-# github.com/ProtonMail/go-crypto v1.4.1
+# github.com/ProtonMail/go-crypto v1.5.2
 ## explicit; go 1.23.0
 github.com/ProtonMail/go-crypto/bitcurves
 github.com/ProtonMail/go-crypto/brainpool
@@ -411,8 +415,11 @@ github.com/ProtonMail/go-crypto/openpgp/errors
 github.com/ProtonMail/go-crypto/openpgp/internal/algorithm
 github.com/ProtonMail/go-crypto/openpgp/internal/ecc
 github.com/ProtonMail/go-crypto/openpgp/internal/encoding
+github.com/ProtonMail/go-crypto/openpgp/mldsa_eddsa
+github.com/ProtonMail/go-crypto/openpgp/mlkem_ecdh
 github.com/ProtonMail/go-crypto/openpgp/packet
 github.com/ProtonMail/go-crypto/openpgp/s2k
+github.com/ProtonMail/go-crypto/openpgp/slhdsa
 github.com/ProtonMail/go-crypto/openpgp/x25519
 github.com/ProtonMail/go-crypto/openpgp/x448
 # github.com/STARRY-S/zip v0.2.3
@@ -884,9 +891,6 @@ github.com/bitnami/go-version/pkg/version
 # github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb
 ## explicit
 github.com/blakesmith/ar
-# github.com/blang/semver v3.5.1+incompatible
-## explicit
-github.com/blang/semver
 # github.com/blang/semver/v4 v4.0.0
 ## explicit; go 1.14
 github.com/blang/semver/v4
@@ -991,13 +995,32 @@ github.com/cloudflare/circl/dh/x448
 github.com/cloudflare/circl/ecc/goldilocks
 github.com/cloudflare/circl/internal/conv
 github.com/cloudflare/circl/internal/sha3
+github.com/cloudflare/circl/kem
+github.com/cloudflare/circl/kem/mlkem/mlkem1024
+github.com/cloudflare/circl/kem/mlkem/mlkem768
 github.com/cloudflare/circl/math
 github.com/cloudflare/circl/math/fp25519
 github.com/cloudflare/circl/math/fp448
 github.com/cloudflare/circl/math/mlsbset
+github.com/cloudflare/circl/pke/kyber/internal/common
+github.com/cloudflare/circl/pke/kyber/internal/common/params
+github.com/cloudflare/circl/pke/kyber/kyber1024
+github.com/cloudflare/circl/pke/kyber/kyber1024/internal
+github.com/cloudflare/circl/pke/kyber/kyber768
+github.com/cloudflare/circl/pke/kyber/kyber768/internal
 github.com/cloudflare/circl/sign
 github.com/cloudflare/circl/sign/ed25519
 github.com/cloudflare/circl/sign/ed448
+github.com/cloudflare/circl/sign/internal/dilithium
+github.com/cloudflare/circl/sign/internal/dilithium/params
+github.com/cloudflare/circl/sign/mldsa/mldsa65
+github.com/cloudflare/circl/sign/mldsa/mldsa65/internal
+github.com/cloudflare/circl/sign/mldsa/mldsa87
+github.com/cloudflare/circl/sign/mldsa/mldsa87/internal
+github.com/cloudflare/circl/sign/slhdsa
+github.com/cloudflare/circl/simd/keccakf1600
+github.com/cloudflare/circl/xof
+github.com/cloudflare/circl/xof/k12
 # github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2
 ## explicit; go 1.24.6
 github.com/cncf/xds/go/udpa/annotations
@@ -2343,8 +2366,8 @@ github.com/pmezard/go-difflib/difflib
 ## explicit; go 1.16
 github.com/pquerna/cachecontrol
 github.com/pquerna/cachecontrol/cacheobject
-# github.com/prometheus/client_golang v1.24.1
-## explicit; go 1.25.0
+# github.com/prometheus/client_golang v1.25.0
+## explicit; go 1.26.0
 github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil
 github.com/prometheus/client_golang/internal/github.com/golang/gddo/httputil/header
 github.com/prometheus/client_golang/prometheus
@@ -2355,8 +2378,8 @@ github.com/prometheus/client_golang/prometheus/promhttp/internal
 # github.com/prometheus/client_model v0.6.3
 ## explicit; go 1.23
 github.com/prometheus/client_model/go
-# github.com/prometheus/common v0.71.0
-## explicit; go 1.25.0
+# github.com/prometheus/common v0.72.1
+## explicit; go 1.26.0
 github.com/prometheus/common/expfmt
 github.com/prometheus/common/model
 # github.com/prometheus/procfs v0.22.0
@@ -2422,10 +2445,11 @@ github.com/santhosh-tekuri/jsonschema/v6/kind
 github.com/sassoftware/go-rpmutils
 github.com/sassoftware/go-rpmutils/cpio
 github.com/sassoftware/go-rpmutils/fileutil
-# github.com/sassoftware/relic v7.2.1+incompatible
-## explicit
-github.com/sassoftware/relic/lib/pkcs7
-github.com/sassoftware/relic/lib/x509tools
+# github.com/sassoftware/relic/v8 v8.2.0
+## explicit; go 1.22.0
+github.com/sassoftware/relic/v8/lib/pkcs7
+github.com/sassoftware/relic/v8/lib/x509tools
+github.com/sassoftware/relic/v8/signers/sigerrors
 # github.com/scylladb/go-set v1.0.3-0.20200225121959-cc7b2070d91e
 ## explicit
 github.com/scylladb/go-set/iset
@@ -2510,15 +2534,20 @@ github.com/sigstore/cosign/v3/pkg/providers/google
 github.com/sigstore/cosign/v3/pkg/providers/spiffe
 github.com/sigstore/cosign/v3/pkg/signature
 github.com/sigstore/cosign/v3/pkg/types
-# github.com/sigstore/protobuf-specs v0.5.2
+# github.com/sigstore/protobuf-specs v0.5.3-0.20261112181914-a84bc5ff572a
 ## explicit; go 1.23
 github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1
+github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v2
 github.com/sigstore/protobuf-specs/gen/pb-go/common/v1
 github.com/sigstore/protobuf-specs/gen/pb-go/dsse
 github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1
 github.com/sigstore/protobuf-specs/gen/pb-go/trustroot/v1
-# github.com/sigstore/rekor v1.5.3
-## explicit; go 1.25.0
+# github.com/sigstore/rekor v1.6.1
+## explicit; go 1.27
+github.com/sigstore/rekor/internal/pgpv3
+github.com/sigstore/rekor/internal/pgpv3/adapted
+github.com/sigstore/rekor/internal/pgpv3/upstream/algorithm
+github.com/sigstore/rekor/internal/pgpv3/upstream/encoding
 github.com/sigstore/rekor/pkg/client
 github.com/sigstore/rekor/pkg/generated/client
 github.com/sigstore/rekor/pkg/generated/client/entries
@@ -2549,9 +2578,10 @@ github.com/sigstore/rekor/pkg/types/intoto/v0.0.2
 github.com/sigstore/rekor/pkg/types/rekord
 github.com/sigstore/rekor/pkg/types/rekord/v0.0.1
 github.com/sigstore/rekor/pkg/util
+github.com/sigstore/rekor/pkg/util/jcs
 github.com/sigstore/rekor/pkg/verify
-# github.com/sigstore/rekor-tiles/v2 v2.3.0
-## explicit; go 1.25.8
+# github.com/sigstore/rekor-tiles/v2 v2.4.2
+## explicit; go 1.27.0
 github.com/sigstore/rekor-tiles/v2/internal/algorithmregistry
 github.com/sigstore/rekor-tiles/v2/internal/safeint
 github.com/sigstore/rekor-tiles/v2/pkg/client
@@ -2565,11 +2595,12 @@ github.com/sigstore/rekor-tiles/v2/pkg/verifier/certificate
 github.com/sigstore/rekor-tiles/v2/pkg/verifier/identity
 github.com/sigstore/rekor-tiles/v2/pkg/verifier/publickey
 github.com/sigstore/rekor-tiles/v2/pkg/verify
-# github.com/sigstore/sigstore v1.10.11
-## explicit; go 1.25.0
+# github.com/sigstore/sigstore v1.11.4
+## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/cryptoutils
 github.com/sigstore/sigstore/pkg/cryptoutils/goodkey
 github.com/sigstore/sigstore/pkg/fulcioroots
+github.com/sigstore/sigstore/pkg/httpretry
 github.com/sigstore/sigstore/pkg/oauth
 github.com/sigstore/sigstore/pkg/oauthflow
 github.com/sigstore/sigstore/pkg/signature
@@ -2582,8 +2613,8 @@ github.com/sigstore/sigstore/pkg/signature/kms/cliplugin/internal/signerverifier
 github.com/sigstore/sigstore/pkg/signature/options
 github.com/sigstore/sigstore/pkg/signature/payload
 github.com/sigstore/sigstore/pkg/tuf
-# github.com/sigstore/sigstore-go v1.3.0
-## explicit; go 1.25.8
+# github.com/sigstore/sigstore-go v1.4.1
+## explicit; go 1.27.0
 github.com/sigstore/sigstore-go/internal/certificate
 github.com/sigstore/sigstore-go/internal/limits
 github.com/sigstore/sigstore-go/pkg/bundle
@@ -2594,21 +2625,22 @@ github.com/sigstore/sigstore-go/pkg/tlog
 github.com/sigstore/sigstore-go/pkg/tuf
 github.com/sigstore/sigstore-go/pkg/util
 github.com/sigstore/sigstore-go/pkg/verify
-# github.com/sigstore/sigstore/pkg/signature/kms/aws v1.10.9
-## explicit; go 1.25.0
+# github.com/sigstore/sigstore/pkg/signature/kms/aws v1.11.3
+## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/aws
-# github.com/sigstore/sigstore/pkg/signature/kms/azure v1.10.9
-## explicit; go 1.25.0
+# github.com/sigstore/sigstore/pkg/signature/kms/azure v1.11.3
+## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/azure
-# github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.10.9
-## explicit; go 1.25.0
+# github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.11.2
+## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/gcp
-# github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.10.9
-## explicit; go 1.25.0
+# github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.11.3
+## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/hashivault
-# github.com/sigstore/timestamp-authority/v2 v2.1.3
-## explicit; go 1.25.0
+# github.com/sigstore/timestamp-authority/v2 v2.2.0
+## explicit; go 1.27
 github.com/sigstore/timestamp-authority/v2/pkg/verification
+github.com/sigstore/timestamp-authority/v2/pkg/x509
 # github.com/sirupsen/logrus v1.10.2
 ## explicit; go 1.23
 github.com/sirupsen/logrus
@@ -3081,6 +3113,7 @@ go4.org/readerutil
 golang.org/x/crypto/argon2
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blake2b
+golang.org/x/crypto/blake2s
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/cast5
 golang.org/x/crypto/chacha20
@@ -3105,15 +3138,6 @@ golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 golang.org/x/crypto/ssh/knownhosts
-golang.org/x/crypto/ssh/terminal
-# golang.org/x/crypto/openpgp v0.1.0-deprecated
-## explicit; go 1.26.0
-golang.org/x/crypto/openpgp
-golang.org/x/crypto/openpgp/armor
-golang.org/x/crypto/openpgp/elgamal
-golang.org/x/crypto/openpgp/errors
-golang.org/x/crypto/openpgp/packet
-golang.org/x/crypto/openpgp/s2k
 # golang.org/x/exp v0.0.0-20261124000051-d6646c509b6d
 ## explicit; go 1.26.0
 golang.org/x/exp/constraints
