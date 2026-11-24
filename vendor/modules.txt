@@ -1762,7 +1762,7 @@ github.com/gpustack/gguf-parser-go/util/osx
 github.com/gpustack/gguf-parser-go/util/ptr
 github.com/gpustack/gguf-parser-go/util/slicex
 github.com/gpustack/gguf-parser-go/util/stringx
-# github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0
+# github.com/grpc-ecosystem/grpc-gateway/v2 v2.34.0
 ## explicit; go 1.26.0
 github.com/grpc-ecosystem/grpc-gateway/v2/internal/httprule
 github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2/options
