@@ -2261,7 +2261,13 @@ github.com/otiai10/copy
 ## explicit; go 1.18
 github.com/otiai10/mint
 github.com/otiai10/mint/mquery
-# github.com/pb33f/ordered-map/v2 v2.3.1
+# github.com/pb33f/go-yaml v0.1.0
+## explicit; go 1.18
+github.com/pb33f/go-yaml
+github.com/pb33f/go-yaml/internal/libyaml
+github.com/pb33f/go-yaml/internal/plugin
+github.com/pb33f/go-yaml/plugin/limit
+# github.com/pb33f/ordered-map/v2 v2.3.2
 ## explicit; go 1.24
 github.com/pb33f/ordered-map/v2
 # github.com/pborman/indent v1.2.1
@@ -3058,17 +3064,6 @@ go.yaml.in/yaml/v2
 # go.yaml.in/yaml/v3 v3.0.6
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
-# go.yaml.in/yaml/v4 v4.0.0
-## explicit; go 1.18
-go.yaml.in/yaml/v4
-go.yaml.in/yaml/v4/internal/libyaml
-go.yaml.in/yaml/v4/internal/plugin
-go.yaml.in/yaml/v4/internal/plugin/mergekey
-go.yaml.in/yaml/v4/plugin/aliasdata
-go.yaml.in/yaml/v4/plugin/errorformat/v3
-go.yaml.in/yaml/v4/plugin/errorformat/v4
-go.yaml.in/yaml/v4/plugin/loaderlimits
-go.yaml.in/yaml/v4/plugin/mergekey
 # go4.org v0.0.0-20261028031214-ed6929a230fe
 ## explicit; go 1.24.0
 go4.org/readerutil
