@@ -18,6 +18,7 @@ package minlz
 
 import (
 	"encoding/binary"
+	"math/bits"
 )
 
 func load8(b []byte, i int) byte {
@@ -36,6 +37,14 @@ func load64(b []byte, i int) uint64 {
 	return binary.LittleEndian.Uint64(b[i:])
 }
 
+func load256(b []byte, i int) [32]byte {
+	return [32]byte(b[i : i+32])
+}
+
+func store256(b []byte, idx int, v [32]byte) {
+	*(*[32]byte)(b[idx : idx+32]) = v
+}
+
 func store8(b []byte, idx int, v uint8) {
 	b[idx] = v
 }
@@ -46,4 +55,41 @@ func store16(b []byte, idx int, v uint16) {
 
 func store32(b []byte, idx int, v uint32) {
 	binary.LittleEndian.PutUint32(b[idx:], v)
+}
+
+func tablePopulation(table []byte) (setBits, totalBits int) {
+	for _, b := range table {
+		setBits += bits.OnesCount8(b)
+	}
+	return setBits, len(table) * 8
+}
+
+func reduceTable(table []byte, origPopcount, maxReducedPopPct int) ([]byte, uint8) {
+	if origPopcount == 0 {
+		reductions := uint8(0)
+		for len(table)/2 >= 32 {
+			table = table[:len(table)/2]
+			reductions++
+		}
+		return table, reductions
+	}
+	reductions := uint8(0)
+	for len(table)/2 >= 32 {
+		half := len(table) / 2
+		lower := table[:half]
+		upper := table[half : half+half]
+		pop := 0
+		for i := range lower {
+			pop += bits.OnesCount8(lower[i] | upper[i])
+		}
+		if pop*100 > half*8*maxReducedPopPct {
+			break
+		}
+		for i := range lower {
+			lower[i] |= upper[i]
+		}
+		table = lower
+		reductions++
+	}
+	return table, reductions
 }
