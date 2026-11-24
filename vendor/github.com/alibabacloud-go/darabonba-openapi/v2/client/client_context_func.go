@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 
 	spi "github.com/alibabacloud-go/alibabacloud-gateway-spi/client"
 	openapiutil "github.com/alibabacloud-go/darabonba-openapi/v2/utils"
@@ -36,6 +35,10 @@ import (
 //
 // @return the response
 func (client *Client) DoRPCRequestWithCtx(ctx context.Context, action *string, version *string, protocol *string, method *string, authType *string, bodyType *string, request *openapiutil.OpenApiRequest, runtime *dara.RuntimeOptions) (_result map[string]interface{}, _err error) {
+	requestEndpoint, endpointErr := client.endpointForRequest(request)
+	if endpointErr != nil {
+		return nil, endpointErr
+	}
 	_runtime := dara.NewRuntimeObject(map[string]interface{}{
 		"key":            dara.ToString(dara.Default(dara.StringValue(runtime.Key), dara.StringValue(client.Key))),
 		"cert":           dara.ToString(dara.Default(dara.StringValue(runtime.Cert), dara.StringValue(client.Cert))),
@@ -48,6 +51,7 @@ func (client *Client) DoRPCRequestWithCtx(ctx context.Context, action *string, v
 		"socks5Proxy":    dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 		"socks5NetWork":  dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 		"maxIdleConns":   dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+		"ipv4Only":       dara.BoolValue(client.Ipv4Only),
 		"retryOptions":   client.RetryOptions,
 		"ignoreSSL":      dara.BoolValue(runtime.IgnoreSSL),
 		"httpClient":     client.HttpClient,
@@ -126,7 +130,7 @@ func (client *Client) DoRPCRequestWithCtx(ctx context.Context, action *string, v
 		if dara.IsNil(headers) {
 			// endpoint is setted in product client
 			request_.Headers = dara.Merge(map[string]*string{
-				"host":          client.Endpoint,
+				"host":          requestEndpoint,
 				"x-acs-version": version,
 				"x-acs-action":  action,
 				"user-agent":    openapiutil.GetUserAgent(client.UserAgent),
@@ -135,7 +139,7 @@ func (client *Client) DoRPCRequestWithCtx(ctx context.Context, action *string, v
 				request.Headers)
 		} else {
 			request_.Headers = dara.Merge(map[string]*string{
-				"host":          client.Endpoint,
+				"host":          requestEndpoint,
 				"x-acs-version": version,
 				"x-acs-action":  action,
 				"user-agent":    openapiutil.GetUserAgent(client.UserAgent),
@@ -271,6 +275,10 @@ func (client *Client) DoRPCRequestWithCtx(ctx context.Context, action *string, v
 //
 // @return the response
 func (client *Client) DoROARequestWithCtx(ctx context.Context, action *string, version *string, protocol *string, method *string, authType *string, pathname *string, bodyType *string, request *openapiutil.OpenApiRequest, runtime *dara.RuntimeOptions) (_result map[string]interface{}, _err error) {
+	requestEndpoint, endpointErr := client.endpointForRequest(request)
+	if endpointErr != nil {
+		return nil, endpointErr
+	}
 	_runtime := dara.NewRuntimeObject(map[string]interface{}{
 		"key":            dara.ToString(dara.Default(dara.StringValue(runtime.Key), dara.StringValue(client.Key))),
 		"cert":           dara.ToString(dara.Default(dara.StringValue(runtime.Cert), dara.StringValue(client.Cert))),
@@ -283,6 +291,7 @@ func (client *Client) DoROARequestWithCtx(ctx context.Context, action *string, v
 		"socks5Proxy":    dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 		"socks5NetWork":  dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 		"maxIdleConns":   dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+		"ipv4Only":       dara.BoolValue(client.Ipv4Only),
 		"retryOptions":   client.RetryOptions,
 		"ignoreSSL":      dara.BoolValue(runtime.IgnoreSSL),
 		"httpClient":     client.HttpClient,
@@ -338,7 +347,7 @@ func (client *Client) DoROARequestWithCtx(ctx context.Context, action *string, v
 
 		request_.Headers = dara.Merge(map[string]*string{
 			"date":                    openapiutil.GetDateUTCString(),
-			"host":                    client.Endpoint,
+			"host":                    requestEndpoint,
 			"accept":                  dara.String("application/json"),
 			"x-acs-signature-nonce":   openapiutil.GetNonce(),
 			"x-acs-signature-method":  dara.String("HMAC-SHA1"),
@@ -472,6 +481,10 @@ func (client *Client) DoROARequestWithCtx(ctx context.Context, action *string, v
 //
 // @return the response
 func (client *Client) DoROAFormRequestWithCtx(ctx context.Context, action *string, version *string, protocol *string, method *string, authType *string, pathname *string, bodyType *string, request *openapiutil.OpenApiRequest, runtime *dara.RuntimeOptions) (_result map[string]interface{}, _err error) {
+	requestEndpoint, endpointErr := client.endpointForRequest(request)
+	if endpointErr != nil {
+		return nil, endpointErr
+	}
 	_runtime := dara.NewRuntimeObject(map[string]interface{}{
 		"key":            dara.ToString(dara.Default(dara.StringValue(runtime.Key), dara.StringValue(client.Key))),
 		"cert":           dara.ToString(dara.Default(dara.StringValue(runtime.Cert), dara.StringValue(client.Cert))),
@@ -484,6 +497,7 @@ func (client *Client) DoROAFormRequestWithCtx(ctx context.Context, action *strin
 		"socks5Proxy":    dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 		"socks5NetWork":  dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 		"maxIdleConns":   dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+		"ipv4Only":       dara.BoolValue(client.Ipv4Only),
 		"retryOptions":   client.RetryOptions,
 		"ignoreSSL":      dara.BoolValue(runtime.IgnoreSSL),
 		"httpClient":     client.HttpClient,
@@ -539,7 +553,7 @@ func (client *Client) DoROAFormRequestWithCtx(ctx context.Context, action *strin
 
 		request_.Headers = dara.Merge(map[string]*string{
 			"date":                    openapiutil.GetDateUTCString(),
-			"host":                    client.Endpoint,
+			"host":                    requestEndpoint,
 			"accept":                  dara.String("application/json"),
 			"x-acs-signature-nonce":   openapiutil.GetNonce(),
 			"x-acs-signature-method":  dara.String("HMAC-SHA1"),
@@ -672,6 +686,10 @@ func (client *Client) DoROAFormRequestWithCtx(ctx context.Context, action *strin
 //
 // @return the response
 func (client *Client) DoRequestWithCtx(ctx context.Context, params *openapiutil.Params, request *openapiutil.OpenApiRequest, runtime *dara.RuntimeOptions) (_result map[string]interface{}, _err error) {
+	requestEndpoint, endpointErr := client.endpointForRequest(request)
+	if endpointErr != nil {
+		return nil, endpointErr
+	}
 	_runtime := dara.NewRuntimeObject(map[string]interface{}{
 		"key":            dara.ToString(dara.Default(dara.StringValue(runtime.Key), dara.StringValue(client.Key))),
 		"cert":           dara.ToString(dara.Default(dara.StringValue(runtime.Cert), dara.StringValue(client.Cert))),
@@ -684,6 +702,7 @@ func (client *Client) DoRequestWithCtx(ctx context.Context, params *openapiutil.
 		"socks5Proxy":    dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 		"socks5NetWork":  dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 		"maxIdleConns":   dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+		"ipv4Only":       dara.BoolValue(client.Ipv4Only),
 		"retryOptions":   client.RetryOptions,
 		"ignoreSSL":      dara.BoolValue(runtime.IgnoreSSL),
 		"httpClient":     client.HttpClient,
@@ -729,6 +748,7 @@ func (client *Client) DoRequestWithCtx(ctx context.Context, params *openapiutil.
 			"socks5Proxy":                dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 			"socks5NetWork":              dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 			"maxIdleConns":               dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+			"ipv4Only":                   dara.BoolValue(client.Ipv4Only),
 			"retryOptions":               client.RetryOptions,
 			"ignoreSSL":                  dara.BoolValue(runtime.IgnoreSSL),
 			"httpClient":                 client.HttpClient,
@@ -797,7 +817,7 @@ func (client *Client) DoRequestWithCtx(ctx context.Context, params *openapiutil.
 			request.Query)
 		// endpoint is setted in product client
 		request_.Headers = dara.Merge(map[string]*string{
-			"host":                  client.Endpoint,
+			"host":                  requestEndpoint,
 			"x-acs-version":         params.Version,
 			"x-acs-action":          params.Action,
 			"user-agent":            openapiutil.GetUserAgent(client.UserAgent),
@@ -1015,6 +1035,10 @@ func (client *Client) DoRequestWithCtx(ctx context.Context, params *openapiutil.
 //
 // @return the response
 func (client *Client) ExecuteWithCtx(ctx context.Context, params *openapiutil.Params, request *openapiutil.OpenApiRequest, runtime *dara.RuntimeOptions) (_result map[string]interface{}, _err error) {
+	requestEndpoint, endpointErr := client.endpointForRequest(request)
+	if endpointErr != nil {
+		return nil, endpointErr
+	}
 	_runtime := dara.NewRuntimeObject(map[string]interface{}{
 		"key":            dara.ToString(dara.Default(dara.StringValue(runtime.Key), dara.StringValue(client.Key))),
 		"cert":           dara.ToString(dara.Default(dara.StringValue(runtime.Cert), dara.StringValue(client.Cert))),
@@ -1027,6 +1051,7 @@ func (client *Client) ExecuteWithCtx(ctx context.Context, params *openapiutil.Pa
 		"socks5Proxy":    dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 		"socks5NetWork":  dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 		"maxIdleConns":   dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+		"ipv4Only":       dara.BoolValue(client.Ipv4Only),
 		"retryOptions":   client.RetryOptions,
 		"ignoreSSL":      dara.BoolValue(runtime.IgnoreSSL),
 		"httpClient":     client.HttpClient,
@@ -1120,7 +1145,7 @@ func (client *Client) ExecuteWithCtx(ctx context.Context, params *openapiutil.Pa
 		}
 		configurationContext := &spi.InterceptorContextConfiguration{
 			RegionId:     client.RegionId,
-			Endpoint:     dara.String(dara.ToString(dara.Default(dara.StringValue(request.EndpointOverride), dara.StringValue(client.Endpoint)))),
+			Endpoint:     requestEndpoint,
 			EndpointRule: client.EndpointRule,
 			EndpointMap:  client.EndpointMap,
 			EndpointType: client.EndpointType,
@@ -1131,10 +1156,7 @@ func (client *Client) ExecuteWithCtx(ctx context.Context, params *openapiutil.Pa
 			Request:       requestContext,
 			Configuration: configurationContext,
 		}
-		attributeMap := &spi.AttributeMap{}
-		if !dara.IsNil(client.AttributeMap) {
-			attributeMap = client.AttributeMap
-		}
+		attributeMap := client.attributeMapWithEndpointSuffix()
 
 		// 1. spi.modifyConfiguration(context: SPI.InterceptorContext, attributeMap: SPI.AttributeMap);
 		_err = client.Spi.ModifyConfiguration(interceptorContext, attributeMap)
@@ -1220,6 +1242,11 @@ func (client *Client) ExecuteWithCtx(ctx context.Context, params *openapiutil.Pa
 func (client *Client) CallSSEApiWithCtx(ctx context.Context, params *openapiutil.Params, request *openapiutil.OpenApiRequest, runtime *dara.RuntimeOptions, _yield chan *SSEResponse, _yieldErr chan error) {
 	defer close(_yield)
 	defer close(_yieldErr)
+	requestEndpoint, endpointErr := client.endpointForRequest(request)
+	if endpointErr != nil {
+		_yieldErr <- endpointErr
+		return
+	}
 	_runtime := dara.NewRuntimeObject(map[string]interface{}{
 		"key":            dara.ToString(dara.Default(dara.StringValue(runtime.Key), dara.StringValue(client.Key))),
 		"cert":           dara.ToString(dara.Default(dara.StringValue(runtime.Cert), dara.StringValue(client.Cert))),
@@ -1232,6 +1259,7 @@ func (client *Client) CallSSEApiWithCtx(ctx context.Context, params *openapiutil
 		"socks5Proxy":    dara.ToString(dara.Default(dara.StringValue(runtime.Socks5Proxy), dara.StringValue(client.Socks5Proxy))),
 		"socks5NetWork":  dara.ToString(dara.Default(dara.StringValue(runtime.Socks5NetWork), dara.StringValue(client.Socks5NetWork))),
 		"maxIdleConns":   dara.ForceInt(dara.Default(dara.IntValue(runtime.MaxIdleConns), dara.IntValue(client.MaxIdleConns))),
+		"ipv4Only":       dara.BoolValue(client.Ipv4Only),
 		"retryOptions":   client.RetryOptions,
 		"ignoreSSL":      dara.BoolValue(runtime.IgnoreSSL),
 		"httpClient":     client.HttpClient,
@@ -1290,7 +1318,7 @@ func (client *Client) CallSSEApiWithCtx(ctx context.Context, params *openapiutil
 			request.Query)
 		// endpoint is setted in product client
 		request_.Headers = dara.Merge(map[string]*string{
-			"host":                  client.Endpoint,
+			"host":                  requestEndpoint,
 			"x-acs-version":         params.Version,
 			"x-acs-action":          params.Action,
 			"user-agent":            openapiutil.GetUserAgent(client.UserAgent),
@@ -1497,18 +1525,20 @@ func doRPCRequestWithCtx_opResponse(response_ *dara.Response, client *Client, bo
 		err := dara.ToMap(_res)
 		requestId := dara.Default(err["RequestId"], err["requestId"])
 		code := dara.Default(err["Code"], err["code"])
-		if strings.Contains(dara.ToString(code), "Throttling") {
+		retryAfter := openapiutil.GetThrottlingTimeLeft(response_.Headers)
+		if !dara.IsNil(retryAfter) {
 			_err = &ThrottlingError{
 				StatusCode:  response_.StatusCode,
 				Code:        dara.String(dara.ToString(code)),
 				Message:     dara.String("code: " + dara.ToString(dara.IntValue(response_.StatusCode)) + ", " + dara.ToString(dara.Default(err["Message"], err["message"])) + " request id: " + dara.ToString(requestId)),
 				Detail:      dara.String(dara.ToString(dara.Default(err["Detail"], err["detail"]))),
 				Description: dara.String(dara.ToString(dara.Default(err["Description"], err["description"]))),
-				RetryAfter:  openapiutil.GetThrottlingTimeLeft(response_.Headers),
+				RetryAfter:  retryAfter,
 				Data:        err,
 				RequestId:   dara.String(dara.ToString(requestId)),
 			}
 			return _result, _err
+
 		} else if (dara.IntValue(response_.StatusCode) >= 400) && (dara.IntValue(response_.StatusCode) < 500) {
 			_err = &ClientError{
 				StatusCode:         response_.StatusCode,
@@ -1627,18 +1657,20 @@ func doROARequestWithCtx_opResponse(response_ *dara.Response, client *Client, bo
 		requestId := dara.ToString(dara.Default(err["RequestId"], err["requestId"]))
 		requestId = dara.ToString(dara.Default(requestId, err["requestid"]))
 		code := dara.ToString(dara.Default(err["Code"], err["code"]))
-		if strings.Contains(code, "Throttling") {
+		retryAfter := openapiutil.GetThrottlingTimeLeft(response_.Headers)
+		if !dara.IsNil(retryAfter) {
 			_err = &ThrottlingError{
 				StatusCode:  response_.StatusCode,
 				Code:        dara.String(code),
 				Message:     dara.String("code: " + dara.ToString(dara.IntValue(response_.StatusCode)) + ", " + dara.ToString(dara.Default(err["Message"], err["message"])) + " request id: " + requestId),
 				Detail:      dara.String(dara.ToString(dara.Default(err["Detail"], err["detail"]))),
 				Description: dara.String(dara.ToString(dara.Default(err["Description"], err["description"]))),
-				RetryAfter:  openapiutil.GetThrottlingTimeLeft(response_.Headers),
+				RetryAfter:  retryAfter,
 				Data:        err,
 				RequestId:   dara.String(requestId),
 			}
 			return _result, _err
+
 		} else if (dara.IntValue(response_.StatusCode) >= 400) && (dara.IntValue(response_.StatusCode) < 500) {
 			_err = &ClientError{
 				StatusCode:         response_.StatusCode,
@@ -1756,18 +1788,20 @@ func doROAFormRequestWithCtx_opResponse(response_ *dara.Response, client *Client
 		err := dara.ToMap(_res)
 		requestId := dara.ToString(dara.Default(err["RequestId"], err["requestId"]))
 		code := dara.ToString(dara.Default(err["Code"], err["code"]))
-		if strings.Contains(code, "Throttling") {
+		retryAfter := openapiutil.GetThrottlingTimeLeft(response_.Headers)
+		if !dara.IsNil(retryAfter) {
 			_err = &ThrottlingError{
 				StatusCode:  response_.StatusCode,
 				Code:        dara.String(code),
 				Message:     dara.String("code: " + dara.ToString(dara.IntValue(response_.StatusCode)) + ", " + dara.ToString(dara.Default(err["Message"], err["message"])) + " request id: " + requestId),
 				Detail:      dara.String(dara.ToString(dara.Default(err["Detail"], err["detail"]))),
 				Description: dara.String(dara.ToString(dara.Default(err["Description"], err["description"]))),
-				RetryAfter:  openapiutil.GetThrottlingTimeLeft(response_.Headers),
+				RetryAfter:  retryAfter,
 				Data:        err,
 				RequestId:   dara.String(requestId),
 			}
 			return _result, _err
+
 		} else if (dara.IntValue(response_.StatusCode) >= 400) && (dara.IntValue(response_.StatusCode) < 500) {
 			_err = &ClientError{
 				StatusCode:         response_.StatusCode,
@@ -1889,18 +1923,20 @@ func doRequestWithCtx_opResponse(response_ *dara.Response, client *Client, param
 
 		requestId := dara.ToString(dara.Default(err["RequestId"], err["requestId"]))
 		code := dara.ToString(dara.Default(err["Code"], err["code"]))
-		if strings.Contains(code, "Throttling") {
+		retryAfter := openapiutil.GetThrottlingTimeLeft(response_.Headers)
+		if !dara.IsNil(retryAfter) {
 			_err = &ThrottlingError{
 				StatusCode:  response_.StatusCode,
 				Code:        dara.String(code),
 				Message:     dara.String("code: " + dara.ToString(dara.IntValue(response_.StatusCode)) + ", " + dara.ToString(dara.Default(err["Message"], err["message"])) + " request id: " + requestId),
 				Detail:      dara.String(dara.ToString(dara.Default(err["Detail"], err["detail"]))),
 				Description: dara.String(dara.ToString(dara.Default(err["Description"], err["description"]))),
-				RetryAfter:  openapiutil.GetThrottlingTimeLeft(response_.Headers),
+				RetryAfter:  retryAfter,
 				Data:        err,
 				RequestId:   dara.String(requestId),
 			}
 			return _result, _err
+
 		} else if (dara.IntValue(response_.StatusCode) >= 400) && (dara.IntValue(response_.StatusCode) < 500) {
 			_err = &ClientError{
 				StatusCode:         response_.StatusCode,
