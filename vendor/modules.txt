@@ -1586,16 +1586,11 @@ github.com/go-viper/mapstructure/v2/internal/errors
 # github.com/gobuffalo/flect v1.0.3
 ## explicit; go 1.16
 github.com/gobuffalo/flect
-# github.com/gobwas/glob v0.2.3
-## explicit
+# github.com/gobwas/glob v1.1.0
+## explicit; go 1.24.0
 github.com/gobwas/glob
-github.com/gobwas/glob/compiler
-github.com/gobwas/glob/match
+github.com/gobwas/glob/internal/debug
 github.com/gobwas/glob/syntax
-github.com/gobwas/glob/syntax/ast
-github.com/gobwas/glob/syntax/lexer
-github.com/gobwas/glob/util/runes
-github.com/gobwas/glob/util/strings
 # github.com/goccy/go-json v0.12.0
 ## explicit; go 1.23
 github.com/goccy/go-json
@@ -1977,7 +1972,7 @@ github.com/lestrrat-go/httprc/v3
 github.com/lestrrat-go/httprc/v3/errsink
 github.com/lestrrat-go/httprc/v3/proxysink
 github.com/lestrrat-go/httprc/v3/tracesink
-# github.com/lestrrat-go/jwx/v3 v3.2.0
+# github.com/lestrrat-go/jwx/v3 v3.4.0
 ## explicit; go 1.25.0
 github.com/lestrrat-go/jwx/v3
 github.com/lestrrat-go/jwx/v3/cert
@@ -2000,6 +1995,8 @@ github.com/lestrrat-go/jwx/v3/jwk/ecdsa
 github.com/lestrrat-go/jwx/v3/jwk/internal/registry
 github.com/lestrrat-go/jwx/v3/jwk/jwkbb
 github.com/lestrrat-go/jwx/v3/jws
+github.com/lestrrat-go/jwx/v3/jws/internal/jwsbb
+github.com/lestrrat-go/jwx/v3/jws/internal/keyalg
 github.com/lestrrat-go/jwx/v3/jws/internal/keytype
 github.com/lestrrat-go/jwx/v3/jws/jwsbb
 github.com/lestrrat-go/jwx/v3/jws/legacy
@@ -2208,7 +2205,7 @@ github.com/olekukonko/tablewriter/pkg/twwarp
 github.com/olekukonko/tablewriter/pkg/twwidth
 github.com/olekukonko/tablewriter/renderer
 github.com/olekukonko/tablewriter/tw
-# github.com/open-policy-agent/opa v1.20.1
+# github.com/open-policy-agent/opa v1.22.4
 ## explicit; go 1.26.0
 github.com/open-policy-agent/opa/capabilities
 github.com/open-policy-agent/opa/internal/bundle
@@ -2232,6 +2229,7 @@ github.com/open-policy-agent/opa/internal/merge
 github.com/open-policy-agent/opa/internal/methodlesstemplate
 github.com/open-policy-agent/opa/internal/methodlesstemplate/internal/fmtsort
 github.com/open-policy-agent/opa/internal/planner
+github.com/open-policy-agent/opa/internal/prefixtrie
 github.com/open-policy-agent/opa/internal/providers/aws
 github.com/open-policy-agent/opa/internal/providers/aws/crypto
 github.com/open-policy-agent/opa/internal/providers/aws/v4
@@ -2248,6 +2246,7 @@ github.com/open-policy-agent/opa/internal/wasm/opcode
 github.com/open-policy-agent/opa/internal/wasm/sdk/opa/capabilities
 github.com/open-policy-agent/opa/internal/wasm/types
 github.com/open-policy-agent/opa/internal/wasm/util
+github.com/open-policy-agent/opa/internal/yaml
 github.com/open-policy-agent/opa/v1/ast
 github.com/open-policy-agent/opa/v1/ast/internal/scanner
 github.com/open-policy-agent/opa/v1/ast/internal/tokens
@@ -2427,9 +2426,6 @@ github.com/protocolbuffers/txtpbfmt/wrap
 github.com/pterm/pterm
 github.com/pterm/pterm/internal
 github.com/pterm/pterm/internal/color
-# github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9
-## explicit
-github.com/rcrowley/go-metrics
 # github.com/rivo/uniseg v0.4.7
 ## explicit; go 1.18
 github.com/rivo/uniseg
@@ -2787,9 +2783,6 @@ github.com/syndtr/goleveldb/leveldb/util
 # github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 ## explicit; go 1.26
 github.com/tailscale/hujson
-# github.com/tchap/go-patricia/v2 v2.3.3
-## explicit; go 1.16
-github.com/tchap/go-patricia/v2/patricia
 # github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834
 ## explicit; go 1.18
 github.com/tetratelabs/wabin/binary
@@ -4223,8 +4216,8 @@ k8s.io/utils/net
 k8s.io/utils/ptr
 k8s.io/utils/third_party/forked/golang/btree
 k8s.io/utils/trace
-# oras.land/oras-go/v2 v2.6.2
-## explicit; go 1.25.0
+# oras.land/oras-go/v2 v2.7.0
+## explicit; go 1.26.0
 oras.land/oras-go/v2
 oras.land/oras-go/v2/content
 oras.land/oras-go/v2/content/file

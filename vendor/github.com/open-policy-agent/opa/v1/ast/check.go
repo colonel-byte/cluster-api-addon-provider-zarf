@@ -35,6 +35,8 @@ type typeChecker struct {
 	schemaTypes         map[string]types.Type
 	dependentsResolver  dependentsResolver
 	withTrees           map[string]*typeTreeNode
+	replacedRules       func() map[*Rule]struct{}
+	replaced            map[*Rule]struct{}
 }
 
 // newTypeChecker returns a new typeChecker object that has no errors.
@@ -44,13 +46,28 @@ func newTypeChecker() *typeChecker {
 
 func (tc *typeChecker) newEnv(exist *TypeEnv) *TypeEnv {
 	if exist != nil {
-		return exist.wrap()
+		env := exist.wrap()
+		// The wrapped environment would otherwise inherit exist's checker
+		// factory, which may have been built with a different configuration
+		// than tc -- the compiler seeds Compiler.TypeEnv from a bare checker,
+		// for one. Comprehension bodies are typed lazily through this factory,
+		// so it has to reflect the checker that is running now.
+		env.newChecker = tc.copyForEnv
+		return env
 	}
 	env := newTypeEnv(tc.copy)
 	if tc.input != nil {
 		env.tree.Put(InputRootRef, tc.input)
 	}
 	return env
+}
+
+// copyForEnv returns a checker for typing the closures an environment is asked
+// about. It drops the required-capabilities accumulator: environments outlive
+// the compilation that produced them, and the builtins in those closures are
+// already recorded by checkClosures.
+func (tc *typeChecker) copyForEnv() *typeChecker {
+	return tc.copy().WithRequiredCapabilities(nil)
 }
 
 func (tc *typeChecker) copy() *typeChecker {
@@ -94,6 +111,26 @@ func (tc *typeChecker) WithAllowNet(hosts []string) *typeChecker {
 func (tc *typeChecker) WithVarRewriter(f varRewriter) *typeChecker {
 	tc.varRewriter = f
 	return tc
+}
+
+// WithReplacedRules sets the function returning the rules that a with modifier
+// replaces somewhere. Their values are not known statically, so empty collections
+// in their types are typed as any. It is called at most once, and only if a rule
+// has such a type.
+func (tc *typeChecker) WithReplacedRules(f func() map[*Rule]struct{}) *typeChecker {
+	tc.replacedRules = f
+	return tc
+}
+
+func (tc *typeChecker) isReplaced(rule *Rule) bool {
+	if tc.replacedRules == nil {
+		return false
+	}
+	if tc.replaced == nil {
+		tc.replaced = tc.replacedRules()
+	}
+	_, ok := tc.replaced[rule]
+	return ok
 }
 
 // WithDependentsResolver sets the function used to look up the rules that depend
@@ -246,7 +283,6 @@ func (tc *typeChecker) getSchemaType(schemaAnnot *SchemaAnnotation, rule *Rule) 
 }
 
 func (tc *typeChecker) checkRule(env *TypeEnv, as *AnnotationSet, rule *Rule) {
-
 	env = env.wrap()
 
 	schemaAnnots := getRuleAnnotation(as, rule)
@@ -307,7 +343,16 @@ func (tc *typeChecker) checkRule(env *TypeEnv, as *AnnotationSet, rule *Rule) {
 			args[i] = cpy.GetByValue(rule.Head.Args[i].Value)
 		}
 
-		tpe = types.NewFunction(args, cpy.GetByValue(rule.Head.Value.Value))
+		result := cpy.GetByValue(rule.Head.Value.Value)
+		if result == nil && tc.allowUndefinedFuncs {
+			// The value is only unknown because it came out of a call to an
+			// undefined function. Recording a function type without a result
+			// would make callers look like they pass one argument too many, so
+			// fall back to any.
+			result = types.A
+		}
+
+		tpe = types.NewFunction(args, result)
 	} else {
 		switch rule.Head.RuleKind() {
 		case SingleValue:
@@ -346,6 +391,10 @@ func (tc *typeChecker) checkRule(env *TypeEnv, as *AnnotationSet, rule *Rule) {
 	}
 
 	if tpe != nil {
+		if hasEmptyCollectionType(tpe) && tc.isReplaced(rule) {
+			// e.g. `default x := {}`, which tests replace with another value.
+			tpe = relaxEmptyCollections(tpe)
+		}
 		env.tree.Insert(path, tpe, env)
 	}
 }
@@ -357,23 +406,17 @@ func nestedObject(env *TypeEnv, path Ref, tpe types.Type) (types.Type, error) {
 		return tpe, nil
 	}
 
-	k := path[0]
 	typeV, err := nestedObject(env, path[1:], tpe)
-	if err != nil {
+	if err != nil || typeV == nil {
 		return nil, err
 	}
-	if typeV == nil {
-		return nil, nil
-	}
 
-	var dynamicProperty *types.DynamicProperty
-	typeK := env.GetByValue(k.Value)
+	typeK := env.GetByValue(path[0].Value)
 	if typeK == nil {
 		return nil, nil
 	}
-	dynamicProperty = types.NewDynamicProperty(typeK, typeV)
 
-	return types.NewObject(nil, dynamicProperty), nil
+	return types.NewObject(nil, types.NewDynamicProperty(typeK, typeV)), nil
 }
 
 func (tc *typeChecker) checkExpr(env *TypeEnv, expr *Expr) *Error {
@@ -395,11 +438,73 @@ func (tc *typeChecker) checkExpr(env *TypeEnv, expr *Expr) *Error {
 		}
 	}
 
-	if operator == "eq" {
+	switch operator {
+	case Equality.Name:
 		return checkExprEq(env, expr)
+	case Member.Name, MemberWithKey.Name:
+		if err := checkExprMember(env, expr, operator == MemberWithKey.Name); err != nil {
+			return err
+		}
 	}
 
 	return tc.checkExprBuiltin(env, expr)
+}
+
+// checkExprMember type checks the `in` operator, whose operands are declared as
+// any: what may be found in a collection depends on the collection's own type,
+// which a function declaration can't express.
+func checkExprMember(env *TypeEnv, expr *Expr, withKey bool) *Error {
+	arity := Member.Decl.Arity()
+	if withKey {
+		arity = MemberWithKey.Decl.Arity()
+	}
+
+	args := expr.Operands()
+	if len(args) < arity {
+		return nil // too few arguments; reported by checkExprBuiltin
+	}
+
+	collection := env.GetByValue(args[arity-1].Value)
+
+	// `in` yields false rather than erroring for operands it can't enumerate.
+	values := types.Values(collection)
+	if values == nil {
+		return nil
+	}
+
+	if withKey {
+		if err := checkExprMemberOperand(env, expr, args[0], types.Keys(collection)); err != nil {
+			return err
+		}
+	}
+
+	return checkExprMemberOperand(env, expr, args[arity-2], values)
+}
+
+// checkExprMemberOperand checks that term can occur in the collection being
+// searched, inferring the type of untyped terms (e.g. `some x in xs`) as it goes.
+func checkExprMemberOperand(env *TypeEnv, expr *Expr, term *Term, tpe types.Type) *Error {
+	if tpe == nil || types.Nil(tpe) {
+		return nil
+	}
+
+	have := env.GetByValue(term.Value)
+
+	// unifies rejects already-typed terms; unify1 infers types for untyped vars
+	// and checks the resolved parts of partially typed composites.
+	if (!types.Nil(have) && !unifies(have, tpe)) || !unify1(env, term, tpe, false) {
+		return &Error{
+			Code:     TypeErr,
+			Location: expr.Location,
+			Message:  "match error",
+			Details: &UnificationErrDetail{
+				Left:  have,
+				Right: tpe,
+			},
+		}
+	}
+
+	return nil
 }
 
 func (tc *typeChecker) checkExprBuiltin(env *TypeEnv, expr *Expr) *Error {
@@ -477,14 +582,16 @@ func (tc *typeChecker) checkExprBuiltin(env *TypeEnv, expr *Expr) *Error {
 }
 
 func checkExprEq(env *TypeEnv, expr *Expr) *Error {
+	ops := expr.Operands()
+	num := len(ops)
 
-	pre := getArgTypes(env, expr.Operands())
-
-	if len(pre) < Equality.Decl.Arity() {
+	if num < Equality.Decl.Arity() {
+		pre := getArgTypes(env, ops)
 		return newArgError(expr.Location, expr.Operator(), "too few arguments", pre, Equality.Decl.FuncArgs())
 	}
 
-	if Equality.Decl.Arity() < len(pre) {
+	if Equality.Decl.Arity() < num {
+		pre := getArgTypes(env, ops)
 		return newArgError(expr.Location, expr.Operator(), "too many arguments", pre, Equality.Decl.FuncArgs())
 	}
 
@@ -643,6 +750,12 @@ func unify2(env *TypeEnv, a *Term, typeA types.Type, b *Term, typeB types.Type) 
 			return unify2Array(env, b, a)
 		case *object:
 			return unify2Object(env, b, a)
+		case Ref:
+			return unify1(env, a, types.A, false)
+		}
+	case Ref:
+		if _, ok := b.Value.(Var); ok {
+			return unify1(env, b, types.A, false)
 		}
 	}
 
@@ -799,7 +912,7 @@ func unify1Array(env *TypeEnv, val *Array, tpe *types.Array, union bool) bool {
 }
 
 func unify1Object(env *TypeEnv, val Object, tpe *types.Object, union bool) bool {
-	if val.Len() != len(tpe.Keys()) && tpe.DynamicValue() == nil {
+	if val.Len() != tpe.Len() && tpe.DynamicValue() == nil {
 		return false
 	}
 	stop := val.Until(func(k, v *Term) bool {
@@ -896,7 +1009,6 @@ func (rc *refChecker) checkApply(curr *TypeEnv, ref Ref) *Error {
 }
 
 func (rc *refChecker) checkRef(curr *TypeEnv, node *typeTreeNode, ref Ref, idx int) *Error {
-
 	if idx == len(ref) {
 		return nil
 	}
@@ -963,6 +1075,26 @@ func (rc *refChecker) checkRefLeaf(tpe types.Type, ref Ref, idx int) *Error {
 
 	head := ref[idx]
 
+	if isEmptyCollectionType(tpe) {
+		// The collection has no members at all, so a constant key can never
+		// match and is reported like any other missing key. Iterating with a
+		// non-constant key is valid and simply yields nothing, as is common for
+		// collections that are empty at the moment.
+		if IsScalar(head.Value) {
+			return newRefErrInvalid(ref[0].Location, rc.varRewriter(ref), idx, nil, nil, nil)
+		}
+		if v, ok := head.Value.(Var); ok {
+			exist := rc.env.GetByValue(v)
+			if exist == nil {
+				rc.env.vars.PutOne(v, types.A)
+			} else if keys := types.Keys(tpe); keys != nil && !unifies(exist, keys) {
+				// Only arrays constrain their keys: objects and sets accept any.
+				return newRefErrInvalid(ref[0].Location, rc.varRewriter(ref), idx, exist, keys, nil)
+			}
+		}
+		return nil
+	}
+
 	keys := types.Keys(tpe)
 	if keys == nil {
 		return newRefErrUnsupported(ref[0].Location, rc.varRewriter(ref), idx-1, tpe)
@@ -1000,6 +1132,96 @@ func (rc *refChecker) checkRefLeaf(tpe types.Type, ref Ref, idx int) *Error {
 	}
 
 	return rc.checkRefLeaf(types.Values(tpe), ref, idx+1)
+}
+
+// isEmptyCollectionType returns true if tpe is the type of a collection that
+// can hold nothing: an object with neither static nor dynamic properties, an
+// array with no items, or a set with no element type.
+func isEmptyCollectionType(tpe types.Type) bool {
+	if named, ok := tpe.(*types.NamedType); ok {
+		tpe = named.Type
+	}
+	if rec, ok := tpe.(*types.Recursive); ok {
+		tpe = rec.Unwrap()
+	}
+	switch tpe := tpe.(type) {
+	case *types.Object:
+		return len(tpe.StaticProperties()) == 0 && tpe.DynamicProperties() == nil
+	case *types.Array:
+		return tpe.Len() == 0 && tpe.Dynamic() == nil
+	case *types.Set:
+		return tpe.Of() == nil
+	}
+	return false
+}
+
+// hasEmptyCollectionType returns true if tpe is, or contains, an empty collection type.
+func hasEmptyCollectionType(tpe types.Type) bool {
+	if isEmptyCollectionType(tpe) {
+		return true
+	}
+	switch tpe := tpe.(type) {
+	case *types.Object:
+		for _, p := range tpe.StaticProperties() {
+			if hasEmptyCollectionType(p.Value) {
+				return true
+			}
+		}
+		if dp := tpe.DynamicProperties(); dp != nil {
+			return hasEmptyCollectionType(dp.Value)
+		}
+	case *types.Array:
+		for i := range tpe.Len() {
+			if hasEmptyCollectionType(tpe.Select(i)) {
+				return true
+			}
+		}
+		return tpe.Dynamic() != nil && hasEmptyCollectionType(tpe.Dynamic())
+	case *types.Set:
+		return tpe.Of() != nil && hasEmptyCollectionType(tpe.Of())
+	case types.Any:
+		return slices.ContainsFunc(tpe, hasEmptyCollectionType)
+	}
+	return false
+}
+
+// relaxEmptyCollections returns tpe with every empty collection type, however
+// deeply nested, replaced by any.
+func relaxEmptyCollections(tpe types.Type) types.Type {
+	if isEmptyCollectionType(tpe) {
+		return types.A
+	}
+	switch tpe := tpe.(type) {
+	case *types.Object:
+		static := make([]*types.StaticProperty, 0, len(tpe.StaticProperties()))
+		for _, p := range tpe.StaticProperties() {
+			static = append(static, types.NewStaticProperty(p.Key, relaxEmptyCollections(p.Value)))
+		}
+		var dynamic *types.DynamicProperty
+		if dp := tpe.DynamicProperties(); dp != nil {
+			dynamic = types.NewDynamicProperty(dp.Key, relaxEmptyCollections(dp.Value))
+		}
+		return types.NewObject(static, dynamic)
+	case *types.Array:
+		static := make([]types.Type, tpe.Len())
+		for i := range static {
+			static[i] = relaxEmptyCollections(tpe.Select(i))
+		}
+		var dynamic types.Type
+		if tpe.Dynamic() != nil {
+			dynamic = relaxEmptyCollections(tpe.Dynamic())
+		}
+		return types.NewArray(static, dynamic)
+	case *types.Set:
+		return types.NewSet(relaxEmptyCollections(tpe.Of()))
+	case types.Any:
+		members := make([]types.Type, len(tpe))
+		for i, m := range tpe {
+			members[i] = relaxEmptyCollections(m)
+		}
+		return types.NewAny(members...)
+	}
+	return tpe
 }
 
 // unifies checks whether two types are compatible with each other.
@@ -1064,6 +1286,11 @@ func unifies(a, b types.Type) bool {
 		b, ok := b.(*types.Set)
 		if !ok {
 			return false
+		}
+		// A set type without an element type is the empty set, which is a
+		// member of every set type.
+		if a.Of() == nil || b.Of() == nil {
+			return true
 		}
 		return unifies(types.Values(a), types.Values(b))
 	case *types.Function:
@@ -1172,10 +1399,42 @@ type ArgErrDetail struct {
 
 // Lines returns the string representation of the detail.
 func (d *ArgErrDetail) Lines() []string {
-	lines := make([]string, 2)
-	lines[0] = "have: " + formatArgs(d.Have)
-	lines[1] = "want: " + d.Want.String()
-	return lines
+	have := "have: " + formatArgs(d.Have)
+	want := "want: " + d.Want.String()
+
+	if !tooWideForTypeErr(have, want) {
+		return []string{have, want}
+	}
+
+	// Positions that only exist on one side, as is the case for arity errors,
+	// have nothing to be compared against, and are collapsed to their outermost
+	// type constructor.
+	haveArgs := util.Map(d.Have, elideType)
+	wantArgs := util.Map(d.Want.Args, elideType)
+
+	for i := range min(len(haveArgs), len(wantArgs)) {
+		haveArgs[i], wantArgs[i] = diffArg(d.Have[i], d.Want.Args[i])
+	}
+
+	if d.Want.Variadic != nil {
+		wantArgs = append(wantArgs, elideType(d.Want.Variadic)+"...")
+	}
+
+	return []string{
+		"have: (" + strings.Join(haveArgs, ", ") + ")",
+		"want: (" + strings.Join(wantArgs, ", ") + ")",
+	}
+}
+
+// diffArg renders an actual and an expected argument type side by side. The two
+// are only diffed if they are actually in conflict: an argument that the
+// function would have accepted is not what the error is about, and expanding it
+// is what makes these messages unreadable in the first place.
+func diffArg(have, want types.Type) (string, string) {
+	if have != nil && want != nil && unifies(unwrapNamedType(have), unwrapNamedType(want)) {
+		return elideType(have), elideType(want)
+	}
+	return sprintDiff(have, want)
 }
 
 func (d *ArgErrDetail) nilType() bool {
@@ -1195,10 +1454,44 @@ func (a *UnificationErrDetail) nilType() bool {
 
 // Lines returns the string representation of the detail.
 func (a *UnificationErrDetail) Lines() []string {
-	lines := make([]string, 2)
-	lines[0] = fmt.Sprint("left  : ", types.Sprint(a.Left))
-	lines[1] = fmt.Sprint("right : ", types.Sprint(a.Right))
-	return lines
+	leftLine := "left  : " + types.Sprint(a.Left)
+	rightLine := "right : " + types.Sprint(a.Right)
+
+	if tooWideForTypeErr(leftLine, rightLine) {
+		left, right := sprintDiff(a.Left, a.Right)
+		leftLine, rightLine = "left  : "+left, "right : "+right
+	}
+
+	if kind := sharedCompositeKind(a.Left, a.Right); kind != "" {
+		return []string{leftLine, rightLine, "hint  : both sides are " + kind +
+			" but their types differ, so they can never be equal (see " + matchErrorDocsURL + ")"}
+	}
+
+	return []string{leftLine, rightLine}
+}
+
+const matchErrorDocsURL = "https://www.openpolicyagent.org/docs/errors/rego-type-error/match-error"
+
+// sharedCompositeKind returns the plural kind name when a and b are both
+// objects, arrays, or sets. A mismatch between two values of the same kind is
+// the one users most often read as "== cannot compare these", so it gets a hint.
+func sharedCompositeKind(a, b types.Type) string {
+	a, b = unwrapNamedType(a), unwrapNamedType(b)
+	switch a.(type) {
+	case *types.Object:
+		if _, ok := b.(*types.Object); ok {
+			return "objects"
+		}
+	case *types.Array:
+		if _, ok := b.(*types.Array); ok {
+			return "arrays"
+		}
+	case *types.Set:
+		if _, ok := b.(*types.Set); ok {
+			return "sets"
+		}
+	}
+	return ""
 }
 
 // RefErrUnsupportedDetail describes an undefined reference error where the
@@ -1211,12 +1504,11 @@ type RefErrUnsupportedDetail struct {
 
 // Lines returns the string representation of the detail.
 func (r *RefErrUnsupportedDetail) Lines() []string {
-	lines := []string{
+	return []string{
 		r.Ref.String(),
 		strings.Repeat("^", len(r.Ref[:r.Pos+1].String())),
 		fmt.Sprintf("have: %v", r.Have),
 	}
-	return lines
 }
 
 // RefErrInvalidDetail describes an undefined reference error where the referenced
@@ -1243,6 +1535,10 @@ func (r *RefErrInvalidDetail) Lines() []string {
 	}
 	if len(r.OneOf) > 0 {
 		lines = append(lines, fmt.Sprintf("%swant (one of): %v", pad, r.OneOf))
+	} else if r.Want == nil {
+		// Neither candidate keys nor a key type: the referenced value has no
+		// selectable keys at all (e.g. an empty object).
+		lines = append(lines, pad+"want (one of): []")
 	} else {
 		lines = append(lines, fmt.Sprintf("%swant (type): %v", pad, r.Want))
 	}
@@ -1313,18 +1609,11 @@ func getOneOfForNode(node *typeTreeNode) []Value {
 func getOneOfForType(tpe types.Type) (result []Value) {
 	switch tpe := tpe.(type) {
 	case *types.Object:
-		for _, k := range tpe.Keys() {
-			v, err := InterfaceToValue(k)
-			if err != nil {
-				panic(err)
-			}
-			result = append(result, v)
-		}
-
+		result = util.Map(tpe.Keys(), MustInterfaceToValue)
 	case *types.Recursive:
 		return getOneOfForType(tpe.Unwrap())
-
 	case types.Any:
+		result = slices.Grow(result, len(tpe))
 		for _, object := range tpe {
 			objRes := getOneOfForType(object)
 			result = append(result, objRes...)
@@ -1419,7 +1708,7 @@ func override(ref Ref, t types.Type, o types.Type, rule *Rule) (types.Type, *Err
 }
 
 func getKeys(ref Ref, rule *Rule) ([]any, *Error) {
-	keys := []any{}
+	keys := make([]any, 0, len(ref))
 	for _, refElem := range ref {
 		key, err := JSON(refElem.Value)
 		if err != nil {
@@ -1448,7 +1737,6 @@ func getObjectType(ref Ref, o types.Type, rule *Rule, d *types.DynamicProperty) 
 }
 
 func getRuleAnnotation(as *AnnotationSet, rule *Rule) (result []*SchemaAnnotation) {
-
 	for _, x := range as.GetSubpackagesScope(rule.Module.Package.Path) {
 		result = append(result, x.Schemas...)
 	}
@@ -1469,15 +1757,12 @@ func getRuleAnnotation(as *AnnotationSet, rule *Rule) (result []*SchemaAnnotatio
 }
 
 func processAnnotation(ss *SchemaSet, annot *SchemaAnnotation, rule *Rule, allowNet []string) (types.Type, *Error) {
-
 	var schema any
-
 	if annot.Schema != nil {
 		if ss == nil {
 			return nil, nil
 		}
-		schema = ss.Get(annot.Schema)
-		if schema == nil {
+		if schema = ss.Get(annot.Schema); schema == nil {
 			return nil, NewError(TypeErr, rule.Location, "undefined schema: %v", annot.Schema)
 		}
 	} else if annot.Definition != nil {

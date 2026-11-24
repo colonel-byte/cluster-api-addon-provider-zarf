@@ -28,6 +28,7 @@ const defaultLocationFile = "__format_default__"
 var (
 	expandedConst     = ast.NewBody(ast.NewExpr(ast.InternedTerm(true)))
 	commentsSlicePool = util.NewSlicePool[*ast.Comment](50)
+	negativeRow       = &ast.Location{Row: -1}
 )
 
 // Opts lets you control the code formatting via `AstWithOpts()`.
@@ -41,11 +42,23 @@ type Opts struct {
 	// RegoVersion is the version of Rego to format code for.
 	RegoVersion ast.RegoVersion
 
+	// RegoVersionSpan is the span of Rego versions the formatted code must parse at: [v0, v2] for code
+	// compatible with both Rego v0 and v2, [v2, v2] for Rego v2 only. A span reaching v2 from an older
+	// version adds the 'rego.v2' import. If defined, it takes precedence over [Opts.RegoVersion].
+	RegoVersionSpan ast.RegoVersionSpan
+
 	// ParserOptions is the parser options used when parsing the module to be formatted.
 	ParserOptions *ast.ParserOptions
 
-	// DropV0Imports instructs the formatter to drop all v0 imports from the module; i.e. 'rego.v1' and 'future.keywords' imports.
-	// Imports are only removed if [Opts.RegoVersion] makes them redundant.
+	// DropRedundantDirectiveImports instructs the formatter to drop directive imports, which change how
+	// a module is parsed rather than bring anything into scope: 'rego.*' and 'future.*'.
+	// Imports are only removed if [Opts.RegoVersion] or [Opts.RegoVersionSpan] makes them redundant.
+	// Regardless of this option, 'rego.v1' is dropped from a module that imports 'rego.v2'.
+	DropRedundantDirectiveImports bool
+
+	// DropV0Imports is equivalent to [Opts.DropRedundantDirectiveImports]; either setting drops the imports.
+	//
+	// Deprecated: Use [Opts.DropRedundantDirectiveImports] instead.
 	DropV0Imports bool
 
 	// SkipDefensiveCopying, if true, will avoid deep-copying the AST before formatting it.
@@ -53,14 +66,46 @@ type Opts struct {
 	// as some formatting operations may otherwise mutate the AST.
 	SkipDefensiveCopying bool
 
+	// FailFast instructs the formatter to stop at the first element whose formatted form differs from the
+	// source text, and return an [UnformattedError] instead of laying out the rest of the module.
+	// Only the Source* functions honour this option, as they alone have source text to compare against.
+	// Not returning an [UnformattedError] doesn't promise that the output matches the source: FailFast never
+	// reports a formatted module as unformatted, but it doesn't catch every difference either.
+	FailFast bool
+
 	Capabilities *ast.Capabilities
+
+	// srcCheck carries the source text that FailFast compares against. It stays unexported so
+	// that only SourceWithOpts can set it, since the comparison is only sound when the bytes
+	// are the ones x was parsed from.
+	srcCheck *srcChecker
 }
 
-func (o Opts) effectiveRegoVersion() ast.RegoVersion {
-	if o.RegoVersion == ast.RegoUndefined {
-		return ast.DefaultRegoVersion
+// UnformattedError is returned by the Source* functions when [Opts.FailFast] is set and the formatted output
+// differs from the source. Loc is the element being written when the difference was noticed.
+type UnformattedError struct {
+	Loc *ast.Location
+}
+
+func (e UnformattedError) Error() string {
+	if e.Loc == nil {
+		return "source is not formatted"
 	}
-	return o.RegoVersion
+	return fmt.Sprintf("%s:%d: source is not formatted", e.Loc.File, e.Loc.Row)
+}
+
+func (o Opts) dropRedundantDirectiveImports() bool {
+	return o.DropRedundantDirectiveImports || o.DropV0Imports
+}
+
+func (o Opts) targetSpan() ast.RegoVersionSpan {
+	if !o.RegoVersionSpan.IsUndefined() {
+		return o.RegoVersionSpan
+	}
+	if o.RegoVersion == ast.RegoUndefined {
+		return ast.RegoVersionSpanOf(ast.DefaultRegoVersion)
+	}
+	return ast.RegoVersionSpanOf(o.RegoVersion)
 }
 
 // Source formats a Rego source file. The bytes provided must describe a complete
@@ -71,15 +116,15 @@ func Source(filename string, src []byte) ([]byte, error) {
 }
 
 func SourceWithOpts(filename string, src []byte, opts Opts) ([]byte, error) {
-	regoVersion := opts.effectiveRegoVersion()
+	target := opts.targetSpan()
 
 	var parserOpts ast.ParserOptions
 	if opts.ParserOptions != nil {
 		parserOpts = *opts.ParserOptions
-	} else if regoVersion == ast.RegoV1 {
-		// If the rego version is V1, we need to parse it as such, to allow for future keywords not being imported.
+	} else if target.Min() == ast.RegoV1 || target.Min() == ast.RegoV2 {
+		// If the rego version is V1 or V2, we need to parse it as such, to allow for future keywords not being imported.
 		// Otherwise, we'll default to the default rego-version.
-		parserOpts.RegoVersion = ast.RegoV1
+		parserOpts.RegoVersion = target.Min()
 	}
 
 	// Copying the node does not make sense when both input and output are bytes.
@@ -94,20 +139,33 @@ func SourceWithOpts(filename string, src []byte, opts Opts) ([]byte, error) {
 		return nil, err
 	}
 
-	if regoVersion == ast.RegoV0CompatV1 || regoVersion == ast.RegoV1 {
+	if target.Max() != ast.RegoV0 {
 		checkOpts := ast.NewRegoCheckOptions()
-		// The module is parsed as v0, so we need to disable checks that will be automatically amended by the AstWithOpts call anyways.
+		// AstWithOpts adds the `if`/`contains` keywords and rule bodies or values these checks require,
+		// which a module parsed as v0 may lack. A module parsed as v1 or later already satisfies them.
 		checkOpts.RequireIfKeyword = false
 		checkOpts.RequireContainsKeyword = false
 		checkOpts.RequireRuleBodyOrValue = false
-		errs := ast.CheckRegoV1WithOptions(module, checkOpts)
+		var errs ast.Errors
+		if target.Max() == ast.RegoV2 {
+			errs = ast.CheckRegoV2WithOptions(module, checkOpts)
+		} else {
+			errs = ast.CheckRegoV1WithOptions(module, checkOpts)
+		}
 		if len(errs) > 0 {
 			return nil, errs
 		}
 	}
 
+	if opts.FailFast {
+		opts.srcCheck = &srcChecker{src: src}
+	}
+
 	formatted, err := AstWithOpts(module, opts)
 	if err != nil {
+		if unformatted, ok := errors.AsType[UnformattedError](err); ok {
+			return nil, unformatted
+		}
 		return nil, fmt.Errorf("%s: %v", filename, err)
 	}
 
@@ -159,7 +217,9 @@ type fmtOpts struct {
 	refHeads bool
 
 	regoV1         bool
+	regoV2         bool
 	regoV1Imported bool
+	regoV2Imported bool
 	futureKeywords []string
 
 	// If true, the formatter will retain keywords in refs, e.g. `p.not ` instead of `p["not"]`.
@@ -168,6 +228,9 @@ type fmtOpts struct {
 }
 
 func (o fmtOpts) keywords() []string {
+	if o.regoV2 || o.regoV2Imported {
+		return ast.KeywordsV2[:]
+	}
 	if o.regoV1 {
 		return append(ast.KeywordsV1[:], o.futureKeywords...)
 	}
@@ -193,18 +256,19 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 
 	o := fmtOpts{}
 
-	regoVersion := opts.effectiveRegoVersion()
-	if regoVersion == ast.RegoV0CompatV1 || regoVersion == ast.RegoV1 {
+	target := opts.targetSpan()
+	if target.Max() != ast.RegoV0 {
 		o.regoV1 = true
 		o.ifs = true
 		o.contains = true
 	}
+	o.regoV2 = target.Max() == ast.RegoV2
 
 	capabilities := opts.Capabilities
 	if capabilities == nil {
-		capabilities = ast.CapabilitiesForThisVersion(ast.CapabilitiesRegoVersion(opts.effectiveRegoVersion()))
+		capabilities = ast.CapabilitiesForThisVersion(ast.CapabilitiesRegoVersion(target.Min()))
 	}
-	o.allowKeywordsInRefs = capabilities.ContainsFeature(ast.FeatureKeywordsInRefs)
+	o.allowKeywordsInRefs = capabilities.ContainsFeatureAt(ast.FeatureKeywordsInRefs, target.Min())
 
 	// Preprocess the AST. Set any required defaults and calculate
 	// values required for printing the formatted output.
@@ -248,6 +312,11 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 				o.regoV1Imported = true
 				o.contains = true
 				o.ifs = true
+			case isRegoV2Compatible(n):
+				o.regoV1Imported = true
+				o.regoV2Imported = true
+				o.contains = true
+				o.ifs = true
 			case future.IsAllFutureKeywords(n):
 				o.contains = true
 				o.ifs = true
@@ -279,38 +348,17 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 		fmtOpts: o,
 	}
 
+	w.check = opts.srcCheck
+
 	switch x := x.(type) {
 	case *ast.Module:
-		if regoVersion == ast.RegoV1 && opts.DropV0Imports {
-			x.Imports = filterRegoV1Import(x.Imports)
-		} else if regoVersion == ast.RegoV0CompatV1 {
-			x.Imports = ensureRegoV1Import(x.Imports)
-		}
-
-		regoV1Imported := slices.ContainsFunc(x.Imports, isRegoV1Compatible)
-
-		if regoVersion == ast.RegoV0CompatV1 || regoVersion == ast.RegoV1 || regoV1Imported {
-			if !opts.DropV0Imports && !regoV1Imported {
-				for _, kw := range o.futureKeywords {
-					x.Imports = ensureFutureKeywordImport(x.Imports, kw)
-				}
-			} else {
-				x.Imports = future.FilterFutureImports(x.Imports)
-			}
-
-			for kw := range extraFutureKeywordImports {
-				if ast.IsFutureKeywordForRegoVersion(kw, ast.RegoV1) {
-					x.Imports = ensureFutureKeywordImport(x.Imports, kw)
-				}
-			}
-		} else {
-			for kw := range extraFutureKeywordImports {
-				x.Imports = ensureFutureKeywordImport(x.Imports, kw)
-			}
-		}
+		x.Imports = formatImports(x.Imports, target, o, extraFutureKeywordImports, opts.dropRedundantDirectiveImports())
 
 		err := w.writeModule(x)
 		if err != nil {
+			if unformatted, ok := errors.AsType[UnformattedError](err); ok {
+				return nil, unformatted
+			}
 			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
 		}
 	case *ast.Package:
@@ -428,6 +476,10 @@ type writer struct {
 
 	buf bytes.Buffer
 
+	// check compares the output against the source as it's written, so that formatting can stop at the
+	// first element that differs. Nil unless [Opts.FailFast] was set.
+	check *srcChecker
+
 	indent                  string
 	level                   int
 	inline                  bool
@@ -436,6 +488,57 @@ type writer struct {
 	errs                    ast.Errors
 	fmtOpts                 fmtOpts
 	writeCommentOnFinalLine bool
+}
+
+// srcChecker compares the formatter's output against the source the module was parsed from, so that a caller
+// asking only "is this formatted?" doesn't pay to lay out a module whose first rule already answers it.
+type srcChecker struct {
+	src []byte
+
+	// matched is the number of leading bytes of src the output is known to reproduce, so that each check
+	// only compares what has been written since the last one.
+	matched int
+}
+
+// check reports an [UnformattedError] if out can't be a prefix of the source: the final output can only equal
+// the source if every prefix of it does. Trailing newlines are excluded, as elements are separated by blank
+// lines that are squashed at the end, so the newlines following the last element written aren't decided yet.
+func (c *srcChecker) check(out []byte, loc *ast.Location) error {
+	out = bytes.TrimRight(out, "\n")
+
+	if len(out) > len(c.src) {
+		return UnformattedError{Loc: loc}
+	}
+	if len(out) <= c.matched {
+		return nil
+	}
+	if !bytes.Equal(out[c.matched:], c.src[c.matched:len(out)]) {
+		return UnformattedError{Loc: loc}
+	}
+
+	c.matched = len(out)
+
+	return nil
+}
+
+// checkFormatted stops formatting if the output already differs from the source. A no-op unless
+// [Opts.FailFast] was set, and only safe to call between elements: writeTerm rewinds the buffer to re-write a
+// term as unformatted source when it meets an unexpected comment, so bytes written within an element may yet
+// be replaced, and a comment registered for the end of a line is written when the line ends, which can be
+// after the element that registered it.
+func (w *writer) checkFormatted(loc *ast.Location) error {
+	// Once the writer has an error the output is discarded, so finish the layout to report every error.
+	if w.check == nil || w.beforeEnd != nil || len(w.errs) > 0 {
+		return nil
+	}
+
+	// Elements the formatter added itself, such as a missing future keyword import, carry a synthetic location
+	// that points nowhere in the source.
+	if loc != nil && loc.File == defaultLocationFile {
+		loc = nil
+	}
+
+	return w.check.check(w.buf.Bytes(), loc)
 }
 
 func (w *writer) writeModule(module *ast.Module) error {
@@ -494,6 +597,9 @@ func (w *writer) writeModule(module *ast.Module) error {
 	var err error
 	comments, err = w.writePackage(pkg, comments)
 	if err != nil {
+		return err
+	}
+	if err := w.checkFormatted(pkg.Loc()); err != nil {
 		return err
 	}
 	comments, err = w.writeImports(added, comments)
@@ -596,14 +702,20 @@ func (w *writer) writeComments(comments []*ast.Comment) error {
 func (w *writer) writeRules(rules []*ast.Rule, comments []*ast.Comment) ([]*ast.Comment, error) {
 	for i, rule := range rules {
 		var err error
-		comments, err = w.insertComments(comments, rule.Location)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
-			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+		if comments, err = w.insertComments(comments, rule.Location); err != nil {
+			if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+				w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+			}
 		}
 
-		comments, err = w.writeRule(rule, false, comments)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
-			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+		if comments, err = w.writeRule(rule, false, comments); err != nil {
+			if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+				w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+			}
+		}
+
+		if err := w.checkFormatted(rule.Loc()); err != nil {
+			return comments, err
 		}
 
 		if i < len(rules)-1 && w.groupableOneLiner(rule) {
@@ -671,9 +783,7 @@ func (w *writer) writeRule(rule *ast.Rule, isElse bool, comments []*ast.Comment)
 	var unexpectedComment bool
 	comments, err = w.writeHead(rule.Head, rule.Default, isExpandedConst, comments)
 	if err != nil {
-		if errors.As(err, &unexpectedCommentError{}) {
-			unexpectedComment = true
-		} else {
+		if unexpectedComment = isUnexpectedCommentError(err); !unexpectedComment {
 			return nil, err
 		}
 	}
@@ -707,7 +817,13 @@ func (w *writer) writeRule(rule *ast.Rule, isElse bool, comments []*ast.Comment)
 				var err error
 				comments, err = w.writeExpr(rule.Body[0], comments)
 				if err != nil {
-					return nil, err
+					// An unexpected comment isn't fatal: the expression was
+					// written as-is, and the comments returned still need
+					// writing. Dropping them would lose every comment after
+					// this rule.
+					if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+						return nil, err
+					}
 				}
 				w.endLine()
 				if rule.Else != nil {
@@ -739,7 +855,7 @@ func (w *writer) writeRule(rule *ast.Rule, isElse bool, comments []*ast.Comment)
 	comments, err = w.writeBody(rule.Body, comments)
 	if err != nil {
 		// the unexpected comment error is passed up to be handled by writeHead
-		if !errors.As(err, &unexpectedCommentError{}) {
+		if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
 			return nil, err
 		}
 	}
@@ -875,10 +991,7 @@ func (w *writer) writeHead(head *ast.Head, isDefault bool, isExpandedConst bool,
 
 	if len(head.Args) > 0 {
 		w.write("(")
-		var args []any
-		for _, arg := range head.Args {
-			args = append(args, arg)
-		}
+		args := util.ToSliceOf[any](head.Args)
 		var err error
 		comments, err = w.writeIterable(args, head.Location, closingLoc(0, 0, '(', ')', head.Location), comments, w.listWriter(false))
 		w.write(")")
@@ -976,9 +1089,10 @@ func (w *writer) writeBody(body ast.Body, comments []*ast.Comment) ([]*ast.Comme
 		}
 		w.startLine()
 
-		comments, err = w.writeExpr(expr, comments)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
-			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+		if comments, err = w.writeExpr(expr, comments); err != nil {
+			if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+				w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+			}
 		}
 		w.endLine()
 	}
@@ -1005,9 +1119,13 @@ func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comm
 	// parser represents `not (a or b)` as an *ast.Not.
 	negatedLogical := expr.Negated && isLogicalExpr(expr)
 
+	// In v2 `not {x}` is a not-body, so a negated brace-led value from an older
+	// module is parenthesized to keep its meaning: `not ({x})`.
+	negatedBraceLead := expr.Negated && w.fmtOpts.regoV2 && exprRendersBraceLead(expr)
+
 	if expr.Negated {
 		w.write("not ")
-		if negatedLogical {
+		if negatedLogical || negatedBraceLead {
 			w.write("(")
 		}
 	}
@@ -1053,7 +1171,7 @@ func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comm
 		w.write(")")
 	}
 
-	if negatedLogical {
+	if negatedLogical || negatedBraceLead {
 		w.write(")")
 	}
 
@@ -1085,7 +1203,7 @@ func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comm
 			if indent {
 				if !indented {
 					w.up()
-					defer w.down() //nolint:errcheck
+					defer w.down() //nolint
 					indented = true
 				}
 				w.endLine()
@@ -1209,11 +1327,9 @@ func (w *writer) writeEvery(every *ast.Every, loc *ast.Location, comments []*ast
 	}
 	w.write(" {")
 	comments, err = w.writeComprehensionBody('{', '}', every.Body, loc, loc, comments)
-	if err != nil {
+	if err != nil && !isUnexpectedCommentError(err) {
 		// the unexpected comment error is passed up to be handled by writeHead
-		if !errors.As(err, &unexpectedCommentError{}) {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	if len(every.Body) == 1 &&
@@ -1246,10 +1362,8 @@ func (w *writer) writeNot(not *ast.Not, loc *ast.Location, comments []*ast.Comme
 
 		w.write("{")
 		comments, err = w.writeComprehensionBody('{', '}', not.Body, loc, loc, comments)
-		if err != nil {
-			if !errors.As(err, &unexpectedCommentError{}) {
-				return nil, err
-			}
+		if err != nil && !isUnexpectedCommentError(err) {
+			return nil, err
 		}
 
 		if last := not.Body[len(not.Body)-1]; last.Location != nil && last.Location.Row == loc.Row {
@@ -1263,10 +1377,8 @@ func (w *writer) writeNot(not *ast.Not, loc *ast.Location, comments []*ast.Comme
 		}
 
 		comments, err = w.writeExpr(not.Body[0], comments)
-		if err != nil {
-			if !errors.As(err, &unexpectedCommentError{}) {
-				return nil, err
-			}
+		if err != nil && !isUnexpectedCommentError(err) {
+			return nil, err
 		}
 
 		if parens {
@@ -1345,7 +1457,7 @@ func (w *writer) writeLogical(expr *ast.Expr, comments []*ast.Comment) ([]*ast.C
 	lhs, steps := flattenLogical(expr)
 
 	comments, err := w.writeLogicalOperand(lhs, comments)
-	if err != nil && !errors.As(err, &unexpectedCommentError{}) {
+	if err != nil && !isUnexpectedCommentError(err) {
 		return comments, err
 	}
 
@@ -1357,7 +1469,7 @@ func (w *writer) writeLogical(expr *ast.Expr, comments []*ast.Comment) ([]*ast.C
 		if s.breaksLine() {
 			if !indented {
 				w.up()
-				defer w.down() //nolint:errcheck
+				defer w.down() //nolint
 				indented = true
 			}
 			w.endLine()
@@ -1367,7 +1479,7 @@ func (w *writer) writeLogical(expr *ast.Expr, comments []*ast.Comment) ([]*ast.C
 		}
 
 		comments, err = w.writeLogicalOperand(s.rhs, comments)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
+		if err != nil && !isUnexpectedCommentError(err) {
 			return comments, err
 		}
 	}
@@ -1398,10 +1510,8 @@ func (w *writer) writeLogicalOperand(o logicalOperand, comments []*ast.Comment) 
 
 	w.write("{")
 	comments, err := w.writeComprehensionBody('{', '}', o.body, o.brace, o.brace, comments)
-	if err != nil {
-		if !errors.As(err, &unexpectedCommentError{}) {
-			return comments, err
-		}
+	if err != nil && !isUnexpectedCommentError(err) {
+		return comments, err
 	}
 
 	if last := o.body[len(o.body)-1]; last.Location != nil && last.Location.Row == o.brace.Row {
@@ -1597,7 +1707,7 @@ func (w *writer) writeFunctionCallPlain(terms []*ast.Term, comments []*ast.Comme
 	w.write("(")
 	defer w.write(")")
 
-	args := util.ToSliceOfAny(terms[1:])
+	args := util.ToSliceOf[any](terms[1:])
 	loc := terms[0].Location
 	var err error
 	comments, err = w.writeIterable(args, loc, closingLoc(0, 0, '(', ')', loc), comments, w.listWriter(false))
@@ -1623,14 +1733,12 @@ func (w *writer) writeWith(with *ast.With, comments []*ast.Comment, indented boo
 	}
 	w.write(" as ")
 	comments, err = w.writeTerm(with.Value, comments)
-	if err != nil {
+	if err != nil && !isUnexpectedCommentError(err) {
 		// An unexpectedCommentError from writeTerm signals that it fell
 		// back to writing the term's original unformatted text — the value
 		// was written successfully, so don't abort the surrounding chain
 		// of `with` clauses (issue #8765).
-		if !errors.As(err, &unexpectedCommentError{}) {
-			return comments, err
-		}
+		return comments, err
 	}
 	return comments, nil
 }
@@ -1659,7 +1767,7 @@ func (w *writer) writeTerm(term *ast.Term, comments []*ast.Comment) ([]*ast.Comm
 
 	comments, err := w.writeTermParens(false, term, comments)
 	if err != nil {
-		if errors.As(err, &unexpectedCommentError{}) {
+		if isUnexpectedCommentError(err) {
 			w.buf.Truncate(currentLen)
 			w.level = currentLevel
 
@@ -1921,7 +2029,7 @@ func (w *writer) writeRef(x ast.Ref, comments []*ast.Comment) ([]*ast.Comment, e
 				w.write("[")
 				comments, err = w.writeTerm(t, comments)
 				if err != nil {
-					if errors.As(err, &unexpectedCommentError{}) {
+					if _, ok := errors.AsType[unexpectedCommentError](err); ok {
 						// add a new line so that the closing bracket isn't part of the unexpected comment
 						w.write("\n")
 					} else {
@@ -2071,7 +2179,7 @@ func (w *writer) writeObject(obj ast.Object, loc *ast.Location, comments []*ast.
 	w.write("{")
 	defer w.write("}")
 
-	var s []any
+	s := make([]any, 0, obj.Len())
 	obj.Foreach(func(k, v *ast.Term) {
 		s = append(s, ast.Item(k, v))
 	})
@@ -2082,7 +2190,7 @@ func (w *writer) writeArray(arr *ast.Array, loc *ast.Location, comments []*ast.C
 	w.write("[")
 	defer w.write("]")
 
-	var s []any
+	s := make([]any, 0, arr.Len())
 	arr.Foreach(func(t *ast.Term) {
 		s = append(s, t)
 	})
@@ -2095,10 +2203,9 @@ func (w *writer) writeArray(arr *ast.Array, loc *ast.Location, comments []*ast.C
 }
 
 func (w *writer) writeSet(set ast.Set, loc *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
-
+	var err error
 	if set.Len() == 0 {
 		w.write("set()")
-		var err error
 		comments, err = w.insertComments(comments, closingLoc(0, 0, '(', ')', loc))
 		if err != nil {
 			return nil, err
@@ -2109,11 +2216,7 @@ func (w *writer) writeSet(set ast.Set, loc *ast.Location, comments []*ast.Commen
 	w.write("{")
 	defer w.write("}")
 
-	var s []any
-	set.Foreach(func(t *ast.Term) {
-		s = append(s, t)
-	})
-	var err error
+	s := util.ToSliceOf[any](set.Slice())
 	comments, err = w.writeIterable(s, loc, closingLoc(0, 0, '{', '}', loc), comments, w.listWriter(true))
 	if err != nil {
 		return nil, err
@@ -2188,7 +2291,7 @@ func (w *writer) writeComprehension(openChar, closeChar byte, term *ast.Term, bo
 }
 
 func (w *writer) writeComprehensionBody(openChar, closeChar byte, body ast.Body, term, compr *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
-	lines, err := w.groupIterable(util.ToSliceOfAny(body), term)
+	lines, err := w.groupIterable(util.ToSliceOf[any](body), term)
 	if err != nil {
 		return nil, err
 	}
@@ -2242,17 +2345,19 @@ func (w *writer) writeImports(imports []*ast.Import, comments []*ast.Comment) ([
 		}
 
 		// Sort imports within a newline grouping.
-		slices.SortFunc(group, (*ast.Import).Compare)
-		for _, i := range group {
+		for _, i := range util.SortedFunc(group, (*ast.Import).Compare) {
 			w.startLine()
-			err = w.writeImport(i)
-			if err != nil {
+			if err = w.writeImport(i); err != nil {
 				return nil, err
 			}
 			if c, ok := m[i]; ok {
 				w.write(" " + c.String())
 			}
 			w.endLine()
+
+			if err := w.checkFormatted(i.Loc()); err != nil {
+				return nil, err
+			}
 		}
 		w.blankLine()
 	}
@@ -2755,8 +2860,6 @@ func getLocs(a, b any) (*ast.Location, *ast.Location, error) {
 	return al, bl, errors.Join(err1, err2)
 }
 
-var negativeRow = &ast.Location{Row: -1}
-
 func closingLoc(skipOpen, skipClose, openChar, closeChar byte, loc *ast.Location) *ast.Location {
 	i, offset := 0, 0
 
@@ -2945,10 +3048,9 @@ func ensureFutureKeywordImport(imps []*ast.Import, kw string) []*ast.Import {
 			return imps
 		}
 	}
-	imp := &ast.Import{
-		Path: ast.MustParseTerm("future.keywords." + kw),
-	}
+	imp := &ast.Import{Path: ast.MustParseTerm("future.keywords." + kw)}
 	imp.Location = nextImportLoc(imps, imp)
+
 	return append(imps, imp)
 }
 
@@ -2958,7 +3060,7 @@ func nextImportLoc(imps []*ast.Import, node ast.Node) *ast.Location {
 		if imp.Loc() == nil {
 			continue
 		}
-		if isFutureKeywordsImport(imp) || isRegoV1Compatible(imp) {
+		if imp.Path.Value.(ast.Ref).HasPrefix(ast.FutureKeywordsRef[:1]) || isRegoV1Compatible(imp) {
 			if imp.Loc().Row > maxRow {
 				maxRow = imp.Loc().Row
 			}
@@ -2968,11 +3070,6 @@ func nextImportLoc(imps []*ast.Import, node ast.Node) *ast.Location {
 		return defaultLocation(node)
 	}
 	return ast.NewLocation([]byte(node.String()), defaultLocationFile, maxRow+1, 1)
-}
-
-func isFutureKeywordsImport(imp *ast.Import) bool {
-	path := imp.Path.Value.(ast.Ref)
-	return len(path) >= 2 && ast.FutureRootDocument.Equal(path[0])
 }
 
 func isAddedImport(imp *ast.Import) bool {
@@ -3001,32 +3098,80 @@ func addedImportFollowsRule(others []any) bool {
 	return false
 }
 
-func ensureRegoV1Import(imps []*ast.Import) []*ast.Import {
-	return ensureImport(imps, ast.RegoV1CompatibleRef)
-}
+// formatImports adds and removes the directive imports a module needs when formatted for target.
+func formatImports(imps []*ast.Import, target ast.RegoVersionSpan, o fmtOpts, extraFutureKeywordImports map[string]struct{}, dropRedundant bool) []*ast.Import {
+	switch {
+	case target.Min() == ast.RegoV2:
+		// Every future keyword is standard in v2, so no import is ever added.
+		if dropRedundant {
+			imps = slices.DeleteFunc(imps, func(imp *ast.Import) bool {
+				return isRegoV1Compatible(imp) || isRegoV2Compatible(imp)
+			})
+			imps = future.FilterFutureImports(imps)
+		}
+		return imps
+	case target.Max() == ast.RegoV2:
+		// 'rego.v2' makes every other directive import redundant, at both ends of the span.
+		// It's added first, so that it takes the place of the imports it replaces.
+		imps = ensureRegoV2Import(imps)
+		imps = slices.DeleteFunc(imps, isRegoV1Compatible)
+		return future.FilterFutureImports(imps)
+	}
 
-func filterRegoV1Import(imps []*ast.Import) []*ast.Import {
-	var ret []*ast.Import
-	for _, imp := range imps {
-		path := imp.Path.Value.(ast.Ref)
-		if !ast.RegoV1CompatibleRef.Equal(path) {
-			ret = append(ret, imp)
+	regoV2Imported := slices.ContainsFunc(imps, isRegoV2Compatible)
+
+	if regoV2Imported || target.Min() == ast.RegoV1 && dropRedundant {
+		imps = slices.DeleteFunc(imps, isRegoV1Compatible)
+	} else if target.Min() != target.Max() { // [v0, v1]
+		imps = ensureRegoV1Import(imps)
+	}
+
+	regoV1Imported := slices.ContainsFunc(imps, isRegoV1Compatible) || regoV2Imported
+
+	if target.Max() == ast.RegoV1 || regoV1Imported {
+		if !dropRedundant && !regoV1Imported {
+			for _, kw := range o.futureKeywords {
+				imps = ensureFutureKeywordImport(imps, kw)
+			}
+		} else {
+			imps = future.FilterFutureImports(imps)
+		}
+
+		if !regoV2Imported {
+			for kw := range extraFutureKeywordImports {
+				if ast.IsFutureKeywordForRegoVersion(kw, ast.RegoV1) {
+					imps = ensureFutureKeywordImport(imps, kw)
+				}
+			}
+		}
+	} else {
+		for kw := range extraFutureKeywordImports {
+			imps = ensureFutureKeywordImport(imps, kw)
 		}
 	}
-	return ret
+
+	return imps
 }
 
-func ensureImport(imps []*ast.Import, path ast.Ref) []*ast.Import {
+func ensureRegoV2Import(imps []*ast.Import) []*ast.Import {
+	if slices.ContainsFunc(imps, isRegoV2Compatible) {
+		return imps
+	}
+	imp := &ast.Import{Path: ast.NewTerm(ast.RegoV2CompatibleRef)}
+	imp.Location = nextImportLoc(imps, imp)
+
+	return append(imps, imp)
+}
+
+func ensureRegoV1Import(imps []*ast.Import) []*ast.Import {
 	for _, imp := range imps {
-		p := imp.Path.Value.(ast.Ref)
-		if p.Equal(path) {
+		if ast.RegoV1CompatibleRef.Equal(imp.Path.Value) {
 			return imps
 		}
 	}
-	imp := &ast.Import{
-		Path: ast.NewTerm(path),
-	}
+	imp := &ast.Import{Path: ast.NewTerm(ast.RegoV1CompatibleRef)}
 	imp.Location = nextImportLoc(imps, imp)
+
 	return append(imps, imp)
 }
 
@@ -3065,8 +3210,14 @@ func (d *ArityFormatErrDetail) Lines() []string {
 
 // isRegoV1Compatible returns true if the passed *ast.Import is `rego.v1`
 func isRegoV1Compatible(imp *ast.Import) bool {
-	path := imp.Path.Value.(ast.Ref)
-	return len(path) == 2 &&
-		ast.RegoRootDocument.Equal(path[0]) &&
-		path[1].Equal(ast.InternedTerm("v1"))
+	return ast.RegoV1CompatibleRef.Equal(imp.Path.Value)
+}
+
+func isRegoV2Compatible(imp *ast.Import) bool {
+	return ast.RegoV2CompatibleRef.Equal(imp.Path.Value)
+}
+
+func isUnexpectedCommentError(err error) bool {
+	_, ok := errors.AsType[unexpectedCommentError](err)
+	return ok
 }

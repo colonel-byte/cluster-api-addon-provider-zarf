@@ -283,7 +283,7 @@ func ParseCompleteDocRuleFromEqExpr(module *Module, lhs, rhs *Term) (*Rule, erro
 	head.Value = rhs
 	head.Location = lhs.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(rhs.Location)).SetLocation(rhs.Location))
+	body := implicitTrueBody(rhs.Location)
 
 	return &Rule{
 		Location:      lhs.Location,
@@ -307,7 +307,7 @@ func ParseCompleteDocRuleWithDotsFromTerm(module *Module, term *Term) (*Rule, er
 	head.generatedValue = true
 	head.Location = term.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(term.Location)).SetLocation(term.Location))
+	body := implicitTrueBody(term.Location)
 
 	return &Rule{
 		Location: term.Location,
@@ -336,7 +336,7 @@ func ParsePartialObjectDocRuleFromEqExpr(module *Module, lhs, rhs *Term) (*Rule,
 	}
 	head.Location = rhs.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(rhs.Location)).SetLocation(rhs.Location))
+	body := implicitTrueBody(rhs.Location)
 
 	rule := &Rule{
 		Location:      rhs.Location,
@@ -373,7 +373,7 @@ func ParsePartialSetDocRuleFromTerm(module *Module, term *Term) (*Rule, error) {
 	}
 	head.Location = term.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(term.Location)).SetLocation(term.Location))
+	body := implicitTrueBody(term.Location)
 
 	rule := &Rule{
 		Location: term.Location,
@@ -406,7 +406,7 @@ func ParseRuleFromCallEqExpr(module *Module, lhs, rhs *Term) (*Rule, error) {
 	head.Location = lhs.Location
 	head.Args = Args(call[1:])
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(rhs.Location)).SetLocation(rhs.Location))
+	body := implicitTrueBody(rhs.Location)
 
 	rule := &Rule{
 		Location: lhs.Location,
@@ -435,7 +435,7 @@ func ParseRuleFromCallExpr(module *Module, terms []*Term) (*Rule, error) {
 	head.Location = loc
 	head.Args = terms[1:]
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(loc)).SetLocation(loc))
+	body := implicitTrueBody(loc)
 
 	rule := &Rule{
 		Location: loc,
@@ -682,20 +682,28 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		Package: pkg,
 		// The comments slice only holds comments that were not their own statements.
 		Comments: comments,
-		stmts:    stmts,
 	}
 
-	mod.regoVersion = regoCompatibilityMode
 	if regoCompatibilityMode == RegoUndefined {
-		mod.regoVersion = DefaultRegoVersion
+		mod.regoVersion = RegoVersionSpanOf(DefaultRegoVersion)
+	} else {
+		mod.regoVersion = RegoVersionSpanOf(regoCompatibilityMode)
 	}
 
 	for i, stmt := range stmts[1:] {
 		switch stmt := stmt.(type) {
 		case *Import:
 			mod.Imports = append(mod.Imports, stmt)
-			if mod.regoVersion == RegoV0 && RegoV1CompatibleRef.Equal(stmt.Path.Value) {
-				mod.regoVersion = RegoV0CompatV1
+			var err error
+			switch {
+			case RegoV1CompatibleRef.Equal(stmt.Path.Value):
+				mod.regoVersion, err = mod.regoVersion.RaisedTo(RegoV1)
+			case RegoV2CompatibleRef.Equal(stmt.Path.Value):
+				mod.regoVersion, err = mod.regoVersion.RaisedTo(RegoV2)
+			}
+			if err != nil {
+				// Unreachable; indicates mod.regoVersion was invalid
+				panic(fmt.Sprintf("illegal %s import", stmt))
 			}
 		case *Rule:
 			setRuleModule(stmt, mod)
@@ -703,16 +711,16 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		case Body:
 			rule, err := ParseRuleFromBody(mod, stmt)
 			if err != nil {
-				errs = append(errs, NewError(ParseErr, stmt[0].Location, "%s", err.Error()))
+				msg := err.Error()
+				if kw, ok := missingHeadKeyword(mod.regoVersion, stmt, stmts, i+1); ok {
+					msg = fmt.Sprintf("%s (hint: `import future.keywords.%s` for `%s` rules)",
+						msg, kw, headFutureKeywords[kw])
+				}
+				errs = append(errs, NewError(ParseErr, stmt[0].Location, "%s", msg))
 				continue
 			}
 			rule.generatedBody = true
 			mod.Rules = append(mod.Rules, rule)
-
-			// NOTE(tsandall): the statement should now be interpreted as a
-			// rule so update the statement list. This is important for the
-			// logic below that associates annotations with statements.
-			stmts[i+1] = rule
 		case *Package:
 			errs = append(errs, NewError(ParseErr, stmt.Loc(), "unexpected package"))
 		case *Annotations:
@@ -724,7 +732,7 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		}
 	}
 
-	if mod.regoVersion == RegoV0CompatV1 || mod.regoVersion == RegoV1 {
+	if mod.regoVersion.Max().level() >= RegoV1.level() {
 		for _, rule := range mod.Rules {
 			for r := rule; r != nil; r = r.Else {
 				errs = append(errs, CheckRegoV1(r)...)
@@ -745,6 +753,66 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 	attachRuleAnnotations(mod)
 
 	return mod, nil
+}
+
+// headFutureKeywords are the future keywords used in a rule head, mapped to an
+// example of the rule form each enables.
+var headFutureKeywords = map[string]string{
+	"if":       "p if { ... }",
+	"contains": "p contains x",
+}
+
+// missingHeadKeyword reports the rule-head future keyword a statement was
+// misparsed around. Unimported, the keyword is just a var, so `p if { ... }`
+// parses as the body `p` followed by a rule named `if`. idx is stmt's index
+// within stmts.
+func missingHeadKeyword(v RegoVersionSpan, stmt Body, stmts []Statement, idx int) (string, bool) {
+	// From v1 on these are ordinary keywords.
+	if v.Max() != RegoV0 {
+		return "", false
+	}
+
+	if kw, ok := statementHeadKeyword(stmt); ok {
+		return kw, true
+	}
+
+	// The keyword starts its own statement; check the next one on the same line.
+	if idx+1 >= len(stmts) {
+		return "", false
+	}
+	next := stmts[idx+1]
+	if next.Loc() == nil || stmt.Loc() == nil || next.Loc().Row != stmt.Loc().Row {
+		return "", false
+	}
+
+	return statementHeadKeyword(next)
+}
+
+// statementHeadKeyword returns the rule-head future keyword a statement was
+// reduced to: a rule named after it, or a body holding only it as a var.
+func statementHeadKeyword(stmt Statement) (string, bool) {
+	var name Var
+
+	switch stmt := stmt.(type) {
+	case *Rule:
+		name = stmt.Head.Name
+	case Body:
+		if len(stmt) != 1 {
+			return "", false
+		}
+		term, ok := stmt[0].Terms.(*Term)
+		if !ok {
+			return "", false
+		}
+		if name, ok = term.Value.(Var); !ok {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+
+	_, ok := headFutureKeywords[string(name)]
+	return string(name), ok
 }
 
 func ruleDeclarationHasKeyword(rule *Rule, keyword tokens.Token) bool {
@@ -827,4 +895,11 @@ func (d ParserErrorDetail) Lines() []string {
 
 func isNewLineChar(b byte) bool {
 	return b == '\r' || b == '\n'
+}
+
+func implicitTrueBody(loc *Location) Body {
+	expr := NewExpr(BooleanTerm(true).SetLocation(loc)).SetLocation(loc)
+	expr.Generated = true
+
+	return NewBody(expr)
 }

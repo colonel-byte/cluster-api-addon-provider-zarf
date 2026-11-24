@@ -21,7 +21,9 @@ func (mod *Module) AppendText(buf []byte) ([]byte, error) {
 		// rule annotations are attached to rules, so only check for package scoped ones here
 		if annotations.Scope == "package" || annotations.Scope == "subpackages" {
 			buf = append(buf, "# METADATA\n# "...)
-			buf = append(buf, annotations.String()...)
+			if buf, err = annotations.AppendText(buf); err != nil {
+				return nil, err
+			}
 			buf = append(buf, '\n')
 		}
 	}
@@ -44,7 +46,7 @@ func (mod *Module) AppendText(buf []byte) ([]byte, error) {
 	if len(mod.Rules) > 0 {
 		for _, rule := range mod.Rules {
 			buf = append(buf, '\n')
-			if buf, err = rule.appendWithOpts(toStringOpts{regoVersion: mod.regoVersion}, buf); err != nil {
+			if buf, err = rule.appendWithOpts(toStringOpts{regoVersion: mod.regoVersion.Max()}, buf); err != nil {
 				return nil, err
 			}
 		}
@@ -98,7 +100,10 @@ func (rule *Rule) appendWithOpts(opts toStringOpts, buf []byte) ([]byte, error) 
 	// See note in [Module.AppendText] regarding annotations.
 	for _, annotations := range rule.Annotations {
 		buf = append(buf, "# METADATA\n# "...)
-		buf = append(buf, annotations.String()...)
+		var err error
+		if buf, err = annotations.AppendText(buf); err != nil {
+			return nil, err
+		}
 		buf = append(buf, '\n')
 	}
 
@@ -113,7 +118,7 @@ func (rule *Rule) appendWithOpts(opts toStringOpts, buf []byte) ([]byte, error) 
 
 	if !rule.Default {
 		switch opts.RegoVersion() {
-		case RegoV1, RegoV0CompatV1:
+		case RegoV0CompatV1, RegoV1, RegoV2:
 			buf = append(buf, " if { "...)
 		default:
 			buf = append(buf, " { "...)
@@ -143,9 +148,10 @@ func (rule *Rule) appendElse(opts toStringOpts, buf []byte) ([]byte, error) {
 		}
 	}
 
-	if v := opts.RegoVersion(); v == RegoV1 || v == RegoV0CompatV1 {
+	switch opts.RegoVersion() {
+	case RegoV0CompatV1, RegoV1, RegoV2:
 		buf = append(buf, " if { "...)
-	} else {
+	default:
 		buf = append(buf, " { "...)
 	}
 	if buf, err = rule.Body.AppendText(buf); err != nil {
