@@ -2354,10 +2354,11 @@ github.com/pierrec/lz4/v4/internal/xxh32
 ## explicit; go 1.18
 github.com/piprate/json-gold/ld
 github.com/piprate/json-gold/ld/internal/jsoncanonicalizer
-# github.com/pjbgf/sha1cd v0.6.0
-## explicit; go 1.22
+# github.com/pjbgf/sha1cd v0.7.0
+## explicit; go 1.24.0
 github.com/pjbgf/sha1cd
 github.com/pjbgf/sha1cd/internal
+github.com/pjbgf/sha1cd/internal/cpu
 github.com/pjbgf/sha1cd/ubc
 # github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 ## explicit; go 1.14

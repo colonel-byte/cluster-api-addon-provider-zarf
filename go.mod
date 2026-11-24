@@ -393,7 +393,7 @@ require (
 	github.com/phuslu/lru v1.0.25 // indirect
 	github.com/pierrec/lz4/v4 v4.1.34 // indirect
 	github.com/piprate/json-gold v0.7.0 // indirect
-	github.com/pjbgf/sha1cd v0.6.0 // indirect
+	github.com/pjbgf/sha1cd v0.7.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkg/profile v1.7.0 // indirect
