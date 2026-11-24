@@ -335,8 +335,8 @@ github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.47.12 h1:N1b7mcT4zRZED+Ly6k9na
 github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.47.12/go.mod h1:kqO3VDywHoqWYkwvP8Se/+XISOg2cEm4gMOkF7NuCiA=
 github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 h1:rKwkY3Z+fvt2W0msjdNs6uNewPmXzPayQ961oyuWhes=
 github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25/go.mod h1:dBuAadQKd1F4Q4ZOg8gnFmuSHMRE40Pe3IfFwbtC4lE=
-github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.7 h1:CwvFlKw0uUScfgOMflXSRZa+ayXgOf6wk7lhyMemQYU=
-github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.7/go.mod h1:4SbD8BB+p+QEnG0aX6DoWwrtk9SufyYXRsUv0nve8LE=
+github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.13 h1:U5HZ8FpTr6tyvulf1nT11Nw4KG1CAsXkuQGdUrIjZ/E=
+github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.13/go.mod h1:dUfvCU1NaE+b3vqNENDiJncUQW7Djl5pmgUlcjesVqk=
 github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 h1:wzAqMZ2O4+ij9HQqIrk+P9PBGacE0wOTuWB7Mo97//I=
 github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12/go.mod h1:/0TfyruByHsOlphzP26xDTRe2DKD0J1I1Uyy2TyP8EI=
 github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.6 h1:mYViDr2azcgxOpRrObZOl631bvavqILoE/L+Kxgbwys=
