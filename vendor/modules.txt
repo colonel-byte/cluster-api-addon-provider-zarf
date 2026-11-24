@@ -2563,7 +2563,7 @@ github.com/sigstore/protobuf-specs/gen/pb-go/common/v1
 github.com/sigstore/protobuf-specs/gen/pb-go/dsse
 github.com/sigstore/protobuf-specs/gen/pb-go/rekor/v1
 github.com/sigstore/protobuf-specs/gen/pb-go/trustroot/v1
-# github.com/sigstore/rekor v1.6.1
+# github.com/sigstore/rekor v1.6.5
 ## explicit; go 1.27
 github.com/sigstore/rekor/internal/pgpv3
 github.com/sigstore/rekor/internal/pgpv3/adapted
@@ -2601,8 +2601,8 @@ github.com/sigstore/rekor/pkg/types/rekord/v0.0.1
 github.com/sigstore/rekor/pkg/util
 github.com/sigstore/rekor/pkg/util/jcs
 github.com/sigstore/rekor/pkg/verify
-# github.com/sigstore/rekor-tiles/v2 v2.4.2
-## explicit; go 1.27.0
+# github.com/sigstore/rekor-tiles/v2 v2.4.6
+## explicit; go 1.27.3
 github.com/sigstore/rekor-tiles/v2/internal/algorithmregistry
 github.com/sigstore/rekor-tiles/v2/internal/safeint
 github.com/sigstore/rekor-tiles/v2/pkg/client
