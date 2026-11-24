@@ -435,18 +435,21 @@ github.com/agext/levenshtein
 # github.com/agnivade/levenshtein v1.2.2
 ## explicit; go 1.21
 github.com/agnivade/levenshtein
-# github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4
+# github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5
 ## explicit; go 1.14
 github.com/alibabacloud-go/alibabacloud-gateway-spi/client
-# github.com/alibabacloud-go/cr-20160607 v1.0.1
+# github.com/alibabacloud-go/cr-20160607/v2 v2.0.0
 ## explicit; go 1.15
-github.com/alibabacloud-go/cr-20160607/client
-# github.com/alibabacloud-go/cr-20181201 v1.0.10
-## explicit; go 1.15
-github.com/alibabacloud-go/cr-20181201/client
-# github.com/alibabacloud-go/darabonba-openapi v0.2.1
+github.com/alibabacloud-go/cr-20160607/v2/client
+# github.com/alibabacloud-go/cr-20181201/v3 v3.2.3
 ## explicit; go 1.14
-github.com/alibabacloud-go/darabonba-openapi/client
+github.com/alibabacloud-go/cr-20181201/v3/client
+# github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.4
+## explicit; go 1.14
+github.com/alibabacloud-go/darabonba-openapi/v2/client
+github.com/alibabacloud-go/darabonba-openapi/v2/models
+github.com/alibabacloud-go/darabonba-openapi/v2/utils
+github.com/alibabacloud-go/darabonba-openapi/v2/websocketUtils
 # github.com/alibabacloud-go/debug v1.0.1
 ## explicit; go 1.18
 github.com/alibabacloud-go/debug/debug
@@ -458,14 +461,15 @@ github.com/alibabacloud-go/endpoint-util/service
 github.com/alibabacloud-go/openapi-util/service
 # github.com/alibabacloud-go/tea v1.5.3
 ## explicit; go 1.14
+github.com/alibabacloud-go/tea/dara
 github.com/alibabacloud-go/tea/tea
 github.com/alibabacloud-go/tea/utils
 # github.com/alibabacloud-go/tea-utils v1.4.5
 ## explicit; go 1.14
 github.com/alibabacloud-go/tea-utils/service
-# github.com/alibabacloud-go/tea-xml v1.1.3
+# github.com/alibabacloud-go/tea-utils/v2 v2.0.9
 ## explicit; go 1.14
-github.com/alibabacloud-go/tea-xml/service
+github.com/alibabacloud-go/tea-utils/v2/service
 # github.com/aliyun/credentials-go v1.4.14
 ## explicit; go 1.14
 github.com/aliyun/credentials-go
@@ -2115,11 +2119,13 @@ github.com/monochromegane/go-gitignore
 # github.com/morikuni/aec v1.1.0
 ## explicit; go 1.21
 github.com/morikuni/aec
-# github.com/mozillazg/docker-credential-acr-helper v0.4.0
-## explicit; go 1.18
-github.com/mozillazg/docker-credential-acr-helper/pkg/acr
+# github.com/mozillazg/docker-credential-acr-helper v0.4.2
+## explicit; go 1.25.0
 github.com/mozillazg/docker-credential-acr-helper/pkg/credhelper
 github.com/mozillazg/docker-credential-acr-helper/pkg/version
+# github.com/mozillazg/docker-credential-acr-helper/pkg/acr v0.2.3
+## explicit; go 1.25.0
+github.com/mozillazg/docker-credential-acr-helper/pkg/acr
 # github.com/muesli/termenv v0.16.0
 ## explicit; go 1.17
 github.com/muesli/termenv
@@ -2285,6 +2291,9 @@ github.com/peterbourgon/diskv
 # github.com/phsym/console-slog v0.3.1
 ## explicit; go 1.21
 github.com/phsym/console-slog
+# github.com/phuslu/lru v1.0.18
+## explicit; go 1.18
+github.com/phuslu/lru
 # github.com/pierrec/lz4/v4 v4.1.34
 ## explicit; go 1.22
 github.com/pierrec/lz4/v4
