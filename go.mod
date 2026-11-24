@@ -212,7 +212,7 @@ require (
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fluxcd/cli-utils v1.4.0 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.12.0 // indirect
-	github.com/fluxcd/pkg/apis/meta v1.38.0 // indirect
+	github.com/fluxcd/pkg/apis/meta v1.39.0 // indirect
 	github.com/fluxcd/source-controller/api v1.10.2 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fvbommel/sortorder v1.2.1 // indirect
