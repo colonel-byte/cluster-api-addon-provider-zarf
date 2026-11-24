@@ -1430,8 +1430,8 @@ github.com/go-logr/stdr
 # github.com/go-logr/zapr v1.3.0
 ## explicit; go 1.18
 github.com/go-logr/zapr
-# github.com/go-openapi/analysis v0.25.5
-## explicit; go 1.25.0
+# github.com/go-openapi/analysis v1.0.1
+## explicit; go 1.26.0
 github.com/go-openapi/analysis
 github.com/go-openapi/analysis/internal/debug
 github.com/go-openapi/analysis/internal/flatten/normalize
@@ -1450,11 +1450,11 @@ github.com/go-openapi/jsonpointer/jsonname
 ## explicit; go 1.26.0
 github.com/go-openapi/jsonreference
 github.com/go-openapi/jsonreference/internal
-# github.com/go-openapi/loads v0.25.0
-## explicit; go 1.25.0
+# github.com/go-openapi/loads v0.25.3
+## explicit; go 1.26.0
 github.com/go-openapi/loads
-# github.com/go-openapi/runtime v0.33.0
-## explicit; go 1.25.0
+# github.com/go-openapi/runtime v0.33.5
+## explicit; go 1.26.0
 github.com/go-openapi/runtime
 github.com/go-openapi/runtime/client
 github.com/go-openapi/runtime/client/internal/request
@@ -1464,14 +1464,14 @@ github.com/go-openapi/runtime/middleware/denco
 github.com/go-openapi/runtime/middleware/untyped
 github.com/go-openapi/runtime/security
 github.com/go-openapi/runtime/yamlpc
-# github.com/go-openapi/runtime/server-middleware v0.30.0
-## explicit; go 1.25.0
+# github.com/go-openapi/runtime/server-middleware v0.33.5
+## explicit; go 1.26.0
 github.com/go-openapi/runtime/server-middleware/docui
 github.com/go-openapi/runtime/server-middleware/mediatype
 github.com/go-openapi/runtime/server-middleware/negotiate
 github.com/go-openapi/runtime/server-middleware/negotiate/header
-# github.com/go-openapi/spec v0.22.9
-## explicit; go 1.25.0
+# github.com/go-openapi/spec v1.0.1
+## explicit; go 1.26.0
 github.com/go-openapi/spec
 # github.com/go-openapi/strfmt v0.27.4
 ## explicit; go 1.26.0
@@ -1517,8 +1517,8 @@ github.com/go-openapi/swag/typeutils
 # github.com/go-openapi/swag/yamlutils v0.29.2
 ## explicit; go 1.26.0
 github.com/go-openapi/swag/yamlutils
-# github.com/go-openapi/validate v0.26.1
-## explicit; go 1.25.0
+# github.com/go-openapi/validate v1.0.1
+## explicit; go 1.26.0
 github.com/go-openapi/validate
 # github.com/go-piv/piv-go/v2 v2.6.0
 ## explicit; go 1.25.0
@@ -3030,7 +3030,7 @@ go.uber.org/zap/zapcore
 # go.yaml.in/yaml/v2 v2.4.4
 ## explicit; go 1.15
 go.yaml.in/yaml/v2
-# go.yaml.in/yaml/v3 v3.0.5
+# go.yaml.in/yaml/v3 v3.0.6
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
 # go.yaml.in/yaml/v4 v4.0.0
