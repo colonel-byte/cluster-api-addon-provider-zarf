@@ -4,7 +4,9 @@
 
 A circular buffer (ring buffer) in Go, implemented io.ReaderWriter interface
 
-[![wikipedia](Circular_Buffer_Animation.gif)](https://github.com/smallnest/ringbuffer)
+![Ring buffer animation](Circular_Buffer_Animation.gif)
+
+Animation by [MuhannadAjjan](https://commons.wikimedia.org/wiki/File:Circular_Buffer_Animation.gif), licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
 
 # Usage
 
@@ -60,6 +62,33 @@ Any reads or writes will return the error on next call.
 In blocking mode errors are stateful and the same error will be returned until `rb.Reset()` is called.
 
 It is possible to set a deadline for blocking Read/Write operations using `rb.WithDeadline(time.Duration)`.
+
+# Waiting without blocking: Notify
+
+A consumer that must wait on several things at once — new data, a shutdown
+signal, a deadline — cannot block in `Read`. Neither can a consumer that wants
+to look at buffered data without taking it, since `Peek` is non-blocking by
+design. `Notify` gives those consumers a channel to wait on:
+
+```go
+for {
+	select {
+	case <-rb.Notify():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// A wakeup means "look", not "there is data".
+	n, err := rb.Peek(scratch)
+	// inspect scratch[:n] and consume only what is confirmed
+}
+```
+
+The channel is signalled when data is written, and when the buffer is closed or
+reset. It has capacity 1 and signals coalesce, so a wakeup reports only that
+something changed — never how much or how often — and spurious signals are
+permitted. `Notify` is not a broadcast: one signal wakes one waiter, so use a
+single waiting consumer per buffer.
 
 # io.Copy replacement
 
