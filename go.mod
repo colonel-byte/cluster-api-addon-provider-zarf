@@ -37,6 +37,7 @@ require (
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20261026160121-545c0455168d // indirect
 	cuelang.org/go v0.18.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/AlecAivazis/survey/v2 v2.3.7 // indirect
 	github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider v0.20.0 // indirect
 	github.com/AliyunContainerService/ack-ram-tool/pkg/ecsmetadata v0.0.10 // indirect
@@ -428,7 +429,7 @@ require (
 	github.com/sigstore/protobuf-specs v0.5.2 // indirect
 	github.com/sigstore/rekor v1.5.3 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.3.0 // indirect
-	github.com/sigstore/sigstore v1.10.11 // indirect
+	github.com/sigstore/sigstore v1.11.4 // indirect
 	github.com/sigstore/sigstore-go v1.3.0 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.10.9 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/azure v1.10.9 // indirect
