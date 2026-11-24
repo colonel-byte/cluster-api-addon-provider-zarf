@@ -389,7 +389,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/phsym/console-slog v0.3.1 // indirect
-	github.com/phuslu/lru v1.0.18 // indirect
+	github.com/phuslu/lru v1.0.25 // indirect
 	github.com/pierrec/lz4/v4 v4.1.34 // indirect
 	github.com/piprate/json-gold v0.7.0 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect

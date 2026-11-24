@@ -1314,8 +1314,8 @@ github.com/peterbourgon/diskv v2.0.1+incompatible h1:UBdAOUP5p4RWqPBg048CAvpKN+v
 github.com/peterbourgon/diskv v2.0.1+incompatible/go.mod h1:uqqh8zWWbv1HBMNONnaR/tNboyR3/BZd58JJSHlUSCU=
 github.com/phsym/console-slog v0.3.1 h1:Fuzcrjr40xTc004S9Kni8XfNsk+qrptQmyR+wZw9/7A=
 github.com/phsym/console-slog v0.3.1/go.mod h1:oJskjp/X6e6c0mGpfP8ELkfKUsrkDifYRAqJQgmdDS0=
-github.com/phuslu/lru v1.0.18 h1:ioKRYLym7nv6UmaKHXSR0Z8s2KCEra+mcWcn9zXQnlM=
-github.com/phuslu/lru v1.0.18/go.mod h1:ci5hb8dRIa+2I+KcPl4958OWCg09FxwZCP8InU1L1ME=
+github.com/phuslu/lru v1.0.25 h1:dTufLXqizdgCrjKvho1iZzyHEd5t5sMhSQzaDRv8MrI=
+github.com/phuslu/lru v1.0.25/go.mod h1:wbS5UKUUelTd/ffXNB7lfER8+H66ryqIEWiw+jmeahM=
 github.com/pierrec/lz4/v4 v4.1.34 h1:5cPY8+z/ffHDpF6Pvv5FffjtZOJJQEiG75267Ol3QtU=
 github.com/pierrec/lz4/v4 v4.1.34/go.mod h1:R7aiqKav9M7+k1JW19D7y7rcavDvw9Te/YTdFJyNXBs=
 github.com/piprate/json-gold v0.7.0 h1:bEMirgA5y8Z2loTQfxyIFfY+EflxH1CTP6r/KIlcJNw=
