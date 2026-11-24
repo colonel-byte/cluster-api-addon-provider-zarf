@@ -1863,8 +1863,8 @@ github.com/hashicorp/hcl/v2/json
 github.com/hashicorp/vault/api
 github.com/hashicorp/vault/api/cliconfig
 github.com/hashicorp/vault/api/tokenhelper
-# github.com/henvic/httpretty v0.1.4
-## explicit; go 1.22
+# github.com/henvic/httpretty v0.2.0
+## explicit; go 1.25.0
 github.com/henvic/httpretty
 github.com/henvic/httpretty/internal/color
 github.com/henvic/httpretty/internal/header
