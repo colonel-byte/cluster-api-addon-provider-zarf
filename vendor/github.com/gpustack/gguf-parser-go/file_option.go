@@ -1,6 +1,7 @@
 package gguf_parser
 
 import (
+	"context"
 	"net/url"
 	"path/filepath"
 	"runtime"
@@ -10,10 +11,22 @@ import (
 	"github.com/gpustack/gguf-parser-go/util/osx"
 )
 
+// DefaultMetadataReadBudget is the metadata accounting allowance per model, in bytes.
+const DefaultMetadataReadBudget = 256 << 20
+
+// DefaultRemoteShardLimit is the maximum number of remote shards per model by default.
+const DefaultRemoteShardLimit = 2048
+
+// DefaultRemoteReadTimeout bounds a remote model read when the caller supplies no deadline.
+const DefaultRemoteReadTimeout = 5 * time.Minute
+
 type (
 	_GGUFReadOptions struct {
-		Debug             bool
-		SkipLargeMetadata bool
+		Debug              bool
+		SkipLargeMetadata  bool
+		MetadataReadBudget uint64
+		RemoteShardLimit   int
+		RemoteReadTimeout  time.Duration
 
 		// Local.
 		MMap bool
@@ -48,6 +61,54 @@ func SkipLargeMetadata() GGUFReadOption {
 	return func(o *_GGUFReadOptions) {
 		o.SkipLargeMetadata = true
 	}
+}
+
+// UseMetadataReadBudget sets the accounting budget in bytes for a complete GGUF read.
+// The default is 256 MiB. Zero selects the default.
+func UseMetadataReadBudget(bytes uint64) GGUFReadOption {
+	return func(o *_GGUFReadOptions) {
+		o.MetadataReadBudget = bytes
+	}
+}
+
+func (o _GGUFReadOptions) metadataBudget() uint64 {
+	if o.MetadataReadBudget == 0 {
+		return DefaultMetadataReadBudget
+	}
+	return o.MetadataReadBudget
+}
+
+// UseRemoteShardLimit sets the maximum number of files to open for a remote GGUF model.
+// The default is 2,048. Values below one select the default. GGUF filenames allow up to 99,999 shards.
+func UseRemoteShardLimit(count int) GGUFReadOption {
+	return func(o *_GGUFReadOptions) {
+		o.RemoteShardLimit = count
+	}
+}
+
+func (o _GGUFReadOptions) remoteShardLimit() int {
+	if o.RemoteShardLimit < 1 {
+		return DefaultRemoteShardLimit
+	}
+	return min(o.RemoteShardLimit, 99999)
+}
+
+// UseRemoteReadTimeout sets a time limit for reading one remote model, including all its shards.
+// A shorter caller deadline takes precedence. Nonpositive durations select the default behavior.
+func UseRemoteReadTimeout(timeout time.Duration) GGUFReadOption {
+	return func(o *_GGUFReadOptions) {
+		o.RemoteReadTimeout = timeout
+	}
+}
+
+func (o _GGUFReadOptions) remoteReadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if o.RemoteReadTimeout > 0 {
+		return context.WithTimeout(ctx, o.RemoteReadTimeout)
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, DefaultRemoteReadTimeout)
 }
 
 // UseMMap uses mmap to read the local file.

@@ -3,11 +3,10 @@
 > tl;dr, Review/Check [GGUF](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) files and estimate the memory
 > usage.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/gpustack/gguf-parser-go/cmd.yml?label=ci)](https://github.com/gpustack/gguf-parser-go/actions)
-[![License](https://img.shields.io/github/license/gpustack/gguf-parser-go?label=license)](https://github.com/gpustack/gguf-parser-go#license)
-[![Download](https://img.shields.io/github/downloads/gpustack/gguf-parser-go/total)](https://github.com/gpustack/gguf-parser-go/releases)
-[![Docker Pulls](https://img.shields.io/docker/pulls/gpustack/gguf-parser)](https://hub.docker.com/r/gpustack/gguf-parser)
-[![Release](https://img.shields.io/github/v/release/gpustack/gguf-parser-go)](https://github.com/gpustack/gguf-parser-go/releases/latest)
+[![License](https://img.shields.io/github/license/gpustack/gguf-parser-go?label=License)](./LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/gpustack/gguf-parser-go?logo=semanticrelease&label=Release&include_prereleases)](https://github.com/gpustack/gguf-parser-go/releases)
+[![Docker Pulls](https://img.shields.io/docker/pulls/gpustack/gguf-parser?logo=docker&logoColor=fff&label=Docker%20Pulls)](https://hub.docker.com/r/gpustack/gguf-parser)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask_DeepWiki-purple?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAPoAAAD6AG1e1JrAAACIUlEQVRYw+2XP2gUQRTGv7d3JhYWQawkIBaCVWzETos0gmAnVoKNTSoLK0E7EQQrC20sBVFBtLPQRgTBtBaKjYgIQUSxiJq7fT+LvCGPJZdNLt4dQj5Y3u7sznzfzLw/s9IO/icANiniCujEfWdsQgBLxAbsbraPZcmBfcAt4DNwKQsZNfEUsAB8YRV12LfA6ZHuedg7AO7ed/c+UBcbQhbiu+6wXIM6EnZWkszMJe2Ke0n6I2la0v51hFeSMLN6OwIK6jJwEBdUYb2MAxRSz6sY4geiahFgLe1Hwq6YWe3us8AN4FQQU4QM64SPY69Xyr43fADgNjAPXHb3peSsD4FDQ0VLEjAHvIhBPS6AHvA1bBO9JPAXcHFbIRtJ5yzwIQZ9CZwAusDJENIkLqsG8DpNyIZJwSUk9wLHgakcesC1JCCjiHm1kYDNOEjptCxpSVK/8f73OFLxPLAYM3oCzEX7MXf/lJbc/8kWpA4HgQdpYI9IWAbeh83whi84cHXL+58EPBoQhnmm94EzwE3gZ2p/Dhzdbhg+TaRr01x7ftb4/jBwFzjXrCvDpmLW9crVLNeR9CaapoGemb2TdCERW1tNaBNQ8jktwmozqwtpqRNtdWAjARYk39IS12ZWRX7vmJmA71nQZgi36gN7gCvAj5xc3P0jcH7kx7Ik5IC73wsh14GZsZySow5002l4Jr0b6+m4eSyvpAn8lEzsx2QHo8RfUrlN+uPq4ksAAAAASUVORK5CYII=)](https://deepwiki.com/gpustack/gguf-parser-go)
 
 [GGUF](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) is a file format for storing models for inference
 with GGML and executors based on GGML. GGUF is a binary format that is designed for fast loading and saving of models,
@@ -24,7 +23,7 @@ download it.
 - **Accurate Prediction**: The evaluation results of GGUF Parser usually deviate from the actual usage by about 100MiB.
 - **Quick Verification**: You can provide device metrics to calculate the maximum tokens per second (TPS) without
   running the model.
-- **Type Screening**: GGUF Parser can distinguish what the GGUF file used for, such as Embedding, Reranking, LoRA, etc.
+- **Type Screening**: GGUF Parser can distinguish what the GGUF file used for, such as Embedding, Reranking, Decision, LoRA, etc.
 - **Fast**: GGUF Parser is written in Go, which is fast and efficient.
 
 ## Agenda
@@ -55,40 +54,18 @@ download it.
 
 ## Notes
 
-- **Since v0.20.0**, GGUF Parser supports leveraging `--override-tensor` to indicate how to place the model tensors.
-- **Since v0.19.0**, GGUF Parser supports estimating Audio projector model file, like Ultravox series, Qwen2 Audio
-  series, etc.
-- **Since v0.18.0**, GGUF Parser supports estimating SWA-supported(sliding window attention) model file, like LLaMA 4
-  series, Gemma2/3 series, etc.
-- **Since v0.17.0**, GGUF Parser align the `QUANTIZATION`(
-  aka. [`general.file_type`](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md#general-metadata))
-  to [HuggingFace processing](https://github.com/huggingface/huggingface.js/blob/2475d6d316135c0a4fceff6b3fe2aed0dde36ac1/packages/gguf/src/types.ts#L11-L48),
-  but there are still many model files whose naming does not fully follow `general.file_type`.
-- **Since v0.16.0**, GGUF Parser supports estimating MLA-supported model file, like DeepSeek series.
-- **Since v0.14.0 (BREAKING CHANGE)**, GGUF Parser parses `*.feed_forward_length` metadata as `[]uint64`,
-  which means the architecture `feedForwardLength` is a list of integers.
-- **Since v0.13.0 (BREAKING CHANGE)**, GGUF Parser can parse files
-  for [StableDiffusion.Cpp](https://github.com/leejet/stable-diffusion.cpp) or StableDiffusion.Cpp like application.
-    + [LLaMA Box](https://github.com/gpustack/llama-box) is able to offload different components of the all-in-one model
-      to different devices, e.g. with `-ts 1,1,1`, GGUF Parser return the usage of Text Encoder Models in 1st device,
-      VAE Model in 2nd device, and Diffusion Model in 3rd device.
-- Experimentally, GGUF Parser can estimate the maximum tokens per second(`MAX TPS`) for a (V)LM model according to the
-  `--device-metric` options.
-- GGUF Parser distinguishes the remote devices from `--tensor-split` via `--rpc`.
-    + For one host multiple GPU devices, you can use `--tensor-split` to get the estimated memory usage of each GPU.
-    + For multiple hosts multiple GPU devices, you can use `--tensor-split` and `--rpc` to get the estimated memory
-      usage of each GPU. Since v0.11.0, `--rpc` flag masks the devices specified by `--tensor-split` in front.
-- Table result usage:
-    + `DISTRIBUTABLE` indicates the GGUF file supports distribution inference or not, if the file doesn't support
-      distribution inference, you can not offload it
-      with [RPC servers](https://github.com/ggerganov/llama.cpp/tree/master/examples/rpc).
-    + `RAM` indicates the system memory usage.
-    + `VRAM *` indicates the local GPU memory usage.
-    + `RPC * (V)RAM` indicates the remote memory usage. The kind of memory is determined by which backend the RPC server
-      uses, check the running logs for more details.
-    + `UMA` indicates the memory usage of Apple macOS only. `NONUMA` adapts to other cases, including non-GPU devices.
-    + `LAYERS`(`I`/`T`/`O`) indicates the count for input layers, transformer layers, and output layers. Input layers
-      are not offloaded at present.
+- For llama.cpp estimates, use `--gpu-layers -2` to offload all layers (the default), or give an
+  exact layer count. The CLI cannot resolve llama.cpp's hardware-dependent `-1` (`auto`).
+  See [parameter compatibility](cmd/gguf-parser/README.md#parameter-compatibility).
+- With multiple GPUs, `--tensor-split` sets their relative shares. When you add `--rpc`, the
+  first shares correspond to the remote devices. See [multi-GPU estimates](#across-multiple-gpu-devices).
+- In the estimate table, `RAM` is host memory, `VRAM` is local GPU memory, and `RPC` is memory
+  on a remote device. Use the `UMA` column for Apple unified memory and `NONUMA` for discrete
+  memory. `LAYERS (I + T + O)` counts input, transformer and output layers.
+  `DISTRIBUTABLE` indicates whether the model supports RPC offload.
+
+See [GGUF file compatibility](cmd/gguf-parser/README.md#gguf-file-compatibility) for parser limits
+and the [release notes](https://github.com/gpustack/gguf-parser-go/releases) for version history.
 
 ## Installation
 
@@ -126,15 +103,15 @@ $ gguf-parser --path ~/.cache/lm-studio/models/unsloth/DeepSeek-R1-Distill-Qwen-
 |  gpt2 |   2.47 MiB  |   152064   |        N/A       |   151646  |   151643  |    N/A    |    N/A    |      N/A      |       N/A       |     151654    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                        |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
-| qwen2 |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 677.44 MiB | 827.44 MiB |     28 + 1     | 7.30 GiB | 18.89 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                      |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
+| qwen2 |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 677.44 MiB | 827.44 MiB |     28 + 1     | 7.30 GiB | 18.89 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
 
 $ # Retrieve the model's metadata via split file,
 $ # which needs all split files has been downloaded.
@@ -163,15 +140,15 @@ $  gguf-parser --path ~/.cache/lm-studio/models/Qwen/Qwen2.5-7B-Instruct-GGUF/qw
 |  gpt2 |   2.47 MiB  |   152064   |        N/A       |   151643  |   151645  |    N/A    |    N/A    |      N/A      |       N/A       |     151643    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                        |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
-| qwen2 |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 677.44 MiB | 827.44 MiB |     28 + 1     | 7.30 GiB | 21.82 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                      |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
+| qwen2 |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 677.44 MiB | 827.44 MiB |     28 + 1     | 7.30 GiB | 21.82 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
 ```
 
 #### Parse Remote File
@@ -202,15 +179,15 @@ $ gguf-parser --url="https://huggingface.co/bartowski/Qwen2.5-72B-Instruct-GGUF/
 |  gpt2 |   2.47 MiB  |   152064   |        N/A       |   151643  |   151645  |    N/A    |    N/A    |      N/A      |       N/A       |     151643    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                         |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+----------------------------------------------+----------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                 |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+------------+------------+----------------+-----------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA    |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+-----------+-----------+
-| qwen2 |     32768    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 426.57 MiB | 576.57 MiB |     80 + 1     | 10.31 GiB | 58.18 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+-----------+-----------+
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                       |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+----------------------------------------------+----------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                 |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+------------+------------+----------------+-----------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA    |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+-----------+-----------+
+| qwen2 |     32768    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 426.57 MiB | 576.57 MiB |     80 + 1     | 10.31 GiB | 58.18 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+-----------+-----------+
 
 $ # Retrieve the model's metadata via split file
 
@@ -239,15 +216,15 @@ $ gguf-parser --url="https://huggingface.co/unsloth/DeepSeek-R1-GGUF/resolve/mai
 |  gpt2 |   2.21 MiB  |   129280   |        N/A       |     0     |     1     |    N/A    |    N/A    |      N/A      |       N/A       |     128815    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                         |
-+-----------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------------------------------+--------------------------------------+
-|    ARCH   | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                     RAM                    |                VRAM 0                |
-|           |              |                    |                 |           |                |             |               |                |                +--------------------+-----------+-----------+----------------+------------+--------+
-|           |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |    UMA    |   NONUMA  | LAYERS (T + O) |     UMA    | NONUMA |
-+-----------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+-----------+-----------+----------------+------------+--------+
-| deepseek2 |    163840    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   62 (61 + 1)  |       Yes      |      1 + 0 + 0     | 13.03 GiB | 13.18 GiB |     61 + 1     | 762.76 GiB |  1 TB  |
-+-----------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+-----------+-----------+----------------+------------+--------+
++----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                       |
++-----------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------------------------------+--------------------------------------+
+|    ARCH   | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                     RAM                    |                VRAM 0                |
+|           |              |                    |                 |           |                |             |             |               |                |                +--------------------+-----------+-----------+----------------+------------+--------+
+|           |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |    UMA    |   NONUMA  | LAYERS (T + O) |     UMA    | NONUMA |
++-----------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+-----------+-----------+----------------+------------+--------+
+| deepseek2 |    163840    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   62 (61 + 1)  |       Yes      |      1 + 0 + 0     | 13.03 GiB | 13.18 GiB |     61 + 1     | 762.76 GiB |  1 TB  |
++-----------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+-----------+-----------+----------------+------------+--------+
 ```
 
 #### Parse From HuggingFace
@@ -282,15 +259,15 @@ $ gguf-parser --hf-repo="bartowski/Qwen2-VL-2B-Instruct-GGUF" --hf-file="Qwen2-V
 |  gpt2 |   2.47 MiB  |   151936   |        N/A       |   151643  |   151645  |    N/A    |    N/A    |      N/A      |       N/A       |     151643    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                          |
-+---------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
-|   ARCH  | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
-|         |              |                    |                 |           |                |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
-|         |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
-+---------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
-| qwen2vl |     32768    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 236.87 MiB | 386.87 MiB |     28 + 1     | 3.65 GiB | 12.86 GiB |
-+---------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                        |
++---------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
+|   ARCH  | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
+|         |              |                    |                 |           |                |             |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
+|         |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
++---------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
+| qwen2vl |     32768    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 236.87 MiB | 386.87 MiB |     28 + 1     | 3.65 GiB | 12.86 GiB |
++---------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
 
 $ # Retrieve the model's metadata via split file
 
@@ -319,15 +296,15 @@ $ gguf-parser --hf-repo="bartowski/openbuddy-llama3.3-70b-v24.1-131k-GGUF" --hf-
 |  gpt2 |    2 MiB    |   128256   |        N/A       |   128000  |   128048  |    N/A    |    N/A    |      N/A      |       N/A       |     128044    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                    |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+-----------------------------------------+----------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                   RAM                   |                 VRAM 0                 |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+---------+----------+----------------+-----------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |   UMA   |  NONUMA  | LAYERS (T + O) |    UMA    |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
-| llama |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 1.06 GB | 1.13 GiB |     80 + 1     | 40.26 GiB | 93.62 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+-----------------------------------------+----------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                   RAM                   |                 VRAM 0                 |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+---------+----------+----------------+-----------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |   UMA   |  NONUMA  | LAYERS (T + O) |    UMA    |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
+| llama |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 1.06 GB | 1.13 GiB |     80 + 1     | 40.26 GiB | 93.62 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
 ```
 
 #### Parse From ModelScope
@@ -362,15 +339,15 @@ $ gguf-parser --ms-repo="unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF" --ms-file="De
 |  gpt2 |   2.47 MiB  |   152064   |        N/A       |   151646  |   151643  |    N/A    |    N/A    |      N/A      |       N/A       |     151654    |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                        |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
-| qwen2 |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 677.44 MiB | 827.44 MiB |     28 + 1     | 7.30 GiB | 27.99 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
++---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                      |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+----------------------------------------------+---------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                 VRAM 0                |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+------------+------------+----------------+----------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |    UMA   |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
+| qwen2 |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   29 (28 + 1)  |       Yes      |      1 + 0 + 0     | 677.44 MiB | 827.44 MiB |     28 + 1     | 7.30 GiB | 27.99 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+----------+-----------+
 ```
 
 #### Parse From Ollama Library
@@ -405,15 +382,15 @@ $ gguf-parser --ol-model="llama3.3"
 |  gpt2 |    2 MiB    |   128256   |        N/A       |   128000  |   128009  |    N/A    |    N/A    |      N/A      |       N/A       |      N/A      |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                    |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+-----------------------------------------+----------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                   RAM                   |                 VRAM 0                 |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+---------+----------+----------------+-----------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |   UMA   |  NONUMA  | LAYERS (T + O) |    UMA    |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
-| llama |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 1.06 GB | 1.13 GiB |     80 + 1     | 40.26 GiB | 95.86 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+-----------------------------------------+----------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                   RAM                   |                 VRAM 0                 |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+---------+----------+----------------+-----------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |   UMA   |  NONUMA  | LAYERS (T + O) |    UMA    |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
+| llama |    131072    |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 1.06 GB | 1.13 GiB |     80 + 1     | 40.26 GiB | 95.86 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+---------+----------+----------------+-----------+-----------+
 
 $ # Ollama Model includes the preset params and other artifacts, like multimodal projectors or LoRA adapters, 
 $ # you can get the usage of Ollama running by using `--ol-usage` option.
@@ -442,15 +419,15 @@ $ # you can get the usage of Ollama running by using `--ol-usage` option.
 |  gpt2 |    2 MiB    |   128256   |        N/A       |   128000  |   128009  |    N/A    |    N/A    |      N/A      |       N/A       |      N/A      |
 +-------+-------------+------------+------------------+-----------+-----------+-----------+-----------+---------------+-----------------+---------------+
 
-+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| ESTIMATE                                                                                                                                                                                                                                          |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+----------------------------------------------+-----------------------------------------+
-|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                  VRAM 0                 |
-|       |              |                    |                 |           |                |             |               |                |                +--------------------+------------+------------+----------------+------------+-----------+
-|       |              |                    |                 |           |                |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |     UMA    |   NONUMA  |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+------------+-----------+
-| llama |     2048     |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 255.27 MiB | 405.27 MiB |     80 + 1     | 906.50 MiB | 40.49 GiB |
-+-------+--------------+--------------------+-----------------+-----------+----------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+------------+-----------+
++-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| ESTIMATE                                                                                                                                                                                                                                                        |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+----------------------------------------------+-----------------------------------------+
+|  ARCH | CONTEXT SIZE | BATCH SIZE (L / P) | FLASH ATTENTION | MMAP LOAD | EMBEDDING ONLY |  RERANKING  |   DECISION  | DISTRIBUTABLE | OFFLOAD LAYERS | FULL OFFLOADED |                      RAM                     |                  VRAM 0                 |
+|       |              |                    |                 |           |                |             |             |               |                |                +--------------------+------------+------------+----------------+------------+-----------+
+|       |              |                    |                 |           |                |             |             |               |                |                | LAYERS (I + T + O) |     UMA    |   NONUMA   | LAYERS (T + O) |     UMA    |   NONUMA  |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+------------+-----------+
+| llama |     2048     |     2048 / 512     |     Disabled    |  Enabled  |       No       | Unsupported | Unsupported |   Supported   |   81 (80 + 1)  |       Yes      |      1 + 0 + 0     | 255.27 MiB | 405.27 MiB |     80 + 1     | 906.50 MiB | 40.49 GiB |
++-------+--------------+--------------------+-----------------+-----------+----------------+-------------+-------------+---------------+----------------+----------------+--------------------+------------+------------+----------------+------------+-----------+
 ```
 
 #### Others
