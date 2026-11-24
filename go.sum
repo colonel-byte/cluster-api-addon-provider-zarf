@@ -702,8 +702,8 @@ github.com/go-openapi/jsonpointer v1.0.3 h1:iEtrz/inxw+0za5lr10whyxplQdwJruNoQAF
 github.com/go-openapi/jsonpointer v1.0.3/go.mod h1:rf2X/7HDNST8NkSpeV5gTOJeCZXwcIHyVbr5CPiWSDU=
 github.com/go-openapi/jsonreference v1.0.3 h1:5rDbq+JsjCv6/nUDDJt83nLZoADI4w03uvHXer+4aYQ=
 github.com/go-openapi/jsonreference v1.0.3/go.mod h1:OJSlMXHysgH272D9z2tiy2MGe5A9vQLHaCPb6KbYdE4=
-github.com/go-openapi/loads v0.25.3 h1:V+jKy/thXWdLJUuYC8sZX2dICyAa8M3DokF70jj34P0=
-github.com/go-openapi/loads v0.25.3/go.mod h1:LgLyCSOLBL2Qnj0Ps1oo2YH8jZoEKsMeVZCc+ALIxFo=
+github.com/go-openapi/loads v0.25.4 h1:J3fMx/KSPZ0u8teIhchvL/XtiMHrnuWlFK40T9+zoKE=
+github.com/go-openapi/loads v0.25.4/go.mod h1:jYqaY2EpIryHT0kHa3LGRcbW52u8gqR8Sq4+uDw2Dcs=
 github.com/go-openapi/runtime v0.33.5 h1:+75EEOU6yv55alsXrkK7BV+vfiQg2ZJb9lAfXx8NW4w=
 github.com/go-openapi/runtime v0.33.5/go.mod h1:cvmwmMVxhBn/wzfz/VAeUEbe/E1jSCQ9HoNMwDmd+qs=
 github.com/go-openapi/runtime/server-middleware v0.33.5 h1:Kw2mZgKrLrqrq80yP35WPrQMT2oT3zytJRICqprMagY=
