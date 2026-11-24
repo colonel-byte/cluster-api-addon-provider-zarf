@@ -184,8 +184,8 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/deitch/magic v0.0.0-20240306090643-c67ab88f10cb // indirect
-	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
-	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7 // indirect
+	github.com/digitorus/pkcs7 v0.0.0-20260914070511-d678ea5ea03f // indirect
+	github.com/digitorus/timestamp v0.0.0-20260914073129-b4b58b92aa51 // indirect
 	github.com/dimchansky/utfbom v1.2.0 // indirect
 	github.com/diskfs/go-diskfs v1.9.4 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
