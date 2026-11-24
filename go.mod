@@ -381,6 +381,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/otiai10/copy v1.14.1 // indirect
 	github.com/otiai10/mint v1.6.3 // indirect
+	github.com/pandatix/go-abnf v0.5.5 // indirect
 	github.com/pb33f/go-yaml v0.2.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.2 // indirect
 	github.com/pborman/indent v1.2.1 // indirect
@@ -402,7 +403,7 @@ require (
 	github.com/pquerna/cachecontrol v0.1.0 // indirect
 	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
-	github.com/prometheus/common v0.72.1 // indirect
+	github.com/prometheus/common v0.74.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/protocolbuffers/txtpbfmt v0.0.0-20261116065023-f6f26894e769 // indirect
 	github.com/pterm/pterm v0.12.84 // indirect
@@ -499,7 +500,7 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.1 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.4 // indirect
+	go.yaml.in/yaml/v2 v2.4.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	go4.org v0.0.0-20261028031214-ed6929a230fe // indirect
 	golang.org/x/crypto v0.59.0 // indirect
