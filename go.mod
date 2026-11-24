@@ -29,7 +29,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.3.1 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/iam v1.15.1 // indirect
-	cloud.google.com/go/kms v1.33.0 // indirect
+	cloud.google.com/go/kms v1.37.0 // indirect
 	cloud.google.com/go/longrunning v1.5.0 // indirect
 	cloud.google.com/go/monitoring v1.30.0 // indirect
 	cloud.google.com/go/storage v1.71.0 // indirect

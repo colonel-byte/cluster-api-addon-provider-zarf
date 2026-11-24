@@ -53,8 +53,8 @@ cloud.google.com/go/compute/metadata
 ## explicit; go 1.26.0
 cloud.google.com/go/iam
 cloud.google.com/go/iam/apiv1/iampb
-# cloud.google.com/go/kms v1.33.0
-## explicit; go 1.25.0
+# cloud.google.com/go/kms v1.37.0
+## explicit; go 1.26.0
 cloud.google.com/go/kms/apiv1
 cloud.google.com/go/kms/apiv1/kmspb
 cloud.google.com/go/kms/internal
