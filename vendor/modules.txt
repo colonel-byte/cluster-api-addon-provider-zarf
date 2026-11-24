@@ -1371,8 +1371,8 @@ github.com/gabriel-vasile/mimetype/internal/scan
 ## explicit; go 1.24
 github.com/github/go-spdx/v2/spdxexp
 github.com/github/go-spdx/v2/spdxexp/spdxlicenses
-# github.com/go-chi/chi/v5 v5.3.0
-## explicit; go 1.23
+# github.com/go-chi/chi/v5 v5.5.0
+## explicit; go 1.24
 github.com/go-chi/chi/v5
 github.com/go-chi/chi/v5/middleware
 # github.com/go-errors/errors v1.5.1
