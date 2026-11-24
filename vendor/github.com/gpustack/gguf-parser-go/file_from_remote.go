@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
+	"net/url"
 	"strings"
 	"time"
 
@@ -38,13 +38,7 @@ func ParseGGUFFileRemote(ctx context.Context, url string, opts ...GGUFReadOption
 
 	// Cache.
 	{
-		if o.CachePath != "" {
-			o.CachePath = filepath.Join(o.CachePath, "remote")
-			if o.SkipLargeMetadata {
-				o.CachePath = filepath.Join(o.CachePath, "brief")
-			}
-		}
-		c := GGUFFileCache(o.CachePath)
+		c := o.parsedFileCache("remote")
 
 		// Get from cache.
 		if gf, err = c.Get(url, o.CacheExpiration); err == nil {
@@ -110,30 +104,35 @@ func ParseGGUFFileRemote(ctx context.Context, url string, opts ...GGUFReadOption
 	return parseGGUFFileFromRemote(ctx, cli, url, o)
 }
 
-func parseGGUFFileFromRemote(ctx context.Context, cli *http.Client, url string, o _GGUFReadOptions) (*GGUFFile, error) {
-	var urls []string
-	{
-		rs := CompleteShardGGUFFilename(url)
-		if rs != nil {
-			urls = rs
-		} else {
-			urls = []string{url}
-		}
+func parseGGUFFileFromRemote(ctx context.Context, cli *http.Client, rawURL string, o _GGUFReadOptions) (*GGUFFile, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
 	}
-
-	fs := make([]_GGUFFileReadSeeker, 0, len(urls))
-	defer func() {
-		for i := range fs {
-			osx.Close(fs[i])
+	files := ggufShardFiles(u.EscapedPath())
+	if files.index == 0 {
+		files.name = rawURL
+	} else {
+		// Preserve the authority and query verbatim. Only the filename identifies siblings.
+		rawURL = u.String()
+		end := strings.IndexAny(rawURL, "?#")
+		if end < 0 {
+			end = len(rawURL)
 		}
-	}()
+		files.prefix = strings.TrimSuffix(rawURL[:end], u.EscapedPath()) + files.prefix
+		files.suffix = rawURL[end:]
+	}
+	if files.count > o.remoteShardLimit() {
+		return nil, fmt.Errorf("shard count %d exceeds limit %d", files.count, o.remoteShardLimit())
+	}
+	ctx, cancel := o.remoteReadContext(ctx)
+	defer cancel()
 
-	for i := range urls {
-		req, err := httpx.NewGetRequestWithContext(ctx, urls[i])
+	return parseGGUFFile(files, o, func(path string) (_GGUFFileReadSeeker, error) {
+		req, err := httpx.NewGetRequestWithContext(ctx, path)
 		if err != nil {
-			return nil, fmt.Errorf("new request: %w", err)
+			return _GGUFFileReadSeeker{}, fmt.Errorf("new request: %w", err)
 		}
-
 		sf, err := httpx.OpenSeekerFile(cli, req,
 			httpx.SeekerFileOptions().
 				WithBufferSize(o.BufferSize).
@@ -144,15 +143,8 @@ func parseGGUFFileFromRemote(ctx context.Context, cli *http.Client, url string, 
 				),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("open http file: %w", err)
+			return _GGUFFileReadSeeker{}, fmt.Errorf("open http file: %w", err)
 		}
-
-		fs = append(fs, _GGUFFileReadSeeker{
-			Closer:     sf,
-			ReadSeeker: io.NewSectionReader(sf, 0, sf.Len()),
-			Size:       sf.Len(),
-		})
-	}
-
-	return parseGGUFFile(fs, o)
+		return _GGUFFileReadSeeker{sf, io.NewSectionReader(sf, 0, sf.Len()), sf.Len()}, nil
+	})
 }

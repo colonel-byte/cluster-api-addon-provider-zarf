@@ -1780,7 +1780,7 @@ github.com/gorilla/websocket
 github.com/gosuri/uitable
 github.com/gosuri/uitable/util/strutil
 github.com/gosuri/uitable/util/wordwrap
-# github.com/gpustack/gguf-parser-go v0.25.0
+# github.com/gpustack/gguf-parser-go v0.28.4
 ## explicit; go 1.22.0
 github.com/gpustack/gguf-parser-go
 github.com/gpustack/gguf-parser-go/util/anyx

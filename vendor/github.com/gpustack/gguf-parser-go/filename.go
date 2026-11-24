@@ -59,7 +59,47 @@ func ParseGGUFFilename(name string) *GGUFFilename {
 	if v := m["ShardTotal"]; v != "" {
 		gn.ShardTotal = ptr.To(parseInt(v))
 	}
+	separateQuantAndType(&gn)
 	return &gn
+}
+
+// Same tokens the filename encoding group accepts.
+var ggufEncodingToken = regexp.MustCompile(`(?i)^(BF16|F32|F16|[KI]?Q[0-9][A-Z0-9_]*)$`)
+
+// separateQuantAndType moves a quant, or a LoRA type, out of the fine-tune field.
+// A quant that ends in two letters matches the fine-tune pattern, which is tried
+// first, so the encoding came back empty. LoRA was stored as the fine-tune too.
+func separateQuantAndType(gn *GGUFFilename) {
+	if gn.Encoding != "" || gn.FineTune == "" {
+		return
+	}
+	if gn.Type == "" {
+		switch {
+		case gn.FineTune == "LoRA":
+			gn.Type = "LoRA"
+			gn.FineTune = ""
+		case strings.HasSuffix(gn.FineTune, "-LoRA"):
+			gn.Type = "LoRA"
+			gn.FineTune = strings.TrimSuffix(gn.FineTune, "-LoRA")
+		}
+	}
+	if gn.FineTune == "" {
+		return
+	}
+	if ggufEncodingToken.MatchString(gn.FineTune) {
+		gn.Encoding = gn.FineTune
+		gn.FineTune = ""
+		return
+	}
+	i := strings.LastIndex(gn.FineTune, "-")
+	if i <= 0 {
+		return
+	}
+	tail := gn.FineTune[i+1:]
+	if ggufEncodingToken.MatchString(tail) {
+		gn.Encoding = tail
+		gn.FineTune = gn.FineTune[:i]
+	}
 }
 
 func (gn GGUFFilename) String() string {
@@ -108,67 +148,45 @@ var ShardGGUFFilenameRegex = regexp.MustCompile(`^(?P<Prefix>.*)-(?:(?P<Shard>\d
 
 // IsShardGGUFFilename returns true if the given filename is a shard GGUF filename.
 func IsShardGGUFFilename(name string) bool {
-	n := name
-	if !strings.HasSuffix(n, ".gguf") {
-		n += ".gguf"
-	}
-
-	m := make(map[string]string)
-	{
-		r := ShardGGUFFilenameRegex.FindStringSubmatch(n)
-		for i, ne := range ShardGGUFFilenameRegex.SubexpNames() {
-			if i != 0 && i <= len(r) {
-				m[ne] = r[i]
-			}
-		}
-	}
-
-	var shard, shardTotal int
-	if v := m["Shard"]; v != "" {
-		shard = parseInt(v)
-	}
-	if v := m["ShardTotal"]; v != "" {
-		shardTotal = parseInt(v)
-	}
-	return shard > 0 && shardTotal > 0
+	return ggufShardFiles(name).index != 0
 }
 
-// CompleteShardGGUFFilename returns the list of shard GGUF filenames that are related to the given shard GGUF filename.
-//
-// Only available if the given filename is a shard GGUF filename.
+// CompleteShardGGUFFilename returns all filenames in the named shard set.
+// It returns nil for a filename outside the shard naming convention.
 func CompleteShardGGUFFilename(name string) []string {
-	n := name
-	if !strings.HasSuffix(n, ".gguf") {
-		n += ".gguf"
-	}
-
-	m := make(map[string]string)
-	{
-		r := ShardGGUFFilenameRegex.FindStringSubmatch(n)
-		for i, ne := range ShardGGUFFilenameRegex.SubexpNames() {
-			if i != 0 && i <= len(r) {
-				m[ne] = r[i]
-			}
-		}
-	}
-
-	var shard, shardTotal int
-	if v := m["Shard"]; v != "" {
-		shard = parseInt(v)
-	}
-	if v := m["ShardTotal"]; v != "" {
-		shardTotal = parseInt(v)
-	}
-
-	if shard <= 0 || shardTotal <= 0 {
+	files := ggufShardFiles(name)
+	if files.index == 0 {
 		return nil
 	}
-
-	names := make([]string, 0, shardTotal)
-	for i := 1; i <= shardTotal; i++ {
-		names = append(names, fmt.Sprintf("%s-%05d-of-%05d.gguf", m["Prefix"], i, shardTotal))
+	names := make([]string, files.count)
+	for i := range names {
+		names[i] = files.path(i)
 	}
 	return names
+}
+
+type ggufFiles struct {
+	name, prefix, suffix string
+	index, count         int
+}
+
+func ggufShardFiles(name string) ggufFiles {
+	base := strings.TrimSuffix(name, ".gguf") + ".gguf"
+	match := ShardGGUFFilenameRegex.FindStringSubmatch(base)
+	if match != nil {
+		index, count := parseInt(match[2]), parseInt(match[3])
+		if index > 0 && index <= count {
+			return ggufFiles{prefix: match[1], index: index, count: count}
+		}
+	}
+	return ggufFiles{name: name, count: 1}
+}
+
+func (f ggufFiles) path(i int) string {
+	if f.index == 0 {
+		return f.name
+	}
+	return fmt.Sprintf("%s-%05d-of-%05d.gguf%s", f.prefix, i+1, f.count, f.suffix)
 }
 
 func parseInt(v string) int {
