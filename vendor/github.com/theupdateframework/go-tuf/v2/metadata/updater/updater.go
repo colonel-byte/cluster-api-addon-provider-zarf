@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -66,11 +67,25 @@ import (
 type Updater struct {
 	trusted *trustedmetadata.TrustedMetadata
 	cfg     *config.UpdaterConfig
+	// verified records, for a (role, parent) pair, the trusted copies of
+	// both for which the role passed verification by the parent
+	verified map[roleParentTuple]roleParentCopies
 }
 
 type roleParentTuple struct {
 	Role   string
 	Parent string
+}
+
+// delegator is the trusted metadata of a role that delegates to other roles
+type delegator interface {
+	VerifyDelegate(delegatedRole string, delegatedMetadata any) error
+}
+
+// roleParentCopies holds the trusted copies of a role and of its parent
+type roleParentCopies struct {
+	role   *metadata.Metadata[metadata.TargetsType]
+	parent delegator
 }
 
 // New creates a new Updater instance and loads trusted root metadata
@@ -86,8 +101,9 @@ func New(config *config.UpdaterConfig) (*Updater, error) {
 	}
 	// create an updater instance
 	updater := &Updater{
-		cfg:     config,
-		trusted: trustedMetadataSet, // save trusted metadata set
+		cfg:      config,
+		trusted:  trustedMetadataSet, // save trusted metadata set
+		verified: map[roleParentTuple]roleParentCopies{},
 	}
 	// ensure paths exist, doesn't do anything if caching is disabled
 	err = updater.cfg.EnsurePathsExist()
@@ -233,20 +249,15 @@ func (update *Updater) DownloadTarget(targetFile *metadata.TargetFiles, filePath
 	targetRemotePath := targetFilePath
 	consistentSnapshot := update.trusted.Root.Signed.ConsistentSnapshot
 	if consistentSnapshot && update.cfg.PrefixTargetsWithHash {
-		hashes := ""
-		// get first hex value of hashes
-		for _, v := range targetFile.Hashes {
-			hashes = hex.EncodeToString(v)
-			break
-		}
+		hashPrefix := hex.EncodeToString(targetFile.Hashes[selectTargetHashAlgorithm(targetFile.Hashes)])
 		baseName := filepath.Base(targetFilePath)
 		dirName, ok := strings.CutSuffix(targetFilePath, "/"+baseName)
 		if !ok {
 			// <hash>.<target-name>
-			targetRemotePath = fmt.Sprintf("%s.%s", hashes, baseName)
+			targetRemotePath = fmt.Sprintf("%s.%s", hashPrefix, baseName)
 		} else {
 			// <dir-prefix>/<hash>.<target-name>
-			targetRemotePath = fmt.Sprintf("%s/%s.%s", dirName, hashes, baseName)
+			targetRemotePath = fmt.Sprintf("%s/%s.%s", dirName, hashPrefix, baseName)
 		}
 	}
 	fullURL := fmt.Sprintf("%s%s", targetBaseURL, targetRemotePath)
@@ -384,6 +395,9 @@ func (update *Updater) loadSnapshot() error {
 	}
 	// extract the snapshot meta from the trusted timestamp metadata
 	snapshotMeta := update.trusted.Timestamp.Signed.Meta[fmt.Sprintf("%s.json", metadata.SNAPSHOT)]
+	if snapshotMeta == nil {
+		return fmt.Errorf("snapshot metadata not found in timestamp")
+	}
 	// extract the length of the snapshot metadata to be downloaded
 	length := snapshotMeta.Length
 	if length == 0 {
@@ -412,11 +426,56 @@ func (update *Updater) loadSnapshot() error {
 	return nil
 }
 
+// trustedCopies returns the trusted copies of roleName and of its parent
+// parentName, if both are loaded
+func (update *Updater) trustedCopies(roleName, parentName string) (roleParentCopies, bool) {
+	role, ok := update.trusted.Targets[roleName]
+	if !ok {
+		return roleParentCopies{}, false
+	}
+	if parentName == metadata.ROOT {
+		return roleParentCopies{role: role, parent: update.trusted.Root}, true
+	}
+	parent, ok := update.trusted.Targets[parentName]
+	if !ok {
+		return roleParentCopies{}, false
+	}
+	return roleParentCopies{role: role, parent: parent}, true
+}
+
+// markVerified records that the trusted copy of roleName passed
+// verification by the trusted copy of parentName
+func (update *Updater) markVerified(roleName, parentName string) {
+	if current, ok := update.trustedCopies(roleName, parentName); ok {
+		update.verified[roleParentTuple{Role: roleName, Parent: parentName}] = current
+	}
+}
+
+// cachedTargets returns the trusted copy of roleName if it is verified by
+// the trusted copy of parentName. A copy that parentName has not verified
+// yet, such as one loaded through another parent, is verified first.
+func (update *Updater) cachedTargets(roleName, parentName string) (*metadata.Metadata[metadata.TargetsType], bool) {
+	current, ok := update.trustedCopies(roleName, parentName)
+	if !ok {
+		return nil, false
+	}
+	pair := roleParentTuple{Role: roleName, Parent: parentName}
+	// a replaced role or parent does not match the recorded copies
+	if update.verified[pair] != current {
+		if err := current.parent.VerifyDelegate(roleName, current.role); err != nil {
+			return nil, false
+		}
+		update.verified[pair] = current
+	}
+	return current.role, true
+}
+
 // loadTargets load local (and if needed remote) metadata for roleName
 func (update *Updater) loadTargets(roleName, parentName string) (*metadata.Metadata[metadata.TargetsType], error) {
 	log := metadata.GetLogger()
-	// avoid loading "roleName" more than once during "GetTargetInfo"
-	role, ok := update.trusted.Targets[roleName]
+	// avoid loading "roleName" more than once during "GetTargetInfo", as
+	// long as the trusted copy is verified by "parentName"
+	role, ok := update.cachedTargets(roleName, parentName)
 	if ok {
 		return role, nil
 	}
@@ -440,6 +499,7 @@ func (update *Updater) loadTargets(roleName, parentName string) (*metadata.Metad
 		} else {
 			// this means targets verification/loading succeeded
 			log.Info("Local role is valid: not downloading new one", "role", roleName)
+			update.markVerified(roleName, parentName)
 			return delegatedTargets, nil
 		}
 	}
@@ -450,7 +510,7 @@ func (update *Updater) loadTargets(roleName, parentName string) (*metadata.Metad
 	}
 	// extract the targets' meta from the trusted snapshot metadata
 	metaInfo, ok := update.trusted.Snapshot.Signed.Meta[fmt.Sprintf("%s.json", roleName)]
-	if !ok {
+	if !ok || metaInfo == nil {
 		return nil, fmt.Errorf("role %s not found in snapshot", roleName)
 	}
 	// extract the length of the target metadata to be downloaded
@@ -473,6 +533,7 @@ func (update *Updater) loadTargets(roleName, parentName string) (*metadata.Metad
 	if err != nil {
 		return nil, err
 	}
+	update.markVerified(roleName, parentName)
 	// persist the new target metadata
 	err = update.persistMetadata(roleName, data)
 	if err != nil {
@@ -503,7 +564,7 @@ func (update *Updater) loadRoot() error {
 				// 404 means current root is newest available, so we can stop the loop and move forward
 				break
 			}
-			// some other error ocurred
+			// some other error occurred
 			return err
 		} else {
 			// downloading root metadata succeeded, so let's try to verify and load it
@@ -521,27 +582,41 @@ func (update *Updater) loadRoot() error {
 	return nil
 }
 
+// delegationToVisit is a delegated role to interrogate during the
+// pre-order depth-first walk and the delegation path taken to reach it
+type delegationToVisit struct {
+	roleParentTuple
+	// path lists the roles walked through to reach Role, from the
+	// top-level targets role to Parent. It is empty for the top-level
+	// targets role
+	path []string
+}
+
 // preOrderDepthFirstWalk interrogates the tree of target delegations
 // in order of appearance (which implicitly order trustworthiness),
 // and returns the matching target found in the most trusted role.
 func (update *Updater) preOrderDepthFirstWalk(targetFilePath string) (*metadata.TargetFiles, error) {
 	log := metadata.GetLogger()
 	// list of delegations to be interrogated. A (role, parent role) pair
-	// is needed to load and verify the delegated targets metadata
-	delegationsToVisit := []roleParentTuple{{
-		Role:   metadata.TARGETS,
-		Parent: metadata.ROOT,
+	// is needed to load and verify the delegated targets metadata, and the
+	// delegation path taken to reach the role is needed to detect cycles
+	delegationsToVisit := []delegationToVisit{{
+		roleParentTuple: roleParentTuple{
+			Role:   metadata.TARGETS,
+			Parent: metadata.ROOT,
+		},
 	}}
-	visitedRoleNames := map[string]bool{}
+	visitedRoles := 0
 	// pre-order depth-first traversal of the graph of target delegations
-	for len(visitedRoleNames) <= update.cfg.MaxDelegations && len(delegationsToVisit) > 0 {
+	for visitedRoles <= update.cfg.MaxDelegations && len(delegationsToVisit) > 0 {
 		// pop the role name from the top of the stack
 		delegation := delegationsToVisit[len(delegationsToVisit)-1]
 		delegationsToVisit = delegationsToVisit[:len(delegationsToVisit)-1]
-		// skip any visited current role to prevent cycles
-		_, ok := visitedRoleNames[delegation.Role]
-		if ok {
-			log.Info("Skipping visited current role", "role", delegation.Role)
+		// skip a role already visited on the delegation path used to reach
+		// it to prevent cycles. A role reached through another delegation
+		// path is visited again and verified by the delegator on that path
+		if slices.Contains(delegation.path, delegation.Role) {
+			log.Info("Skipping role visited on the current delegation path", "role", delegation.Role)
 			continue
 		}
 		// the metadata for delegation.Role must be downloaded/updated before
@@ -551,23 +626,29 @@ func (update *Updater) preOrderDepthFirstWalk(targetFilePath string) (*metadata.
 			return nil, err
 		}
 		target, ok := targets.Signed.Targets[targetFilePath]
-		if ok {
+		if ok && target != nil {
 			log.Info("Found target in current role", "role", delegation.Role)
 			return target, nil
 		}
-		// after pre-order check, add current role to set of visited roles
-		visitedRoleNames[delegation.Role] = true
+		// after pre-order check, count the current role as visited. A role
+		// visited again through another delegation path counts again
+		visitedRoles++
 		if targets.Signed.Delegations != nil {
-			var childRolesToVisit []roleParentTuple
+			var childRolesToVisit []delegationToVisit
 			// note that this may be a slow operation if there are many
 			// delegated roles
 			roles := targets.Signed.Delegations.GetRolesForTarget(targetFilePath)
+			// the delegation path taken to reach the child roles
+			childPath := slices.Concat(delegation.path, []string{delegation.Role})
 			for _, rolesForTarget := range roles {
 				log.Info("Adding child role", "role", rolesForTarget.Name)
-				childRolesToVisit = append(childRolesToVisit, roleParentTuple{Role: rolesForTarget.Name, Parent: delegation.Role})
+				childRolesToVisit = append(childRolesToVisit, delegationToVisit{
+					roleParentTuple: roleParentTuple{Role: rolesForTarget.Name, Parent: delegation.Role},
+					path:            childPath,
+				})
 				if rolesForTarget.Terminating {
 					log.Info("Not backtracking to other roles")
-					delegationsToVisit = []roleParentTuple{}
+					delegationsToVisit = []delegationToVisit{}
 					break
 				}
 			}
@@ -666,14 +747,54 @@ func (update *Updater) generateTargetFilePath(tf *metadata.TargetFiles) (string,
 	return filepath.Join(update.cfg.LocalTargetsDir, url.PathEscape(tf.Path)), nil
 }
 
+// preferredTargetHashAlgorithms lists, in order of preference, the hash
+// algorithms used to build the hash-prefixed path of a target file
+var preferredTargetHashAlgorithms = [...]string{"sha256", "sha512"}
+
+// selectTargetHashAlgorithm picks which of a target's hashes is used to build its
+// hash-prefixed path when consistent snapshots are enabled
+// (ref. https://theupdateframework.github.io/specification/latest/#fetch-target).
+//
+// The specification lets a client use any of the hashes listed for a target, so this
+// choice carries no security weight - DownloadTarget verifies the downloaded bytes
+// against every hash in the metadata regardless of which one the URL was built from.
+// It only has to be deterministic, so that a given target always resolves to the same
+// URL. Ranging over the map directly would not be, since Go randomizes map iteration
+// order.
+//
+// The algorithms in preferredTargetHashAlgorithms win, in that order, as those are the
+// ones a repository is most likely to have published a copy for. Any other algorithm
+// falls back to lexicographic order. Returns an empty string if there are no hashes,
+// mirroring the empty prefix the previous implementation produced (such a target fails
+// verification later on anyway).
+func selectTargetHashAlgorithm(hashes metadata.Hashes) string {
+	if len(hashes) == 0 {
+		return ""
+	}
+	for _, algorithm := range preferredTargetHashAlgorithms {
+		if _, ok := hashes[algorithm]; ok {
+			return algorithm
+		}
+	}
+	return slices.Min(slices.Collect(maps.Keys(hashes)))
+}
+
 // loadLocalMetadata reads a local <roleName>.json file and returns its bytes
 func (update *Updater) loadLocalMetadata(roleName string) ([]byte, error) {
 	return os.ReadFile(fmt.Sprintf("%s.json", roleName))
 }
 
-// GetTopLevelTargets returns the top-level target files
+// GetTopLevelTargets returns the top-level target files.
+//
+// It returns an empty map if the top-level targets metadata is not loaded,
+// which is the case until Refresh() or GetTargetInfo() has succeeded. It
+// does not load any metadata itself.
 func (update *Updater) GetTopLevelTargets() map[string]*metadata.TargetFiles {
-	return update.trusted.Targets[metadata.TARGETS].Signed.Targets
+	targets := update.trusted.Targets[metadata.TARGETS]
+	if targets == nil {
+		return map[string]*metadata.TargetFiles{}
+	}
+	return targets.Signed.Targets
 }
 
 // GetTrustedMetadataSet returns the trusted metadata set
