@@ -141,7 +141,16 @@ func (Resolver) Resolve(ctx context.Context, repository, version string, opts Op
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // best-effort temp cleanup
 
-	if _, err := rmt.PullPackage(ctx, dir, 2, layers...); err != nil {
+	// The package's own files get a subdirectory of their own, because zarf's loader validates
+	// the directory against checksums.txt and refuses any file not listed in it - so anything
+	// this function writes for its own purposes, the public key below, has to sit beside the
+	// package rather than in it.
+	pkgDir := filepath.Join(dir, "package")
+	if err := os.Mkdir(pkgDir, 0o700); err != nil {
+		return Result{}, err
+	}
+
+	if _, err := rmt.PullPackage(ctx, pkgDir, 2, layers...); err != nil {
 		return Result{}, fmt.Errorf("pulling the metadata layers: %w", err)
 	}
 
@@ -162,7 +171,7 @@ func (Resolver) Resolve(ctx context.Context, repository, version string, opts Op
 		layoutOpts.VerifyBlobOptions = &verify
 	}
 
-	pkgLayout, err := layout.LoadFromDir(ctx, dir, layoutOpts)
+	pkgLayout, err := layout.LoadFromDir(ctx, pkgDir, layoutOpts)
 	if err != nil {
 		return Result{}, fmt.Errorf("loading and verifying the package metadata: %w", err)
 	}
