@@ -73,6 +73,15 @@ const (
 	// renovate: datasource=github-releases depName=projectcalico/calico extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 	calicoVersion = "3.33.1"
 
+	// localPathVersion pins the storage provisioner the workload cluster gets. CAPD creates
+	// clusters with no StorageClass at all, so anything asking for a volume there waits
+	// forever - the Zarf init package's registry among them, and its chart exposes no way to
+	// run without one. This is the same provisioner kind installs in its own clusters by
+	// default, which is the shape the rest of the world assumes.
+	//
+	// renovate: datasource=github-releases depName=rancher/local-path-provisioner extractVersion=^v(?<version>\d+\.\d+\.\d+)$
+	localPathVersion = "0.0.37"
+
 	// Image digests below are owned by a written procedure rather than Renovate - the Go
 	// custom manager tracks versions, not digests. To bump one:
 	//   docker buildx imagetools inspect <image:tag> | grep Digest
@@ -511,8 +520,52 @@ func installWorkloadCNI() error {
 	if err := workloadKubectl("apply", "-f", manifest); err != nil {
 		return err
 	}
-	// Ready is the assertion that matters - the apply succeeding only means the objects exist.
-	return workloadKubectl("wait", "node", "--all", "--for=condition=Ready", "--timeout=10m")
+	if err := workloadKubectl("wait", "node", "--all",
+		"--for=condition=Ready", "--timeout=10m"); err != nil {
+		// Ready is the assertion that matters - the apply succeeding only means the objects exist.
+		return err
+	}
+
+	// The init package's registry is pinned to infrastructure nodes by a required node
+	// affinity on this label, so without it the registry pod stays Pending and the init
+	// never finishes. A one-node test cluster has nowhere else to put it.
+	if err := workloadKubectl("label", "node", "--all", "--overwrite", infraNodeLabel+"=true"); err != nil {
+		return err
+	}
+
+	// Zarf's injector bootstraps the seed registry by reusing an image already present on a
+	// node, and it considers a node with any NoSchedule or NoExecute taint ineligible. CAPD
+	// gives its control-plane machine the standard control-plane taint, so on a cluster whose
+	// only machine is that one, injection fails with "no suitable injector image or node
+	// exists" and no init can ever complete. Removing the taint is what kind already does for
+	// its own single-node clusters; the alternative is paying for a worker machine the rest of
+	// the suite has no use for.
+	if err := workloadKubectl("taint", "node", "--all",
+		"node-role.kubernetes.io/control-plane:NoSchedule-", "--overwrite"); err != nil {
+		return err
+	}
+
+	// A StorageClass, for the same reason: CAPD ships none, and the init package's registry
+	// chart offers no way to run without a volume.
+	storageManifest := fmt.Sprintf(
+		"https://raw.githubusercontent.com/rancher/local-path-provisioner/v%s/deploy/local-path-storage.yaml",
+		localPathVersion)
+	if err := workloadKubectl("apply", "-f", storageManifest); err != nil {
+		return err
+	}
+	// The provisioner creates each volume through a helper pod that mounts a hostPath, and the
+	// CAPD cluster enforces the baseline Pod Security standard, which forbids exactly that -
+	// so provisioning fails inside the provisioner with "violates PodSecurity", the claim
+	// stays Pending, and the pod waiting on it never schedules. kind's own clusters enforce
+	// nothing, which is why this only bites here.
+	if err := workloadKubectl("label", "namespace", "local-path-storage", "--overwrite",
+		"pod-security.kubernetes.io/enforce=privileged"); err != nil {
+		return err
+	}
+	// Default, so a claim naming no class still binds - which is how the registry's chart
+	// writes its PVC.
+	return workloadKubectl("patch", "storageclass", "local-path", "-p",
+		`{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}`)
 }
 
 // seedSpikeImage stages the spike-pod image into the local registry, the same

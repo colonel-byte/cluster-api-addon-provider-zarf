@@ -54,17 +54,34 @@ const (
 	fixtureVersion  = "0.1.0"
 	driftAltVersion = "0.1.1"
 
-	// initPackageRepository is upstream's init package, mirrored into the local registry for
-	// the auto-init path. Mirrored rather than rebuilt: what operators actually run is the
-	// point, and a hand-rolled init package would prove nothing about it.
-	initPackageRepository = "ghcr.io/zarf-dev/packages/init"
+	// initPackageRepository is the init package the auto-init path deploys, mirrored into the
+	// local registry. init-slim rather than upstream's own `packages/init`, and the reason is
+	// load-bearing: every init package upstream publishes is `zarf.dev/v1alpha1`, and the
+	// v1alpha1 definition carries no component `service` names. Zarf's init orchestration -
+	// start the injector, bootstrap the seed registry, stand up the registry and the agent -
+	// switches entirely on those names, and the v1alpha1-to-internal conversion does not
+	// synthesize them. A v1alpha1 init package deployed through the SDK therefore writes zarf
+	// state, records the package, installs no chart, starts nothing, and reports success.
+	// init-slim is `zarf.dev/v1beta1` and composes upstream's published v1beta1 component
+	// configs, so the service names survive into the built package.
+	initPackageRepository = "ghcr.io/colonel-byte/zarf/init-slim"
 
 	// initPackageVersion is the init package version the auto-init fixtures deploy. It tracks
-	// the zarf SDK pin in go.mod - the package and the library that deploys it are released
-	// together, so a bump to one without the other is the interesting failure.
+	// the zarf SDK pin in go.mod - init-slim versions follow the Zarf release its components
+	// come from, so a bump to one without the other is the interesting failure.
 	//
-	// renovate: datasource=docker depName=ghcr.io/zarf-dev/packages/init extractVersion=^(?<version>v\d+\.\d+\.\d+)$
+	// renovate: datasource=docker depName=ghcr.io/colonel-byte/zarf/init-slim extractVersion=^(?<version>v\d+\.\d+\.\d+)$
 	initPackageVersion = "v1.0.1"
+
+	// initPackageName is the package's own declared name, which is also the repository segment
+	// it is mirrored under - PublishFromOCI requires the last path segment to match on both
+	// sides, and zarf keys its deployed-package record on the same name.
+	initPackageName = "init-slim"
+
+	// infraNodeLabel is the label init-slim's registry affinity requires; its shipped values
+	// pin the registry to nodes carrying it. Owned by that package, not by this repository -
+	// if it changes there, this constant follows.
+	infraNodeLabel = "adrp.xyz/is-infra"
 
 	// cosignPassword is the fixture signing key's passphrase. The keypair is generated into the
 	// gitignored workdir on every fresh topology, so this is a formality the cosign APIs
@@ -216,7 +233,7 @@ func createFixturePackage(name, version, marker string) error {
 // in the topology uses. Skipped once the destination carries it: this is the one
 // multi-hundred-megabyte transfer in the topology, and Up is meant to be re-runnable.
 func mirrorInitPackage() error {
-	repository := fixtureRepository + "/init"
+	repository := fixtureRepository + "/" + initPackageName
 	mirrored, err := registryHasTag(repository, initPackageVersion)
 	if err != nil {
 		return err
@@ -231,7 +248,7 @@ func mirrorInitPackage() error {
 		return err
 	}
 	// PublishFromOCI requires the package name - the last path segment - to match on both
-	// sides, which "init" does.
+	// sides, which initPackageName is chosen to satisfy.
 	dst, err := registry.ParseReference(registryHostPort + "/" + repository + ":" + initPackageVersion)
 	if err != nil {
 		return err
