@@ -38,7 +38,8 @@ for l in renovate/oci renovate/action renovate/gomod renovate/npm renovate/pre-c
 done
 
 # Secrets. The app credentials are shared with release-please; the cosign pair signs the
-# release archives. Omit any that are already org-level secrets visible to this repository.
+# release archives. Omit any that are already org-level secrets visible to this repository -
+# but see the note below before omitting the cosign pair.
 gh secret set RELEASE_PLEASE_GITHUB_APP_ID --repo "$REPO"
 gh secret set RELEASE_PLEASE_GITHUB_APP_SECRET --repo "$REPO" < path/to/app-private-key.pem
 gh secret set COSIGN_KEY --repo "$REPO" < path/to/cosign.key
@@ -47,15 +48,33 @@ gh secret set COSIGN_PASS --repo "$REPO"
 
 `COSIGN_KEY` and `COSIGN_PASS` are the **secret** names; `release.yaml` maps them onto `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`, which are cosign's own variable names and are not renameable. Renaming one side only produces an error at the signing step rather than a missing-secret error.
 
+### The cosign pair is the one secret that cannot just be inherited
+
+`cosign.pub` at the repository root is the public half of whatever `COSIGN_KEY` signs with, and it is the inverse of everything above: a *file*, so generation copies it, which is exactly the problem. Omitting the secret because an org-level `COSIGN_KEY` is visible leaves the template's `cosign.pub` in place beside a different key, and the two no longer belong to the same pair.
+
+Nothing reports that. `goreleaser` and `publish-oci-artifact.yaml` sign without verifying, so they go green while publishing artifacts that cannot be verified with the `cosign.pub` the docs point a consumer at. The only step that verifies is `publish-zarf-package.yaml`'s publish, which fetches `cosign.pub` from the release tag and fails with `invalid signature when validating ASN.1 encoded signature` - a signing-key error reported at the last step of the release, several minutes after the key that caused it was used.
+
+So pick one, and do it before the first release:
+
+- **Inherit the org pair** - replace `cosign.pub` with the public half of the org key. Do not keep the file that arrived with the template.
+- **Override it per repository** - `gh secret set COSIGN_KEY --repo "$REPO"` shadows the org secret, and `cosign.pub` stays as it is. This needs the private half of the committed key to actually exist somewhere.
+
+Either way the pair can only be checked against something already signed, so the check is the first thing to run after the first release rather than part of the setup above - the controller image goreleaser pushed is the earliest artifact there is:
+
+```sh
+cosign verify --key cosign.pub ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.1.0
+```
+
 ## Verifying it rather than assuming it
 
 Each of these answers one row of the table, and each has a failure mode that is silent otherwise:
 
 ```sh
-gh label list --repo "$REPO"                    # every label the forms and renovate name
-gh secret list --repo "$REPO"                   # repo-level only; org secrets do not appear here
-gh api "repos/$REPO/rules/branches/main"        # [] means nothing is enforced on main
-gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
+gh label list --repo "$REPO"                                               # every label the forms and renovate name
+gh secret list --repo "$REPO"                                              # repo-level only; org secrets do not appear here
+gh api "repos/$REPO/actions/organization-secrets" --jq '.secrets[].name'   # the org ones that will be used
+gh api "repos/$REPO/rules/branches/main"                                   # [] means nothing is enforced on main
+gh api "repos/$REPO/pages" --jq .html_url                                  # 404 until Pages is enabled
 ```
 
 Then open `https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/new/choose` on a branch after changing an issue form. A malformed form is reported as a banner on that page and nowhere else - parsing as YAML is not enough to know it renders.
