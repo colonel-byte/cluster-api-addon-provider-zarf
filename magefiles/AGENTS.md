@@ -62,6 +62,18 @@ Check a change rather than reasoning about it - this lists every vendored file g
 git ls-files --others --ignored --exclude-standard -- vendor/
 ```
 
+## The e2e targets are documented step by step, so changing one changes a page
+
+[`docs/dev/e2e-walkthrough.md`](../docs/dev/e2e-walkthrough.md) enumerates what `e2e:up`, `e2e:run` and `e2e:move` do - **by step name, in order** - because the thing an operator or a contributor needs from those targets is what each one is responsible for and what it leaves behind. That makes the page tightly coupled to `pkg/e2e/`, in three places that all go stale silently:
+
+- **The step tables.** Each row is a `{"name", fn}` entry from the `steps` slice in `Up` or `Run`. Adding, removing, renaming or reordering one leaves the page describing a flow that no longer exists, and the step names are what a failure prints (`==> <name>`), so a reader matching an error against the page finds nothing.
+- **The environment table.** It lists every `E2E_*` variable the targets export to the suite. A new one that only exists in code is invisible to someone trying to run a single test by hand, which is the page's main worked example.
+- **The artifact table.** It lists what lands in `dist/e2e/`. A new file - or a renamed one, as `workload.yaml` became `workload-v<version>.yaml` - makes the "start genuinely clean" section wrong about what needs deleting.
+
+So treat it the way [`.github/AGENTS.md`](../.github/AGENTS.md) treats `docs/workflows/`: the page is part of the change, not a follow-up. The same applies to the failure table - when a new environment assumption gets encoded in a step (a CNI, a taint, a StorageClass, a Pod Security label all have), the symptom it produces when absent belongs in that table, because the next person to meet it will search for the symptom and not the cause.
+
+Nothing in the build checks any of this. `mdbook build` does not read Go, and no test asserts that a step name in a table still exists in the slice - so the check is `grep -n '{"' magefiles/pkg/e2e/*.go` against the tables before opening the pull request.
+
 ## Every pin needs an owner
 
 A pinned value is a version, tag, digest, or checksum written into the tree that names something living upstream: a container image digest, a package version, an upstream tag, a cloud image's `sha256`. Pinning is usually the right default - a build has to be reproducible - but a pin with nothing watching it goes stale silently. Nothing fails; the tree just keeps installing a version that stopped being current, and often stopped being patched, months ago.
