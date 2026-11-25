@@ -72,6 +72,14 @@ func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *
 		return 0, nil
 	}
 	opts.CosignPublicKey = publicKey
+	reason, message, err = r.registryAccess(ctx, proxy.Namespace, &proxy.Spec.Package, &opts)
+	if err != nil {
+		return 0, err
+	}
+	if reason != "" {
+		setResolved(metav1.ConditionFalse, reason, message)
+		return 0, nil
+	}
 
 	followTag, interval := r.followTag(ctx, proxy)
 
@@ -214,6 +222,14 @@ func (r *ZarfPackageProxyReconciler) resolveInitPackage(ctx context.Context, pro
 		return nil
 	}
 	opts.CosignPublicKey = publicKey
+	reason, message, err = r.registryAccess(ctx, proxy.Namespace, pkg, &opts)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		setResolved(metav1.ConditionFalse, reason, message)
+		return nil
+	}
 
 	result, err := r.Resolver.Resolve(ctx, pkg.Repository, pkg.Version, opts)
 	if err != nil {
