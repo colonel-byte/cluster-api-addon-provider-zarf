@@ -54,7 +54,7 @@ Several directories carry their own `AGENTS.md` with rules specific to that dire
 | -------------------------------------------- | -------------------------------------------------------- |
 | [`docs/AGENTS.md`](docs/AGENTS.md)           | Markdown formatting, generated pages                     |
 | [`.github/AGENTS.md`](.github/AGENTS.md)     | Scorecard-safe workflow changes, PR description format   |
-| [`magefiles/AGENTS.md`](magefiles/AGENTS.md) | Target layout, the vendored offline build, pin ownership |
+| [`magefiles/AGENTS.md`](magefiles/AGENTS.md) | Target layout, the vendored offline build, pin ownership, the e2e walkthrough |
 
 `CLAUDE.md` in the repository root is a symlink to this file, so a Claude Code session started there loads these rules without being asked. That covers the root and nothing else: the directory-specific files in the table above are not symlinked, so a session whose working directory is one of them starts with none of their rules in context. The root is where a session normally starts, so this is usually moot - but do not treat "nothing was loaded for me" as "there are no rules here", and do not grep a rules file for the one thing you thought to ask about. Open the closest `AGENTS.md` and read it before writing anything in that directory.
 

@@ -22,6 +22,7 @@
 - [adding-ci](dev/adding-ci.md)
 - [architecture](dev/architecture.md)
 - [e2e-testing](dev/e2e-testing.md)
+- [e2e-walkthrough](dev/e2e-walkthrough.md)
 - [new-repo-checklist](dev/new-repo-checklist.md)
 
 -----------
