@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-85375336.js";
+            window.path_to_searchindex_js = "../searchindex-1fc5a538.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-9ab3151e.js"></script>
@@ -185,7 +185,7 @@
                         <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
 <p>What you end up with: this provider running in a Cluster API management cluster, and one Zarf package deployed to a workload cluster because you declared that it should be.</p>
 <!-- x-release-please-start-version -->
-<p>Every command here was run against <code>v0.1.1</code>.</p>
+<p>Every command here was run against <code>v0.1.2</code>.</p>
 <!-- x-release-please-end-version -->
 <p>Nothing in this guide reaches the public internet from the workload cluster. The packages come from a registry you stage them in, which is the point of the thing.</p>
 <h2 id="what-you-need-first"><a class="header" href="#what-you-need-first">What you need first</a></h2>
@@ -199,18 +199,18 @@
 <!-- x-release-please-start-version -->
 <pre><code class="language-yaml">providers:
   - name: zarf
-    url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.1.1/addon-components.yaml
+    url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.1.2/addon-components.yaml
     type: AddonProvider
 </code></pre>
 <!-- x-release-please-end-version -->
 <p>Then install it:</p>
 <!-- x-release-please-start-version -->
-<pre><code class="language-sh">clusterctl init --addon zarf:v0.1.1
+<pre><code class="language-sh">clusterctl init --addon zarf:v0.1.2
 </code></pre>
 <!-- x-release-please-end-version -->
 <p><code>clusterctl</code> fetches <code>addon-components.yaml</code> and <code>metadata.yaml</code> from that release, so pinning the version in the URL and on the command line is what keeps an install reproducible. To check what it would apply without applying it:</p>
 <!-- x-release-please-start-version -->
-<pre><code class="language-sh">clusterctl generate provider --addon zarf:v0.1.1
+<pre><code class="language-sh">clusterctl generate provider --addon zarf:v0.1.2
 </code></pre>
 <!-- x-release-please-end-version -->
 <p>Confirm the controller is up:</p>
