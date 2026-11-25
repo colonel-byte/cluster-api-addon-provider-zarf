@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	github.com/magefile/mage v1.17.2
 	github.com/opencontainers/image-spec v1.1.1
+	github.com/sigstore/cosign/v3 v3.1.3
 	github.com/stretchr/testify v1.12.1
 	github.com/zarf-dev/zarf v1.0.1
 	k8s.io/api v0.37.2
@@ -425,7 +426,6 @@ require (
 	github.com/sergi/go-diff v1.4.5 // indirect
 	github.com/shibumi/go-pathspec v1.3.0 // indirect
 	github.com/shopspring/decimal v1.6.0 // indirect
-	github.com/sigstore/cosign/v3 v3.1.3 // indirect
 	github.com/sigstore/protobuf-specs v0.5.3-0.20261112181914-a84bc5ff572a // indirect
 	github.com/sigstore/rekor v1.6.5 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.4.6 // indirect
