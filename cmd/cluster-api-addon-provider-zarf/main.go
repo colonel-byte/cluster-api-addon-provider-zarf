@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -69,7 +71,7 @@ func main() {
 	// behind this path in each deploy pod has to be sized for the largest package plus its
 	// extraction. The controller itself holds no cache. See "Quirks worth knowing" in AGENTS.md.
 	flag.StringVar(&cachePath, "cache-path", "/var/lib/caapz/cache", "mount path of the zarf-cache volume inside deploy pods; back it with a volume sized for the largest package")
-	flag.StringVar(&deployImage, "deploy-image", "", "image deploy Jobs run; normally this controller's own image")
+	flag.StringVar(&deployImage, "deploy-image", "", "image deploy Jobs run; defaults to this controller's own image, read from its pod")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "run only one active replica")
 	var registryPlainHTTP bool
 	flag.BoolVar(&registryPlainHTTP, "registry-plain-http", false,
@@ -109,6 +111,25 @@ func main() {
 	if err != nil {
 		ctrl.Log.Error(err, "unable to build the manager")
 		os.Exit(1)
+	}
+
+	// Every Job this controller stamps needs an image, and the API server refuses one without
+	// it - so resolve it now and refuse to start otherwise, rather than failing per-Job later
+	// where it surfaces as a reconcile error against a release nobody is watching yet.
+	if deployImage == "" {
+		// The manager's own API reader is not started yet, so this uses a direct client.
+		reader, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
+		if err != nil {
+			ctrl.Log.Error(err, "unable to build a client to read this controller's own pod")
+			os.Exit(1)
+		}
+		deployImage, err = selfImage(context.Background(), reader,
+			os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME"))
+		if err != nil {
+			ctrl.Log.Error(err, "unable to determine the image deploy Jobs should run")
+			os.Exit(1)
+		}
+		ctrl.Log.Info("deploy Jobs will run this controller's own image", "image", deployImage)
 	}
 
 	reconciler := &controller.ZarfPackageProxyReconciler{
