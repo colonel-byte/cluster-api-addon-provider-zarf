@@ -105,13 +105,17 @@ func Options(spec deployspec.Spec, cachePath string) (packager.LoadOptions, pack
 		Architecture:  "amd64",
 		RemoteOptions: types.RemoteOptions{PlainHTTP: spec.PlainHTTP},
 	}
-	if len(spec.Components) > 0 {
-		selectors := make([]string, 0, len(spec.Components))
-		for _, component := range spec.Components {
-			selectors = append(selectors, component.Name)
-		}
-		loadOpts.Filter = filters.ByComponentSelectors(selectors)
+	// Always the deployment filter, even with nothing selected: it is what "empty means the
+	// package's defaults" (the spec.components doc) actually requires. With no filter at all a
+	// package deploys every component it carries, optional ones included - on the Zarf init
+	// package that means its k3s component, which installs k3s on the node nobody asked to
+	// have reprovisioned. ForDeploy is the CLI's own non-interactive selection: required
+	// components, plus any named here, honoring v1alpha1 defaults and choice groups.
+	selectors := make([]string, 0, len(spec.Components))
+	for _, component := range spec.Components {
+		selectors = append(selectors, component.Name)
 	}
+	loadOpts.Filter = filters.ForDeploy(strings.Join(selectors, ","))
 
 	deployOpts := packager.DeployOptions{
 		// Air-gap is this provider's whole premise; YOLO packages flip themselves to
