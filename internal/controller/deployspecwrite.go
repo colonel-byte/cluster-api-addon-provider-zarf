@@ -155,6 +155,12 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 		if err != nil {
 			return nil, err
 		}
+		for _, component := range initOpts.Components {
+			initSpec.Components = append(initSpec.Components, deployspec.Component{
+				Name:   component.Name,
+				Flavor: component.Flavor,
+			})
+		}
 		initRaw, err := initSpec.Marshal()
 		if err != nil {
 			return nil, err

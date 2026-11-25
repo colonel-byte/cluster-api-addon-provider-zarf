@@ -232,6 +232,13 @@ type InitOptions struct {
 	// +optional
 	Package *ZarfPackageSource `json:"package,omitempty"`
 
+	// components filters which of the init package's components deploy, with spec.components'
+	// semantics: empty means the package's defaults. Init packages commonly mark every
+	// component optional so an operator can bring a cluster up in stages, and a package built
+	// that way deploys nothing at all unless its components are named here.
+	// +optional
+	Components []ComponentSelector `json:"components,omitempty"`
+
 	// values is the init deploy's structured values tree, with spec.values' semantics and
 	// templating. The registry storage class lives here on v1beta1 init packages
 	// (registry.persistence.storageClass).

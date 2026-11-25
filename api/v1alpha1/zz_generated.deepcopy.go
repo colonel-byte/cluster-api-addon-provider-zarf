@@ -101,6 +101,11 @@ func (in *InitOptions) DeepCopyInto(out *InitOptions) {
 		*out = new(ZarfPackageSource)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Components != nil {
+		in, out := &in.Components, &out.Components
+		*out = make([]ComponentSelector, len(*in))
+		copy(*out, *in)
+	}
 	if in.Values != nil {
 		in, out := &in.Values, &out.Values
 		*out = new(v1.JSON)
