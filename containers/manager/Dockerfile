@@ -25,7 +25,7 @@
 # secret, so the image has nothing in it that could read process memory or open a socket. The
 # deploy subcommand runs in deploy pods from this same image - the pod's inputs are mounted
 # files, so it needs no shell either.
-FROM cgr.dev/chainguard/static:latest@sha256:54b5f14edad6f2554774d499539e837588a501bd5bf22ac6cd97b1068c35d44d
+FROM cgr.dev/chainguard/static:latest@sha256:599c3cd7597b84aa149c4282beecc8c6d4e1cb5c95dc8d982e70cd0a2a9147a2
 
 ARG TARGETPLATFORM
 
