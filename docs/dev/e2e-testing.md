@@ -20,6 +20,18 @@ go run ./magefiles/core e2e:down   # removes everything, including the CAPD mach
 
 **The forbidden invocation**: a bare `go test` inside `test/e2e/`. The suite talks to a live topology through `E2E_KUBECONFIG`, which only `e2e:run` sets - without it every test skips, and a fully-skipped suite reads as green while asserting nothing. `test/e2e` is its own Go module precisely so the root `go test ./...` can never reach it; it is also deliberately unvendored, see the exception note in [`magefiles/AGENTS.md`](../../magefiles/AGENTS.md).
 
+## A test may only destroy what it created
+
+One assertion in the suite has to delete a workload cluster - §8C, that destroying a cluster is never blocked by a package deployed to it - and the shared topology is sitting right next to it. The mistakes available here are all the same shape: a test aimed at one object reaches another, nothing complains, and the damage is done before any assertion reports it. This one has already happened once, by building the throwaway cluster from a deep copy of the standing cluster's whole `Spec`: a `Cluster` spec carries `controlPlaneRef` and `infrastructureRef`, the topology controller fills them in with the objects it created, and deleting a `Cluster` deletes whatever those refs name - so the copy pointed the throwaway cluster at the standing cluster's control plane, and its cleanup would have destroyed it.
+
+So the rule, enforced rather than remembered:
+
+- **Infrastructure the suite creates carries `e2e.addons.colonel-byte.dev/owned-by: caapz-e2e-suite`,** and `requireSuiteOwned` refuses to delete anything without it. The standing topology belongs to `e2e:up` and carries no such label, which makes it undeletable from a test.
+- **Build a throwaway cluster from the standing one's `topology` and `clusterNetwork` only**, never its whole spec. Carrying the topology over is what avoids hand-maintaining a CAPD topology and the ClusterClass variables it requires; carrying the refs over is what breaks it.
+- **A delete of a `Cluster` checks its refs first**, and bails if either names something outside that cluster.
+
+The same reasoning applies to anything else expensive the suite might reach for - the registry container, the management cluster, the initialized Zarf state on the standing cluster. If a test needs to destroy one, it creates its own first.
+
 ## Host prerequisites
 
 `docker`, `kind`, and `kubectl` on `PATH`, network access (kind node images, the clusterctl binary, provider manifests), and one pair of kernel settings that is easy to miss:
