@@ -100,6 +100,10 @@ const (
 	registryImage = "ghcr.io/distribution/distribution:3@sha256:d106962e6fe3fa69c178cec77eeeee5edb626b8df6535b7bd6b95e658a0a5ca9"
 	spikeImage    = "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
 
+	// providerWaitTimeout is how long each provider namespace gets to report Available. See
+	// waitProviders for why it is this long rather than the five minutes it was.
+	providerWaitTimeout = "15m"
+
 	// controllerImage is the locally built controller image e2e:run kind-loads - never pushed
 	// anywhere, so the tag needs no pin owner. Not :latest, so the kubelet's IfNotPresent
 	// default finds the loaded image instead of pulling.
@@ -442,6 +446,14 @@ func clusterctlInit() error {
 // waitProviders blocks until every provider deployment is Available - applying a workload
 // cluster before the webhooks serve fails with connection-refused, which a fresh `clusterctl
 // init` otherwise races.
+//
+// The timeout is sized for a cold start, not a warm one. A kind cluster's image cache goes with
+// the cluster, so a topology built from nothing pulls every CAPI provider image fresh from
+// registry.k8s.io - four of them, and the pods sit in ContainerCreating until the last one
+// lands. Measured at seven to eight minutes on a residential connection, against the five this
+// used to allow, and the failure reads as "timed out waiting for the condition" with pods that
+// are simply still pulling. Warm runs are unaffected: the wait returns as soon as the
+// deployments are Available.
 func waitProviders() error {
 	for _, ns := range []string{
 		"capi-system",
@@ -450,7 +462,7 @@ func waitProviders() error {
 		"capd-system",
 	} {
 		if err := kubectl("wait", "--for=condition=Available", "deployment", "--all",
-			"-n", ns, "--timeout=5m"); err != nil {
+			"-n", ns, "--timeout="+providerWaitTimeout); err != nil {
 			return err
 		}
 	}
