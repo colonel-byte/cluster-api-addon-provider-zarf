@@ -151,7 +151,7 @@ require (
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/buger/jsonparser v1.6.1 // indirect
 	github.com/buildkite/agent/v3 v3.130.0 // indirect
-	github.com/buildkite/go-pipeline v0.19.0 // indirect
+	github.com/buildkite/go-pipeline v0.19.1 // indirect
 	github.com/buildkite/interpolate v0.1.5 // indirect
 	github.com/buildkite/roko v1.4.0 // indirect
 	github.com/cayleygraph/quad v1.3.0 // indirect
