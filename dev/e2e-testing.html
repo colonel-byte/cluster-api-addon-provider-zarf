@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-82bd0f1d.js";
+            window.path_to_searchindex_js = "../searchindex-0d1eddda.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-db8ebe34.js"></script>
@@ -194,6 +194,15 @@ go run ./magefiles/core e2e:down   # removes everything, including the CAPD mach
 </code></pre>
 <p><code>e2e:up</code> is idempotent and resumable - a failed run is re-runnable and picks up where it stopped. The suite does not tear the topology down; iterate on tests against a long-lived topology and run <code>e2e:down</code> when finished.</p>
 <p><strong>The forbidden invocation</strong>: a bare <code>go test</code> inside <code>test/e2e/</code>. The suite talks to a live topology through <code>E2E_KUBECONFIG</code>, which only <code>e2e:run</code> sets - without it every test skips, and a fully-skipped suite reads as green while asserting nothing. <code>test/e2e</code> is its own Go module precisely so the root <code>go test ./...</code> can never reach it; it is also deliberately unvendored, see the exception note in <a href="../../magefiles/AGENTS.html"><code>magefiles/AGENTS.md</code></a>.</p>
+<h2 id="a-test-may-only-destroy-what-it-created"><a class="header" href="#a-test-may-only-destroy-what-it-created">A test may only destroy what it created</a></h2>
+<p>One assertion in the suite has to delete a workload cluster - §8C, that destroying a cluster is never blocked by a package deployed to it - and the shared topology is sitting right next to it. The mistakes available here are all the same shape: a test aimed at one object reaches another, nothing complains, and the damage is done before any assertion reports it. This one has already happened once, by building the throwaway cluster from a deep copy of the standing cluster’s whole <code>Spec</code>: a <code>Cluster</code> spec carries <code>controlPlaneRef</code> and <code>infrastructureRef</code>, the topology controller fills them in with the objects it created, and deleting a <code>Cluster</code> deletes whatever those refs name - so the copy pointed the throwaway cluster at the standing cluster’s control plane, and its cleanup would have destroyed it.</p>
+<p>So the rule, enforced rather than remembered:</p>
+<ul>
+<li><strong>Infrastructure the suite creates carries <code>e2e.addons.colonel-byte.dev/owned-by: caapz-e2e-suite</code>,</strong> and <code>requireSuiteOwned</code> refuses to delete anything without it. The standing topology belongs to <code>e2e:up</code> and carries no such label, which makes it undeletable from a test.</li>
+<li><strong>Build a throwaway cluster from the standing one’s <code>topology</code> and <code>clusterNetwork</code> only</strong>, never its whole spec. Carrying the topology over is what avoids hand-maintaining a CAPD topology and the ClusterClass variables it requires; carrying the refs over is what breaks it.</li>
+<li><strong>A delete of a <code>Cluster</code> checks its refs first</strong>, and bails if either names something outside that cluster.</li>
+</ul>
+<p>The same reasoning applies to anything else expensive the suite might reach for - the registry container, the management cluster, the initialized Zarf state on the standing cluster. If a test needs to destroy one, it creates its own first.</p>
 <h2 id="host-prerequisites"><a class="header" href="#host-prerequisites">Host prerequisites</a></h2>
 <p><code>docker</code>, <code>kind</code>, and <code>kubectl</code> on <code>PATH</code>, network access (kind node images, the clusterctl binary, provider manifests), and one pair of kernel settings that is easy to miss:</p>
 <h3 id="raise-the-inotify-limits-before-the-first-e2eup"><a class="header" href="#raise-the-inotify-limits-before-the-first-e2eup">Raise the inotify limits before the first <code>e2e:up</code></a></h3>
