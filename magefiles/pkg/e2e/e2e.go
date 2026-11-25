@@ -62,7 +62,7 @@ const (
 	// resolves it to its own kindest/node machine image.
 	//
 	// renovate: datasource=github-releases depName=kubernetes/kubernetes extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-	workloadK8sVersion = "1.37.2"
+	workloadK8sVersion = "1.37.3"
 
 	// calicoVersion pins the CNI the workload cluster gets. CAPD ships none, so without it the
 	// node stays NotReady with "cni plugin not initialized" and nothing can be scheduled -
