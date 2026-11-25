@@ -52,3 +52,10 @@
 - [choice-capi-client](agent/choice-capi-client.md)
 - [choice-deploy-job](agent/choice-deploy-job.md)
 - [choice-zarf-package](agent/choice-zarf-package.md)
+
+-----------
+
+# Misc
+
+<!-- Excluded from the print page (print.html) by docs/css/print.css. -->
+

@@ -4,6 +4,7 @@
     ".": {
       "release-type": "go",
       "package-name": "cluster-api-addon-provider-zarf",
+      "changelog-path": "docs/misc/CHANGELOG.md",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "include-v-in-tag": true,
