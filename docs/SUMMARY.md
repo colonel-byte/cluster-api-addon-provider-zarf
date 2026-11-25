@@ -58,3 +58,5 @@
 # Misc
 
 <!-- Excluded from the print page (print.html) by docs/css/print.css. -->
+
+- [CHANGELOG](misc/CHANGELOG.md)
