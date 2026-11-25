@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7c47e335.js";
+            window.path_to_searchindex_js = "searchindex-1e58e129.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-db8ebe34.js"></script>
@@ -878,19 +878,32 @@ for l in renovate/oci renovate/action renovate/gomod renovate/npm renovate/pre-c
 done
 
 # Secrets. The app credentials are shared with release-please; the cosign pair signs the
-# release archives. Omit any that are already org-level secrets visible to this repository.
+# release archives. Omit any that are already org-level secrets visible to this repository -
+# but see the note below before omitting the cosign pair.
 gh secret set RELEASE_PLEASE_GITHUB_APP_ID --repo "$REPO"
 gh secret set RELEASE_PLEASE_GITHUB_APP_SECRET --repo "$REPO" &lt; path/to/app-private-key.pem
 gh secret set COSIGN_KEY --repo "$REPO" &lt; path/to/cosign.key
 gh secret set COSIGN_PASS --repo "$REPO"
 </code></pre>
 <p><code>COSIGN_KEY</code> and <code>COSIGN_PASS</code> are the <strong>secret</strong> names; <code>release.yaml</code> maps them onto <code>COSIGN_PRIVATE_KEY</code> and <code>COSIGN_PASSWORD</code>, which are cosign’s own variable names and are not renameable. Renaming one side only produces an error at the signing step rather than a missing-secret error.</p>
+<h3 id="the-cosign-pair-is-the-one-secret-that-cannot-just-be-inherited"><a class="header" href="#the-cosign-pair-is-the-one-secret-that-cannot-just-be-inherited">The cosign pair is the one secret that cannot just be inherited</a></h3>
+<p><code>cosign.pub</code> at the repository root is the public half of whatever <code>COSIGN_KEY</code> signs with, and it is the inverse of everything above: a <em>file</em>, so generation copies it, which is exactly the problem. Omitting the secret because an org-level <code>COSIGN_KEY</code> is visible leaves the template’s <code>cosign.pub</code> in place beside a different key, and the two no longer belong to the same pair.</p>
+<p>Nothing reports that. <code>goreleaser</code> and <code>publish-oci-artifact.yaml</code> sign without verifying, so they go green while publishing artifacts that cannot be verified with the <code>cosign.pub</code> the docs point a consumer at. The only step that verifies is <code>publish-zarf-package.yaml</code>’s publish, which fetches <code>cosign.pub</code> from the release tag and fails with <code>invalid signature when validating ASN.1 encoded signature</code> - a signing-key error reported at the last step of the release, several minutes after the key that caused it was used.</p>
+<p>So pick one, and do it before the first release:</p>
+<ul>
+<li><strong>Inherit the org pair</strong> - replace <code>cosign.pub</code> with the public half of the org key. Do not keep the file that arrived with the template.</li>
+<li><strong>Override it per repository</strong> - <code>gh secret set COSIGN_KEY --repo "$REPO"</code> shadows the org secret, and <code>cosign.pub</code> stays as it is. This needs the private half of the committed key to actually exist somewhere.</li>
+</ul>
+<p>Either way the pair can only be checked against something already signed, so the check is the first thing to run after the first release rather than part of the setup above - the controller image goreleaser pushed is the earliest artifact there is:</p>
+<pre><code class="language-sh">cosign verify --key cosign.pub ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.1.0
+</code></pre>
 <h2 id="verifying-it-rather-than-assuming-it"><a class="header" href="#verifying-it-rather-than-assuming-it">Verifying it rather than assuming it</a></h2>
 <p>Each of these answers one row of the table, and each has a failure mode that is silent otherwise:</p>
-<pre><code class="language-sh">gh label list --repo "$REPO"                    # every label the forms and renovate name
-gh secret list --repo "$REPO"                   # repo-level only; org secrets do not appear here
-gh api "repos/$REPO/rules/branches/main"        # [] means nothing is enforced on main
-gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
+<pre><code class="language-sh">gh label list --repo "$REPO"                                               # every label the forms and renovate name
+gh secret list --repo "$REPO"                                              # repo-level only; org secrets do not appear here
+gh api "repos/$REPO/actions/organization-secrets" --jq '.secrets[].name'   # the org ones that will be used
+gh api "repos/$REPO/rules/branches/main"                                   # [] means nothing is enforced on main
+gh api "repos/$REPO/pages" --jq .html_url                                  # 404 until Pages is enabled
 </code></pre>
 <p>Then open <code>https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/new/choose</code> on a branch after changing an issue form. A malformed form is reported as a banner on that page and nowhere else - parsing as YAML is not enough to know it renders.</p>
 <h2 id="first-run-in-order"><a class="header" href="#first-run-in-order">First run, in order</a></h2>
