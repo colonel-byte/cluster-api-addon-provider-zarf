@@ -284,6 +284,31 @@
     "gomodTidy",
   ],
 
+  // Renovate re-runs `go mod vendor` for every gomod update, and that deletes the two generated
+  // osv-scanner.toml files under vendor/ - so without this every dependency bump would arrive
+  // with check-go-mod red and need a hand-written commit to put them back. See
+  // docs/agent/choice-osv-vendor-overrides.md.
+  //
+  // This is the self-hosted-only half of the config, and it is inert without its other half:
+  // `allowedCommands` is a global option Renovate refuses to read from a repository config, so
+  // it is set as RENOVATE_ALLOWED_COMMANDS in .github/workflows/renovate.yaml. A command that
+  // does not match it is skipped with a warning in the log and nothing else - the failure mode
+  // is a red pull request, not an error here.
+  //
+  // `executionMode: "branch"` runs it once after all of a branch's updates rather than once per
+  // upgrade; the files do not vary by module, so per-upgrade runs would be identical work.
+  // `fileFilters` is what lets Renovate commit the result: files a post-upgrade task writes are
+  // discarded unless they match, and these are exactly the paths the target writes.
+  postUpgradeTasks: {
+    commands: [
+      "go run ./magefiles/core dev:writeOSVOverrides",
+    ],
+    fileFilters: [
+      "**/osv-scanner.toml",
+    ],
+    executionMode: "branch",
+  },
+
   customManagers: [
     {
       customType: "regex",

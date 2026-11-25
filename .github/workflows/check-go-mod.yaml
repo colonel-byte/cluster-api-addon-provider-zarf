@@ -23,14 +23,24 @@ jobs:
       # A dependency added without re-running `mage dev:vendor` leaves go.mod, go.sum and
       # vendor/ disagreeing, and the build that notices is a release built with no network.
       # Failing here instead is the whole point of the job.
+      #
+      # The regenerate step in the middle is not optional: vendor/ carries two generated
+      # osv-scanner.toml files that `go mod vendor` deletes, so without it this job diffs them
+      # away on every run. It is the same target `dev:vendor` ends with, so a tree that was
+      # vendored properly comes out byte-identical and the diff still reports only real drift.
       - name: Test go mod
         run: |
           go mod tidy
           go mod vendor
+          go run ./magefiles/core dev:writeOSVOverrides
           git diff --exit-code go.mod go.sum vendor/
 
       # go run ./magefiles/core rather than mage: same targets, but it builds from vendor/ and
       # needs no mage binary on the runner.
+      #
+      # This also fails on a dependency bump that brings in a module shipping a lockfile nothing
+      # covers yet - the half of dev:verifyVendor no workflow can fix for you, because it needs
+      # an entry added to Overrides in magefiles/pkg/osv/osv.go by a person.
       - name: Verify the offline build
         run: go run ./magefiles/core dev:verifyVendor
 

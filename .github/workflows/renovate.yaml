@@ -112,3 +112,9 @@ jobs:
           # /tmp/renovate, and the cache lives under it.
           RENOVATE_BASE_DIR: /tmp/renovate
           LOG_LEVEL: ${{ inputs.logLevel || 'info' }}
+          # The other half of `postUpgradeTasks` in .github/renovate.json5, which re-writes the
+          # generated osv-scanner.toml files that Renovate's own `go mod vendor` deletes.
+          # `allowedCommands` is global-only config - Renovate will not read it from a
+          # repository file, by design, since a repository could otherwise run anything on this
+          # runner. An anchored regex per command, so widening it is a deliberate edit here.
+          RENOVATE_ALLOWED_COMMANDS: '["^go run \\./magefiles/core dev:writeOSVOverrides$"]'
