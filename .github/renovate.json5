@@ -17,6 +17,21 @@
   // every Renovate PR title is `chore(deps): ...`, regardless of what history looks like.
   semanticCommits: "enabled",
 
+  // config:recommended ships an ignorePaths that includes `**/test/**`, which silently hides
+  // test/e2e/go.mod - the one module here that is neither vendored nor covered by the root
+  // tidy, and so the one most able to drift unnoticed. Restated without that entry, and
+  // without `**/__tests__/**` and `**/tests/**` for the same reason should either name ever
+  // appear. `**/vendor/**` stays: a vendored module's own go.mod is upstream's, not ours to
+  // bump, and rewriting one would make the next `go mod vendor` look like a change nobody
+  // made. The rest are carried over from the preset unchanged.
+  ignorePaths: [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__fixtures__/**",
+  ],
+
   ignoreUnstable: false,
   separateMajorMinor: false,
   dependencyDashboard: {
@@ -244,6 +259,16 @@
     // not a dependency update, so they are not Renovate's to move.
     {
       matchDepTypes: ["golang"],
+      enabled: false,
+    },
+    // test/e2e requires this repository's own module and replaces it with `../..`, so the
+    // version on that require line is a placeholder the replace overrides - the code built is
+    // always the working tree's. Renovate cannot see the replace as making the version moot,
+    // so it would keep proposing pseudo-version bumps that change nothing and whose only
+    // effect is to re-tidy a file CI already pins.
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["github.com/colonel-byte/cluster-api-addon-provider-zarf"],
       enabled: false,
     },
   ],
