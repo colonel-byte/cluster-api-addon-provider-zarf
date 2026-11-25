@@ -14,6 +14,7 @@ All implementation logic belongs in modular Go packages under `magefiles/pkg/`:
 | `magefiles/generate.go`   | Mage entrypoint for the `Generate` namespace (`generate:document`)        |
 | `magefiles/core/core.go`  | Bootstrapping main package for `go run ./magefiles/core`                  |
 | `magefiles/pkg/gen/docs/` | The book's generators - the copied-in pages, and the table of contents    |
+| `magefiles/pkg/osv/`      | The `osv-scanner.toml` overrides written beside vendored non-Go manifests |
 | `magefiles/pkg/util/`     | Shared helpers - currently the aligned-table check                        |
 
 ## Target structure rules
@@ -34,9 +35,13 @@ Use that form in CI, in hooks, and in documentation. It needs only the Go toolch
 So a change to the dependency graph is not finished until `vendor/` is rewritten and committed in the same change:
 
 ```sh
-go run ./magefiles/core dev:vendor        # go mod tidy, then go mod vendor
-go run ./magefiles/core dev:verifyVendor  # go mod verify, then a GOPROXY=off build
+go run ./magefiles/core dev:vendor        # go mod tidy, go mod vendor, then the osv overrides
+go run ./magefiles/core dev:verifyVendor  # go mod verify, a GOPROXY=off build, then the overrides
 ```
+
+### `go mod vendor` deletes two files that have to be there
+
+`go mod vendor` copies two Python `requirements` files into `vendor/` from modules that ship them in their own repositories, and OpenSSF Scorecard scores every advisory against those packages against this repository. A generated `osv-scanner.toml` sits beside each of them to stop that, and `go mod vendor` wipes both every time it runs - so `dev:vendor` ends with `dev:writeOSVOverrides`, and anything else that re-vendors has to call it too. `dev:verifyVendor` fails when one is missing, has drifted from the generator, or when `vendor/` grows a lockfile for an ecosystem nothing covers yet. The list and the reasoning are in [`magefiles/pkg/osv/osv.go`](pkg/osv/osv.go) and [`docs/agent/choice-osv-vendor-overrides.md`](../docs/agent/choice-osv-vendor-overrides.md).
 
 `dev:verifyVendor` is the one that proves it: it builds with `GOFLAGS=-mod=vendor GOPROXY=off`, which is the invocation a release has to survive. [`.github/workflows/check-go-mod.yaml`](../.github/workflows/check-go-mod.yaml) runs the same target, and a `verify-vendor` pre-commit hook runs it whenever `go.mod`, `go.sum`, or `vendor/` changes.
 
