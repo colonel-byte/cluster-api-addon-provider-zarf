@@ -33,3 +33,19 @@ jobs:
       # needs no mage binary on the runner.
       - name: Verify the offline build
         run: go run ./magefiles/core dev:verifyVendor
+
+      # test/e2e is a separate module and deliberately unvendored (the exception is recorded in
+      # magefiles/AGENTS.md), so the root tidy above cannot reach it - a nested module is
+      # invisible to the parent's `./...` by construction. It still drifts, and for a reason
+      # that has nothing to do with anyone editing it: it requires this repository's own module
+      # through a `replace ../..`, so every dependency the root module moves changes what that
+      # module's own graph resolves to. The drift is silent until `go vet` inside test/e2e
+      # refuses to run, which is how it was found.
+      #
+      # Tidy only, never vendor: vendoring it would bloat every clone to protect an
+      # offline-build invariant that does not apply to a dev/CI-only surface.
+      - name: Test go mod (test/e2e)
+        working-directory: test/e2e
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
