@@ -64,6 +64,15 @@ const (
 	// renovate: datasource=github-releases depName=kubernetes/kubernetes extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 	workloadK8sVersion = "1.37.2"
 
+	// calicoVersion pins the CNI the workload cluster gets. CAPD ships none, so without it the
+	// node stays NotReady with "cni plugin not initialized" and nothing can be scheduled -
+	// which is invisible until something tries. Calico because the Cluster API quick start
+	// pairs it with CAPD: its default pod CIDR is the 192.168.0.0/16 the development flavor
+	// hands out, so the manifest applies with nothing to reconfigure.
+	//
+	// renovate: datasource=github-releases depName=projectcalico/calico extractVersion=^v(?<version>\d+\.\d+\.\d+)$
+	calicoVersion = "3.33.1"
+
 	// Image digests below are owned by a written procedure rather than Renovate - the Go
 	// custom manager tracks versions, not digests. To bump one:
 	//   docker buildx imagetools inspect <image:tag> | grep Digest
@@ -81,6 +90,12 @@ const (
 // mgmtKubeconfig is where Up writes the management cluster's kubeconfig; e2e:run hands it to the
 // test module as E2E_KUBECONFIG.
 func mgmtKubeconfig() string { return filepath.Join(workDir, "mgmt.kubeconfig") }
+
+// workloadKubeconfig is where Up writes the workload cluster's kubeconfig, as `clusterctl get
+// kubeconfig` rewrites it for host access - the localhost/port-map variant, not the pod-reachable
+// one in the Cluster's secret. e2e:run hands it to the test module as E2E_WORKLOAD_KUBECONFIG so
+// assertions can read what a deploy actually left on the target cluster.
+func workloadKubeconfig() string { return filepath.Join(workDir, "workload.kubeconfig") }
 
 // kindConfig renders the management cluster's kind config: the pinned node image, the docker
 // socket mount CAPD requires to create sibling containers, and a containerd config_path so
@@ -124,6 +139,7 @@ func Up() error {
 		{"provider deployments available", waitProviders},
 		{"workload cluster", ensureWorkloadCluster},
 		{"registry wiring on workload nodes", configureWorkloadRegistry},
+		{"CNI on the workload cluster", installWorkloadCNI},
 		{"spike image in registry", seedSpikeImage},
 	}
 	for _, step := range steps {
@@ -171,6 +187,13 @@ func Run() error {
 	if _, err := os.Stat(kubeconfig); err != nil {
 		return fmt.Errorf("no management kubeconfig at %s - run e2e:up first", kubeconfig)
 	}
+	workload, err := filepath.Abs(workloadKubeconfig())
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(workload); err != nil {
+		return fmt.Errorf("no workload kubeconfig at %s - run e2e:up first", workload)
+	}
 	steps := []struct {
 		name string
 		run  func() error
@@ -185,8 +208,10 @@ func Run() error {
 			return fmt.Errorf("%s: %w", step.name, err)
 		}
 	}
-	return sh.RunWithV(map[string]string{"E2E_KUBECONFIG": kubeconfig},
-		"go", "-C", "test/e2e", "test", "-count=1", "-timeout=15m", "./...")
+	return sh.RunWithV(map[string]string{
+		"E2E_KUBECONFIG":          kubeconfig,
+		"E2E_WORKLOAD_KUBECONFIG": workload,
+	}, "go", "-C", "test/e2e", "test", "-count=1", "-timeout=30m", "./...")
 }
 
 // buildControllerImage builds the e2e controller image into the e2e workdir with the release
@@ -456,6 +481,30 @@ func ensureWorkloadCluster() error {
 	}
 }
 
+// installWorkloadCNI writes the workload cluster's host-reachable kubeconfig and applies Calico
+// into it, then waits for the node to go Ready. CAPD creates clusters with no CNI at all, so
+// until this runs the node reports "cni plugin not initialized", coredns sits Pending, and
+// nothing - least of all a zarf init - can be scheduled.
+func installWorkloadCNI() error {
+	kubeconfig, err := sh.Output(clusterctlPath(), "get", "kubeconfig", workloadCluster,
+		"--kubeconfig", mgmtKubeconfig())
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(workloadKubeconfig(), []byte(kubeconfig), 0o600); err != nil {
+		return err
+	}
+	// Idempotent by Calico's own account: a re-apply of the same manifest is a no-op, so the
+	// step needs no "already installed" probe of its own.
+	manifest := fmt.Sprintf(
+		"https://raw.githubusercontent.com/projectcalico/calico/v%s/manifests/calico.yaml", calicoVersion)
+	if err := workloadKubectl("apply", "-f", manifest); err != nil {
+		return err
+	}
+	// Ready is the assertion that matters - the apply succeeding only means the objects exist.
+	return workloadKubectl("wait", "node", "--all", "--for=condition=Ready", "--timeout=10m")
+}
+
 // seedSpikeImage stages the spike-pod image into the local registry, the same
 // staged-ahead-of-time motion an air-gapped environment uses for real packages.
 func seedSpikeImage() error {
@@ -471,4 +520,8 @@ func seedSpikeImage() error {
 
 func kubectl(args ...string) error {
 	return sh.RunV("kubectl", append([]string{"--kubeconfig", mgmtKubeconfig()}, args...)...)
+}
+
+func workloadKubectl(args ...string) error {
+	return sh.RunV("kubectl", append([]string{"--kubeconfig", workloadKubeconfig()}, args...)...)
 }
