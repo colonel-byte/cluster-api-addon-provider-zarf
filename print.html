@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6a26a59d.js";
+            window.path_to_searchindex_js = "searchindex-25eb782a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-cabb710a.js"></script>
@@ -812,7 +812,11 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="e2e-testing-the-kind--capd-topology"><a class="header" href="#e2e-testing-the-kind--capd-topology">E2E testing: the kind + CAPD topology</a></h1>
-<p>The end-to-end suite runs the things <a href="../magefiles/test.go"><code>test:envtest</code></a> structurally cannot: real CAPI lifecycle machinery (a control-plane provider flipping <code>ControlPlaneInitialized</code>, the <code>&lt;cluster-name&gt;-kubeconfig</code> secrets CAPI writes, garbage-collection cascades), pods actually scheduling, and an OCI registry reachable from every side of the topology. It stands up a kind management cluster with CAPI core + CAPD initialized into it, one CAPD workload cluster, and a <code>ghcr.io/distribution/distribution:3</code> registry on the kind docker network, then runs the suite in the separate <code>test/e2e</code> module against all of it.</p>
+<p>The end-to-end suite runs the things <a href="../magefiles/test.go"><code>test:envtest</code></a> structurally cannot: real CAPI lifecycle machinery (a control-plane provider flipping <code>ControlPlaneInitialized</code>, the <code>&lt;cluster-name&gt;-kubeconfig</code> secrets CAPI writes, garbage-collection cascades), pods actually scheduling, and an OCI registry reachable from every side of the topology. It stands up a kind management cluster with CAPI core + CAPD initialized into it, one CAPD workload cluster with a CNI, and a <code>ghcr.io/distribution/distribution:3</code> registry on the kind docker network, then runs the suite in the separate <code>test/e2e</code> module against all of it.</p>
+<h3 id="the-workload-cluster-needs-a-cni-and-capd-ships-none"><a class="header" href="#the-workload-cluster-needs-a-cni-and-capd-ships-none">The workload cluster needs a CNI, and CAPD ships none</a></h3>
+<p>Worth knowing because it is invisible until something tries to run: a cluster CAPD creates has no CNI at all. Its node stays <code>NotReady</code> reporting <code>cni plugin not initialized</code>, coredns sits <code>Pending</code> forever, and nothing can be scheduled - while <code>ControlPlaneInitialized</code> is true, the kubeconfig secret exists, and the API server answers perfectly well. Phase 0’s spike assertions needed none of that, so the gap only surfaced when a deploy had somewhere to land.</p>
+<p><code>e2e:up</code> therefore applies Calico and waits for the node to go <code>Ready</code>. Calico because the Cluster API quick start pairs it with CAPD: its default pod CIDR is the <code>192.168.0.0/16</code> the development flavor hands out, so the manifest applies with nothing to reconfigure. The same step writes the workload cluster’s host-reachable kubeconfig to <code>dist/e2e/workload.kubeconfig</code> - the localhost/port-map variant <code>clusterctl get kubeconfig</code> rewrites, not the pod-reachable one in the secret - and <code>e2e:run</code> passes it to the suite as <code>E2E_WORKLOAD_KUBECONFIG</code> so assertions can read what a deploy actually left on the target cluster.</p>
+<p>A second thing that cluster does not have is a <code>StorageClass</code>, so anything wanting a PVC there has to say otherwise - for the Zarf init package, <code>init.set</code>’s <code>REGISTRY_PVC_ENABLED: "false"</code>.</p>
 <pre><code class="language-sh">go run ./magefiles/core e2e:up     # kind + clusterctl init + CAPD workload cluster + registry
 go run ./magefiles/core e2e:run    # the suite, against the running topology
 go run ./magefiles/core e2e:down   # removes everything, including the CAPD machine containers
