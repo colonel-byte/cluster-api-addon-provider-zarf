@@ -44,3 +44,19 @@ func (E2e) Down() error {
 func (E2e) Run() error {
 	return e2e.Run()
 }
+
+// Move stands up a second management cluster, installs this provider into it, and pivots the
+// topology onto it with `clusterctl move` - the migration an operator performs when they
+// replace a management cluster. Its own target rather than part of e2e:run: it needs that
+// second cluster with its own CAPI, CAPD and CAAPZ install, which roughly doubles the
+// topology. Requires e2e:up and e2e:run to have run first, since what the pivot has to carry
+// is the cluster and the packages those built.
+func (E2e) Move() error {
+	return e2e.Move()
+}
+
+// MoveDown removes only the move target's management cluster, leaving the rest of the topology
+// as e2e:up built it.
+func (E2e) MoveDown() error {
+	return e2e.MoveDown()
+}
