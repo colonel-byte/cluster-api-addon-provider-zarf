@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-25eb782a.js";
+            window.path_to_searchindex_js = "searchindex-4e690ac8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-cabb710a.js"></script>
+        <script src="toc-db8ebe34.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -946,7 +946,7 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <p><code>security-events: write</code> to upload the results, <code>actions: read</code> for the <code>actions</code> language to read workflow files, and <code>packages: read</code> for any private module the build resolves. All three are on the job, not the file - see <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/AGENTS.md"><code>.github/AGENTS.md</code></a>, where a top-level write zeroes Scorecard’s Token-Permissions check.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="pr-title-check"><a class="header" href="#pr-title-check">PR Title Check</a></h1>
-<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/commitlint.yaml"><code>.github/workflows/commitlint.yaml</code></a> lints the <strong>pull request title</strong> against <a href="https://www.conventionalcommits.org/">conventional commits</a>. It is a standard across the organization, and it is load-bearing rather than cosmetic: pull requests are squash-merged, so the title becomes the commit message on <code>main</code>, and release-please reads those messages to decide the next version and to write <code>CHANGELOG.md</code>. A title with the wrong type produces a release with the wrong version number.</p>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/commitlint.yaml"><code>.github/workflows/commitlint.yaml</code></a> lints the <strong>pull request title</strong> against <a href="https://www.conventionalcommits.org/">conventional commits</a>. It is a standard across the organization, and it is load-bearing rather than cosmetic: pull requests are squash-merged, so the title becomes the commit message on <code>main</code>, and release-please reads those messages to decide the next version and to write <code>docs/misc/CHANGELOG.md</code>. A title with the wrong type produces a release with the wrong version number.</p>
 <p>This is why the job lints the title and not the commits. <code>wagoid/commitlint-github-action</code> lints commit messages, which are the ones squashing throws away, so it is not a drop-in replacement for this step.</p>
 <h2 id="the-two-configs"><a class="header" href="#the-two-configs">The two configs</a></h2>
 <div class="table-wrapper">
@@ -1031,7 +1031,7 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <p>The same <code>COSIGN_KEY</code> / <code>COSIGN_PASS</code> secrets as <a href="#goreleaser"><code>release.yaml</code></a>, passed through <code>secrets: inherit</code>, and <code>packages: write</code> on its job to push.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="release-please"><a class="header" href="#release-please">Release Please</a></h1>
-<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release-please.yaml"><code>.github/workflows/release-please.yaml</code></a> runs on every push to <code>main</code> and keeps one open pull request - the release PR - with the next version number, the regenerated <code>CHANGELOG.md</code>, and the bumped version in <code>.release-please-manifest.json</code>. Merging that pull request is what cuts a release: release-please then pushes the <code>vN.N.N</code> tag, which is what <a href="#goreleaser"><code>release.yaml</code></a> fires on.</p>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release-please.yaml"><code>.github/workflows/release-please.yaml</code></a> runs on every push to <code>main</code> and keeps one open pull request - the release PR - with the next version number, the regenerated <a href="#changelog"><code>docs/misc/CHANGELOG.md</code></a>, and the bumped version in <code>.release-please-manifest.json</code>. Merging that pull request is what cuts a release: release-please then pushes the <code>vN.N.N</code> tag, which is what <a href="#goreleaser"><code>release.yaml</code></a> fires on.</p>
 <p>Nothing here decides the version. Conventional commit types in the pull request titles do, by way of the <code>changelog-sections</code> in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/release-please-config.json"><code>release-please-config.json</code></a>.</p>
 <h2 id="why-the-app-token"><a class="header" href="#why-the-app-token">Why the app token</a></h2>
 <p>The tag is the whole reason. A tag pushed with the default <code>GITHUB_TOKEN</code> does not trigger another workflow, by design, so <code>release.yaml</code> would never fire and a release would be cut with no artifacts attached to it. An app installation token has no such restriction.</p>
@@ -1061,8 +1061,8 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 </table>
 </div>
 <p><code>extra-files</code> is the one to fill in. Any file outside the manifest that pins this project’s own version - an install snippet, a collection manifest, an image tag in a guide - has to be listed there <em>and</em> annotated in place, or release-please does not touch it. Both halves are required; see the “A pinned release version is release-please’s to update” section of <a href="AGENTS.html"><code>docs/AGENTS.md</code></a>.</p>
-<h2 id="changelogmd-is-not-yours-to-edit"><a class="header" href="#changelogmd-is-not-yours-to-edit"><code>CHANGELOG.md</code> is not yours to edit</a></h2>
-<p>Release-please rewrites it wholesale on every run. Editing it by hand - including to resolve a merge conflict - is lost on the next release and shows up as a diff nobody authored. Let the bot win the conflict.</p>
+<h2 id="docsmiscchangelogmd-is-not-yours-to-edit"><a class="header" href="#docsmiscchangelogmd-is-not-yours-to-edit"><code>docs/misc/CHANGELOG.md</code> is not yours to edit</a></h2>
+<p>It lives under <code>docs/</code> rather than at the repository root so that mdBook publishes it as the book’s <code>Misc</code> chapter; <code>changelog-path</code> in <code>release-please-config.json</code> is what puts it there. Release-please rewrites it wholesale on every run. Editing it by hand - including to resolve a merge conflict - is lost on the next release and shows up as a diff nobody authored. Let the bot win the conflict.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="goreleaser"><a class="header" href="#goreleaser">goreleaser</a></h1>
 <p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release.yaml"><code>.github/workflows/release.yaml</code></a> builds and publishes the release artifacts. It fires on any pushed tag, and in practice that tag comes from <a href="#release-please"><code>release-please.yaml</code></a> merging its release pull request.</p>
@@ -1291,6 +1291,8 @@ gh api "repos/$REPO/pages" --jq .html_url       # 404 until Pages is enabled
 <p><code>release:zarfPackage</code> reads the version back out of <code>zarf.yaml</code> and renders the component manifest at it, rather than taking a tag like <code>release:manifests</code> does. A tag parameter there would produce a package whose manifest names one version and whose image carries another, which fails at deploy time against the in-cluster registry rather than at build time.</p>
 <h2 id="what-it-deliberately-leaves-out"><a class="header" href="#what-it-deliberately-leaves-out">What it deliberately leaves out</a></h2>
 <p>Core Cluster API, Rancher Turtles, and every Zarf package this provider itself deploys. Each is somebody else’s artifact with its own cadence, and bundling any of them would make this package a mirror of the whole air gap rather than of this provider. The <code>rancher-turtle-artifacts</code> component is <code>optional: true</code> for the related reason recorded inline: its <code>CAPIProvider</code> fails on a cluster without the Turtles CRDs, and the default deploy has to work for the clusterctl-shaped cluster too.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="changelog"><a href="#changelog" class="header">CHANGELOG</a></h1>
 
                     </main>
 

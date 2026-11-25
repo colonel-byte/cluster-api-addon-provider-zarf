@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-25eb782a.js";
+            window.path_to_searchindex_js = "../searchindex-4e690ac8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-cabb710a.js"></script>
+        <script src="../toc-db8ebe34.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -183,7 +183,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="release-please"><a class="header" href="#release-please">Release Please</a></h1>
-<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release-please.yaml"><code>.github/workflows/release-please.yaml</code></a> runs on every push to <code>main</code> and keeps one open pull request - the release PR - with the next version number, the regenerated <code>CHANGELOG.md</code>, and the bumped version in <code>.release-please-manifest.json</code>. Merging that pull request is what cuts a release: release-please then pushes the <code>vN.N.N</code> tag, which is what <a href="release.html"><code>release.yaml</code></a> fires on.</p>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release-please.yaml"><code>.github/workflows/release-please.yaml</code></a> runs on every push to <code>main</code> and keeps one open pull request - the release PR - with the next version number, the regenerated <a href="../misc/CHANGELOG.html"><code>docs/misc/CHANGELOG.md</code></a>, and the bumped version in <code>.release-please-manifest.json</code>. Merging that pull request is what cuts a release: release-please then pushes the <code>vN.N.N</code> tag, which is what <a href="release.html"><code>release.yaml</code></a> fires on.</p>
 <p>Nothing here decides the version. Conventional commit types in the pull request titles do, by way of the <code>changelog-sections</code> in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/release-please-config.json"><code>release-please-config.json</code></a>.</p>
 <h2 id="why-the-app-token"><a class="header" href="#why-the-app-token">Why the app token</a></h2>
 <p>The tag is the whole reason. A tag pushed with the default <code>GITHUB_TOKEN</code> does not trigger another workflow, by design, so <code>release.yaml</code> would never fire and a release would be cut with no artifacts attached to it. An app installation token has no such restriction.</p>
@@ -213,8 +213,8 @@
 </table>
 </div>
 <p><code>extra-files</code> is the one to fill in. Any file outside the manifest that pins this project’s own version - an install snippet, a collection manifest, an image tag in a guide - has to be listed there <em>and</em> annotated in place, or release-please does not touch it. Both halves are required; see the “A pinned release version is release-please’s to update” section of <a href="../AGENTS.html"><code>docs/AGENTS.md</code></a>.</p>
-<h2 id="changelogmd-is-not-yours-to-edit"><a class="header" href="#changelogmd-is-not-yours-to-edit"><code>CHANGELOG.md</code> is not yours to edit</a></h2>
-<p>Release-please rewrites it wholesale on every run. Editing it by hand - including to resolve a merge conflict - is lost on the next release and shows up as a diff nobody authored. Let the bot win the conflict.</p>
+<h2 id="docsmiscchangelogmd-is-not-yours-to-edit"><a class="header" href="#docsmiscchangelogmd-is-not-yours-to-edit"><code>docs/misc/CHANGELOG.md</code> is not yours to edit</a></h2>
+<p>It lives under <code>docs/</code> rather than at the repository root so that mdBook publishes it as the book’s <code>Misc</code> chapter; <code>changelog-path</code> in <code>release-please-config.json</code> is what puts it there. Release-please rewrites it wholesale on every run. Editing it by hand - including to resolve a merge conflict - is lost on the next release and shows up as a diff nobody authored. Let the bot win the conflict.</p>
 
                     </main>
 

@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-25eb782a.js";
+            window.path_to_searchindex_js = "../searchindex-4e690ac8.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-cabb710a.js"></script>
+        <script src="../toc-db8ebe34.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -183,7 +183,7 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="pr-title-check"><a class="header" href="#pr-title-check">PR Title Check</a></h1>
-<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/commitlint.yaml"><code>.github/workflows/commitlint.yaml</code></a> lints the <strong>pull request title</strong> against <a href="https://www.conventionalcommits.org/">conventional commits</a>. It is a standard across the organization, and it is load-bearing rather than cosmetic: pull requests are squash-merged, so the title becomes the commit message on <code>main</code>, and release-please reads those messages to decide the next version and to write <code>CHANGELOG.md</code>. A title with the wrong type produces a release with the wrong version number.</p>
+<p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/commitlint.yaml"><code>.github/workflows/commitlint.yaml</code></a> lints the <strong>pull request title</strong> against <a href="https://www.conventionalcommits.org/">conventional commits</a>. It is a standard across the organization, and it is load-bearing rather than cosmetic: pull requests are squash-merged, so the title becomes the commit message on <code>main</code>, and release-please reads those messages to decide the next version and to write <code>docs/misc/CHANGELOG.md</code>. A title with the wrong type produces a release with the wrong version number.</p>
 <p>This is why the job lints the title and not the commits. <code>wagoid/commitlint-github-action</code> lints commit messages, which are the ones squashing throws away, so it is not a drop-in replacement for this step.</p>
 <h2 id="the-two-configs"><a class="header" href="#the-two-configs">The two configs</a></h2>
 <div class="table-wrapper">
