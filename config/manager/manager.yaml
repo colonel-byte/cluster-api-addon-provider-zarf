@@ -16,8 +16,9 @@
 # disk from spec.deployJob.volumes (see "Quirks worth knowing" in AGENTS.md). It does need a
 # small scratch volume: resolution writes a package's metadata layers to /tmp, which this
 # container's read-only root filesystem would otherwise refuse.
-# --deploy-image is left unset here: the manager defaults deploy Jobs to its own image, and the
-# release pipeline rewrites the image reference, so one value serves both.
+# --deploy-image is left unset here: the manager reads the image its own pod runs and defaults
+# deploy Jobs to it, so the release pipeline's one rewrite of the container image below serves
+# both. The downward-API environment that makes it possible is on the container.
 ---
 apiVersion: v1
 kind: Namespace
@@ -51,6 +52,21 @@ spec:
           args:
             - --leader-elect
             - --metrics-bind-address=:8080
+          env:
+            # --deploy-image is left unset, so the manager reads the image it is running from
+            # its own pod and hands that to every Job it stamps. That needs the pod's identity,
+            # and the downward API is the only way a container learns it. An image reference
+            # cannot be injected here directly: kustomize's image transformer rewrites
+            # container image fields, never args or env values, so a literal would be the one
+            # thing the release pipeline could not keep in step.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           livenessProbe:
             httpGet:
               path: /healthz
