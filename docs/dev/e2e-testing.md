@@ -16,6 +16,8 @@ go run ./magefiles/core e2e:run    # the suite, against the running topology
 go run ./magefiles/core e2e:down   # removes everything, including the CAPD machine containers
 ```
 
+[`e2e-walkthrough.md`](e2e-walkthrough.md) is the companion page: what each of those targets does step by step, what it leaves in `dist/e2e/`, and how to drive the suite from a terminal - running a single test, reading a failure, and starting genuinely clean.
+
 `e2e:up` is idempotent and resumable - a failed run is re-runnable and picks up where it stopped. The suite does not tear the topology down; iterate on tests against a long-lived topology and run `e2e:down` when finished.
 
 **The forbidden invocation**: a bare `go test` inside `test/e2e/`. The suite talks to a live topology through `E2E_KUBECONFIG`, which only `e2e:run` sets - without it every test skips, and a fully-skipped suite reads as green while asserting nothing. `test/e2e` is its own Go module precisely so the root `go test ./...` can never reach it; it is also deliberately unvendored, see the exception note in [`magefiles/AGENTS.md`](../../magefiles/AGENTS.md).
