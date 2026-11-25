@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.1](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.0...v0.1.1) (2026-11-25)
+
+
+### Miscellaneous
+
+* **deps:** update ghcr.io/renovatebot/renovate docker tag to v44.263.1 ([#329](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/329)) ([31e4bb7](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/31e4bb7f70866600db08dfaf9cbd014db3e8f5a7))
+
+
+### CI/CD
+
+* fix cosign public key ([#328](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/328)) ([e2535b2](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/e2535b2c8c9ec818d1590d0eda120770a2d027d3))
+
 ## [0.1.0](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.0.1...v0.1.0) (2026-11-25)
 
 

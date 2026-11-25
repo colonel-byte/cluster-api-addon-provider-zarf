@@ -20,7 +20,7 @@ metadata:
 spec:
   name: zarf
   type: addon
-  version: v0.1.0 # x-release-please-version
+  version: v0.1.1 # x-release-please-version
   fetchConfig:
     selector:
       matchLabels:
