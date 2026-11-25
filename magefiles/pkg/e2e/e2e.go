@@ -58,11 +58,21 @@ const (
 	// renovate: datasource=github-releases depName=kubernetes-sigs/cluster-api extractVersion=^v(?<version>\d+\.\d+\.\d+)$
 	clusterAPIVersion = "1.14.4"
 
-	// workloadK8sVersion is the Kubernetes version CAPD boots in workload clusters; CAPD
-	// resolves it to its own kindest/node machine image.
+	// workloadK8sVersion is the Kubernetes version CAPD boots in workload clusters. CAPD
+	// resolves it to `kindest/node:v<version>`, so the only usable values are versions kind
+	// has actually published a node image for - which trails upstream Kubernetes by weeks to
+	// months.
 	//
-	// renovate: datasource=github-releases depName=kubernetes/kubernetes extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-	workloadK8sVersion = "1.37.2"
+	// So this tracks kind's node images, not Kubernetes releases. Tracking releases is what it
+	// did until a from-scratch `e2e:up` failed on 1.37.2: there is no kindest/node:v1.37.2, so
+	// CAPD created the Cluster, reported InfrastructureReady, and then sat with a machine that
+	// could never boot until the ControlPlaneInitialized wait timed out. Nothing said "no such
+	// image". It stayed hidden because `ensureWorkloadCluster` caches the generated manifest in
+	// the workdir, so every topology built on an existing workdir kept using the version that
+	// was valid when that file was written.
+	//
+	// renovate: datasource=docker depName=kindest/node extractVersion=^v(?<version>\d+\.\d+\.\d+)$
+	workloadK8sVersion = "1.34.0"
 
 	// calicoVersion pins the CNI the workload cluster gets. CAPD ships none, so without it the
 	// node stays NotReady with "cni plugin not initialized" and nothing can be scheduled -
@@ -449,7 +459,11 @@ func waitProviders() error {
 
 func ensureWorkloadCluster() error {
 	if err := kubectl("get", "cluster.cluster.x-k8s.io", workloadCluster); err != nil {
-		manifestPath := filepath.Join(workDir, "workload.yaml")
+		// Keyed on the version, so changing workloadK8sVersion regenerates rather than
+		// silently reusing a manifest pinned to the old one. An unkeyed cache is how a bad
+		// version pin stayed invisible: every topology built on an existing workdir kept
+		// booting the version that was valid when the file was written.
+		manifestPath := filepath.Join(workDir, "workload-v"+workloadK8sVersion+".yaml")
 		// Reuse a previously generated manifest: `clusterctl generate` validates against
 		// live objects, so after a partially applied run it refuses to regenerate what it
 		// half-created - the cached manifest is what makes this step resumable.
