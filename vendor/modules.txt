@@ -2654,7 +2654,7 @@ github.com/sigstore/sigstore-go/pkg/verify
 # github.com/sigstore/sigstore/pkg/signature/kms/aws v1.11.4
 ## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/aws
-# github.com/sigstore/sigstore/pkg/signature/kms/azure v1.11.3
+# github.com/sigstore/sigstore/pkg/signature/kms/azure v1.11.4
 ## explicit; go 1.27
 github.com/sigstore/sigstore/pkg/signature/kms/azure
 # github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.11.4
