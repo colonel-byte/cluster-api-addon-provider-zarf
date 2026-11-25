@@ -1,0 +1,419 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>e2e-walkthrough</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-e96d0476.css">
+        <link rel="stylesheet" href="../css/chrome-d279d366.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../docs/css/root-cbd6b073.css">
+        <link rel="stylesheet" href="../docs/css/print-13078dec.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-e97784dc.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-2d1c84fc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/tree/main" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/edit/main/docs/dev/e2e-walkthrough.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="e2e-walkthrough-what-the-targets-do-and-how-to-drive-them-by-hand"><a class="header" href="#e2e-walkthrough-what-the-targets-do-and-how-to-drive-them-by-hand">E2E walkthrough: what the targets do, and how to drive them by hand</a></h1>
+<p><a href="e2e-testing.html"><code>e2e-testing.md</code></a> is the overview - what the suite is for, the topology, the host prerequisites, and the rule about what a test may destroy. This page is the other half: exactly what each target does step by step, what it leaves on disk, and how to work with it at a terminal rather than watching a CI log.</p>
+<p>Read this before changing <code>magefiles/pkg/e2e/</code>, and before trusting a failure you did not cause.</p>
+<h2 id="the-three-targets"><a class="header" href="#the-three-targets">The three targets</a></h2>
+<pre><code class="language-sh">go run ./magefiles/core e2e:up     # build the topology (slow, idempotent, resumable)
+go run ./magefiles/core e2e:run    # build and install the controller, then run the suite
+go run ./magefiles/core e2e:down   # remove everything e2e:up built
+</code></pre>
+<p>Plus the pivot, which is separate because it roughly doubles the topology:</p>
+<pre><code class="language-sh">go run ./magefiles/core e2e:move      # second management cluster, then migrate onto it
+go run ./magefiles/core e2e:moveDown  # remove only that second cluster
+</code></pre>
+<p><code>e2e:up</code> and <code>e2e:run</code> are deliberately separate. Building the topology is minutes; running the suite is a couple of minutes. You build once and run the suite as many times as it takes.</p>
+<h2 id="what-e2eup-does"><a class="header" href="#what-e2eup-does">What <code>e2e:up</code> does</a></h2>
+<p>Thirteen steps, each printed as <code>==&gt; &lt;name&gt;</code> so a failure names its own step. Every one is idempotent, so re-running after a failure continues rather than starting over.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Step</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>clusterctl binary</code></td><td>Downloads the pinned <code>clusterctl</code> to <code>dist/e2e/clusterctl</code> if absent</td></tr>
+<tr><td>2</td><td><code>registry container</code></td><td>Starts <code>distribution:3</code> as <code>caapz-e2e-registry</code>, published on <code>127.0.0.1:5001</code></td></tr>
+<tr><td>3</td><td><code>kind management cluster</code></td><td>Creates kind cluster <code>caapz-e2e</code> with the docker socket mounted (CAPD needs it to create sibling containers) and a containerd <code>config_path</code></td></tr>
+<tr><td>4</td><td><code>registry wiring on management nodes</code></td><td>Writes a containerd <code>hosts.toml</code> so the node resolves <code>caapz-e2e-registry:5000</code> over plain HTTP</td></tr>
+<tr><td>5</td><td><code>CAPI core + CAPD</code></td><td><code>clusterctl init --infrastructure docker</code> with <code>CLUSTER_TOPOLOGY=true</code></td></tr>
+<tr><td>6</td><td><code>provider deployments available</code></td><td>Waits for every provider deployment. Sized for a <strong>cold</strong> image pull - see the constant’s comment</td></tr>
+<tr><td>7</td><td><code>workload cluster</code></td><td>Generates a <code>--flavor development</code> cluster manifest, caches it keyed on the Kubernetes version, applies it with retries, waits for <code>ControlPlaneInitialized</code> and the kubeconfig secret</td></tr>
+<tr><td>8</td><td><code>registry wiring on workload nodes</code></td><td>Same <code>hosts.toml</code>, plus a containerd <code>config_path</code> patch and restart, because CAPD machines never saw kind’s config patches</td></tr>
+<tr><td>9</td><td><code>CNI on the workload cluster</code></td><td>Writes <code>dist/e2e/workload.kubeconfig</code>, applies Calico, waits for node <code>Ready</code>, labels the node for the registry’s affinity, removes the control-plane taint, installs local-path as the default StorageClass, and marks its namespace Pod-Security <code>privileged</code></td></tr>
+<tr><td>10</td><td><code>spike image in registry</code></td><td>Stages the busybox the Phase 0 assertions use</td></tr>
+<tr><td>11</td><td><code>fixture signing keypairs</code></td><td>Generates two Cosign keypairs into <code>dist/e2e/keys</code> - the signing pair, and an unrelated one for the bad-signature case</td></tr>
+<tr><td>12</td><td><code>fixture packages in registry</code></td><td>Builds and pushes three signed fixture packages through the vendored Zarf SDK</td></tr>
+<tr><td>13</td><td><code>init package mirror</code></td><td>Copies the v1beta1 init package into the local registry, registry to registry. The one large transfer; skipped when already present</td></tr>
+</tbody>
+</table>
+</div>
+<p>Step 9 is where four CAPD facts live, each of which is invisible until something needs it. A CAPD cluster has no CNI, no StorageClass, a control-plane taint that disqualifies every node from Zarf’s injector, and a <code>baseline</code> Pod Security standard that forbids the storage provisioner’s <code>hostPath</code> helper pod. All four are documented at the code.</p>
+<h2 id="what-e2erun-does"><a class="header" href="#what-e2erun-does">What <code>e2e:run</code> does</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Step</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>controller image</code></td><td>Builds the manager with the release <code>Dockerfile</code> against a goreleaser-shaped context, so it is the release recipe</td></tr>
+<tr><td>2</td><td><code>controller image into kind</code></td><td><code>kind load docker-image</code> into the management cluster</td></tr>
+<tr><td>3</td><td><code>controller manifests</code></td><td>Renders a workdir kustomize overlay over <code>config/default</code>, applies it, restarts the rollout, waits for it</td></tr>
+</tbody>
+</table>
+</div>
+<p>Then it runs <code>go test</code> in <code>test/e2e</code> with the environment the suite reads:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Points at</th></tr>
+</thead>
+<tbody>
+<tr><td><code>E2E_KUBECONFIG</code></td><td>The management cluster</td></tr>
+<tr><td><code>E2E_WORKLOAD_KUBECONFIG</code></td><td>The workload cluster, host-reachable variant</td></tr>
+<tr><td><code>E2E_KEY_DIR</code></td><td>The fixture keypairs, so a test can name a public key a proxy verifies against</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>e2e:move</code> exports two more: <code>E2E_TARGET_KUBECONFIG</code> (the second management cluster, which is also what makes the pivot test run rather than skip) and <code>E2E_CLUSTERCTL</code>.</p>
+<p>The rollout restart in step 3 is not redundant. A reinstall with an unchanged manifest changes nothing, so the rollout wait would pass against the pod still running the <em>old</em> image - which is how a code change appears to have no effect.</p>
+<h2 id="what-e2eup-leaves-on-disk"><a class="header" href="#what-e2eup-leaves-on-disk">What <code>e2e:up</code> leaves on disk</a></h2>
+<p>Everything lives in <code>dist/e2e/</code>, which is gitignored build output. Deleting the directory is part of starting clean.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Path</th><th>What it is</th></tr>
+</thead>
+<tbody>
+<tr><td><code>mgmt.kubeconfig</code></td><td>The management cluster. This is what <code>kubectl --kubeconfig</code> wants for proxies and releases</td></tr>
+<tr><td><code>workload.kubeconfig</code></td><td>The workload cluster, rewritten for host access by <code>clusterctl get kubeconfig</code></td></tr>
+<tr><td><code>target.kubeconfig</code></td><td>The pivot’s second management cluster, only after <code>e2e:move</code></td></tr>
+<tr><td><code>clusterctl</code></td><td>The pinned binary</td></tr>
+<tr><td><code>kind.yaml</code></td><td>The management cluster’s kind config</td></tr>
+<tr><td><code>workload-v&lt;version&gt;.yaml</code></td><td>The generated workload cluster manifest, keyed on the Kubernetes version</td></tr>
+<tr><td><code>controller.yaml</code></td><td>The rendered controller manifest <code>e2e:run</code> applied</td></tr>
+<tr><td><code>controller/</code></td><td>The kustomize overlay it was rendered from</td></tr>
+<tr><td><code>image/</code></td><td>The goreleaser-shaped build context for the controller image</td></tr>
+<tr><td><code>keys/</code></td><td><code>cosign.key</code>/<code>cosign.pub</code> and <code>wrong.key</code>/<code>wrong.pub</code></td></tr>
+<tr><td><code>fixtures/</code></td><td>The generated fixture package definitions</td></tr>
+<tr><td><code>zarf-cache/</code></td><td>The SDK’s cache from building fixtures</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="driving-it-by-hand"><a class="header" href="#driving-it-by-hand">Driving it by hand</a></h2>
+<h3 id="first-run"><a class="header" href="#first-run">First run</a></h3>
+<pre><code class="language-sh">go run ./magefiles/core e2e:up
+go run ./magefiles/core e2e:run
+</code></pre>
+<p>Expect roughly ten to fifteen minutes for <code>e2e:up</code> on a cold cache - most of it pulling the CAPI provider images, the kind node image, and the init package - and a little over three minutes for <code>e2e:run</code>. A warm <code>e2e:up</code> that only has to re-check things is well under two minutes.</p>
+<p>If <code>e2e:up</code> fails, read the <code>==&gt;</code> line above the error: that is the step, and every step is safe to re-run. Just run <code>e2e:up</code> again.</p>
+<h3 id="iterating-on-controller-code"><a class="header" href="#iterating-on-controller-code">Iterating on controller code</a></h3>
+<p><code>e2e:run</code> rebuilds and reinstalls the controller every time, so the loop is just:</p>
+<pre><code class="language-sh"># edit internal/controller/...
+go run ./magefiles/core e2e:run
+</code></pre>
+<p>No teardown, no reinstall by hand. The topology outlives the controller.</p>
+<h3 id="running-one-test"><a class="header" href="#running-one-test">Running one test</a></h3>
+<p>The suite is a normal Go test binary, so <code>-run</code> works - but it has to be given the environment, and a bare <code>go test</code> in <code>test/e2e</code> silently skips everything rather than failing. Export what the target would:</p>
+<pre><code class="language-sh">cd test/e2e
+export E2E_KUBECONFIG="$PWD/../../dist/e2e/mgmt.kubeconfig"
+export E2E_WORKLOAD_KUBECONFIG="$PWD/../../dist/e2e/workload.kubeconfig"
+export E2E_KEY_DIR="$PWD/../../dist/e2e/keys"
+go test -count=1 -v -run TestAutoInitAndDeploy ./...
+</code></pre>
+<p>This skips <code>e2e:run</code>’s controller rebuild, so it runs whatever is already installed. After changing controller code, run <code>e2e:run</code> once to reinstall, then iterate with <code>-run</code>.</p>
+<p><code>-count=1</code> matters: without it a passing result can come from the test cache rather than from the cluster.</p>
+<h3 id="watching-it-work"><a class="header" href="#watching-it-work">Watching it work</a></h3>
+<p>The suite logs progress while it waits, which <code>go test</code> only shows with <code>-v</code> or on failure. Watching the cluster directly is usually faster:</p>
+<pre><code class="language-sh">watch 'kubectl --kubeconfig dist/e2e/mgmt.kubeconfig get zarfpackageproxy,zarfpackagerelease,jobs'
+</code></pre>
+<pre><code class="language-sh">watch 'kubectl --kubeconfig dist/e2e/workload.kubeconfig get pods -n zarf'
+</code></pre>
+<h3 id="when-a-test-fails"><a class="header" href="#when-a-test-fails">When a test fails</a></h3>
+<p>Work outward from the release, because that is where the controller records what it decided.</p>
+<pre><code class="language-sh">kubectl --kubeconfig dist/e2e/mgmt.kubeconfig get zarfpackagerelease -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].reason,MSG:.status.conditions[?(@.type=="Ready")].message'
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Where to look</th><th>Command</th></tr>
+</thead>
+<tbody>
+<tr><td>Controller decisions</td><td><code>kubectl --kubeconfig dist/e2e/mgmt.kubeconfig -n caapz-system logs deploy/caapz-controller-manager</code></td></tr>
+<tr><td>A deploy’s own error</td><td><code>kubectl --kubeconfig dist/e2e/mgmt.kubeconfig logs job/&lt;release&gt;-deploy</code></td></tr>
+<tr><td>An init’s own error</td><td><code>kubectl --kubeconfig dist/e2e/mgmt.kubeconfig logs job/&lt;release&gt;-init</code></td></tr>
+<tr><td>What Zarf believes</td><td><code>kubectl --kubeconfig dist/e2e/workload.kubeconfig get secret -n zarf</code></td></tr>
+<tr><td>What actually landed</td><td><code>kubectl --kubeconfig dist/e2e/workload.kubeconfig get configmap e2e-app -o yaml</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>A failed Job’s pod is kept rather than cleaned up, so its logs and its termination message survive for exactly this.</p>
+<h3 id="failures-that-are-the-environment-not-the-code"><a class="header" href="#failures-that-are-the-environment-not-the-code">Failures that are the environment, not the code</a></h3>
+<p>Worth recognising, because each one has cost someone an hour:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Symptom</th><th>Cause</th></tr>
+</thead>
+<tbody>
+<tr><td>Management-cluster pods crashloop with <code>too many open files</code></td><td>inotify limits. See the host prerequisites in <a href="e2e-testing.html"><code>e2e-testing.md</code></a></td></tr>
+<tr><td><code>timed out waiting for the condition</code> on a provider deployment, pods <code>ContainerCreating</code></td><td>Still pulling images on a cold cache. Check <code>crictl images</code> on the node before assuming anything broke</td></tr>
+<tr><td>A workload machine never boots and nothing says why</td><td>The Kubernetes version has no published <code>kindest/node</code> image. The pin tracks kind’s images for this reason</td></tr>
+<tr><td><code>no suitable injector image or node exists</code></td><td>The node carries a <code>NoSchedule</code> taint. Step 9 removes it; a hand-made cluster will not have</td></tr>
+<tr><td>A registry pod <code>Pending</code> with an unbound claim</td><td>No StorageClass, or the provisioner’s helper pod is blocked by Pod Security</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="starting-genuinely-clean"><a class="header" href="#starting-genuinely-clean">Starting genuinely clean</a></h3>
+<p>A clean run is the only thing that proves <code>e2e:up</code> encodes every step rather than depending on something applied by hand earlier. Three of the bugs in that table above were found exactly this way, and could not have been found any other way.</p>
+<pre><code class="language-sh">go run ./magefiles/core e2e:moveDown
+go run ./magefiles/core e2e:down
+rm -rf dist/e2e
+go run ./magefiles/core e2e:up
+go run ./magefiles/core e2e:run
+</code></pre>
+<p>Removing <code>dist/e2e</code> is the part that matters. <code>e2e:down</code> removes clusters and containers; the workdir is what holds cached manifests, generated fixtures, and keys, and a cached manifest is how a stale pin stays invisible.</p>
+<p>Do this before trusting the harness after any change to <code>magefiles/pkg/e2e/</code>.</p>
+<h3 id="the-pivot"><a class="header" href="#the-pivot">The pivot</a></h3>
+<pre><code class="language-sh">go run ./magefiles/core e2e:run    # the pivot carries what this deployed
+go run ./magefiles/core e2e:move
+go run ./magefiles/core e2e:moveDown
+</code></pre>
+<p><code>e2e:move</code> reuses the controller image and rendered manifest <code>e2e:run</code> produced rather than rebuilding, so the two management clusters are running the same binary - which is the situation a real migration is in.</p>
+<p>It leaves the topology pivoted onto the target: the workload cluster is managed by <code>caapz-e2e-target</code>, and the proxies are still on <code>caapz-e2e</code>. That is the behaviour under test, not a mess to clean up - but it does mean a subsequent <code>e2e:run</code> against the source has no cluster to match. Tear down and rebuild after a pivot.</p>
+<h2 id="things-that-will-catch-you-out"><a class="header" href="#things-that-will-catch-you-out">Things that will catch you out</a></h2>
+<ul>
+<li><strong>A bare <code>go test</code> in <code>test/e2e</code> skips everything and exits 0.</strong> It is a separate module precisely so the root <code>go test ./...</code> cannot reach it, and every test skips without <code>E2E_KUBECONFIG</code>. A fully-skipped suite reads as green; <code>e2e:run</code> is the invocation that means anything.</li>
+<li><strong>The suite shares one topology across tests.</strong> Tests clean up after themselves and establish their own preconditions - the auto-init test de-initializes the cluster first, for instance - but an interrupted run leaves state behind. If results stop making sense, start clean.</li>
+<li><strong><code>test/e2e</code> is its own module and is deliberately unvendored.</strong> Running <code>go mod tidy</code> there is part of changing it; CI checks it separately from the root module.</li>
+<li><strong>Only one deploy or removal Job runs per cluster at a time.</strong> A row of releases sitting in <code>Pending</code>/<code>WaitingForActiveDeploy</code> while one is <code>Deploying</code> is the design working, not a stall.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../dev/e2e-testing.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../dev/new-repo-checklist.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../dev/e2e-testing.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../dev/new-repo-checklist.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-09f2665d.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-609e4cb8.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

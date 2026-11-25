@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-27afa2a5.js";
+            window.path_to_searchindex_js = "searchindex-e97784dc.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-48ae56d2.js"></script>
+        <script src="toc-2d1c84fc.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1153,6 +1153,7 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 go run ./magefiles/core e2e:run    # the suite, against the running topology
 go run ./magefiles/core e2e:down   # removes everything, including the CAPD machine containers
 </code></pre>
+<p><a href="#e2e-walkthrough-what-the-targets-do-and-how-to-drive-them-by-hand"><code>e2e-walkthrough.md</code></a> is the companion page: what each of those targets does step by step, what it leaves in <code>dist/e2e/</code>, and how to drive the suite from a terminal - running a single test, reading a failure, and starting genuinely clean.</p>
 <p><code>e2e:up</code> is idempotent and resumable - a failed run is re-runnable and picks up where it stopped. The suite does not tear the topology down; iterate on tests against a long-lived topology and run <code>e2e:down</code> when finished.</p>
 <p><strong>The forbidden invocation</strong>: a bare <code>go test</code> inside <code>test/e2e/</code>. The suite talks to a live topology through <code>E2E_KUBECONFIG</code>, which only <code>e2e:run</code> sets - without it every test skips, and a fully-skipped suite reads as green while asserting nothing. <code>test/e2e</code> is its own Go module precisely so the root <code>go test ./...</code> can never reach it; it is also deliberately unvendored, see the exception note in <a href="../magefiles/AGENTS.html"><code>magefiles/AGENTS.md</code></a>.</p>
 <h2 id="a-test-may-only-destroy-what-it-created"><a class="header" href="#a-test-may-only-destroy-what-it-created">A test may only destroy what it created</a></h2>
@@ -1181,6 +1182,184 @@ sudo sysctl --system
 <h2 id="what-the-suite-covers-today-and-does-not"><a class="header" href="#what-the-suite-covers-today-and-does-not">What the suite covers today, and does not</a></h2>
 <p>Phases 0 and 1 of the plan. Phase 0 is the two spike assertions the deploy-Job model rests on in this topology - the server address written in the CAPD-generated kubeconfig secret is reachable from a management-cluster pod, and one registry name (<code>caapz-e2e-registry:5000</code>) resolves and pulls from management pods and workload nodes alike. Phase 1 is the controller running in the cluster: <code>e2e:run</code> builds the manager with the release Dockerfile, kind-loads it, and installs it through a workdir kustomize overlay over <code>config/default</code> (adding <code>--registry-plain-http</code> for the HTTP test registry), then asserts pure matching behavior on real CAPI objects - a release stamped Cluster-owned on selector match and deleted on un-match, a foreign-namespace proxy reconciling to zero matches without <code>--cluster-namespaces</code>, and the three <code>dependsOn</code> hold verdicts as live conditions. It does <strong>not</strong> yet deploy any Zarf package or exercise uninstall - those arrive with their phases (fixtures and the Cosign keypair first).</p>
 <p>Every version the topology pins - clusterctl/CAPD, the workload Kubernetes version, the node/registry/test image digests - lives as annotated constants in <code>magefiles/pkg/e2e/e2e.go</code>, each with its Renovate annotation or written bump procedure per the pin-ownership rule in <a href="../magefiles/AGENTS.html#every-pin-needs-an-owner"><code>magefiles/AGENTS.md</code></a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="e2e-walkthrough-what-the-targets-do-and-how-to-drive-them-by-hand"><a class="header" href="#e2e-walkthrough-what-the-targets-do-and-how-to-drive-them-by-hand">E2E walkthrough: what the targets do, and how to drive them by hand</a></h1>
+<p><a href="#e2e-testing-the-kind--capd-topology"><code>e2e-testing.md</code></a> is the overview - what the suite is for, the topology, the host prerequisites, and the rule about what a test may destroy. This page is the other half: exactly what each target does step by step, what it leaves on disk, and how to work with it at a terminal rather than watching a CI log.</p>
+<p>Read this before changing <code>magefiles/pkg/e2e/</code>, and before trusting a failure you did not cause.</p>
+<h2 id="the-three-targets"><a class="header" href="#the-three-targets">The three targets</a></h2>
+<pre><code class="language-sh">go run ./magefiles/core e2e:up     # build the topology (slow, idempotent, resumable)
+go run ./magefiles/core e2e:run    # build and install the controller, then run the suite
+go run ./magefiles/core e2e:down   # remove everything e2e:up built
+</code></pre>
+<p>Plus the pivot, which is separate because it roughly doubles the topology:</p>
+<pre><code class="language-sh">go run ./magefiles/core e2e:move      # second management cluster, then migrate onto it
+go run ./magefiles/core e2e:moveDown  # remove only that second cluster
+</code></pre>
+<p><code>e2e:up</code> and <code>e2e:run</code> are deliberately separate. Building the topology is minutes; running the suite is a couple of minutes. You build once and run the suite as many times as it takes.</p>
+<h2 id="what-e2eup-does"><a class="header" href="#what-e2eup-does">What <code>e2e:up</code> does</a></h2>
+<p>Thirteen steps, each printed as <code>==&gt; &lt;name&gt;</code> so a failure names its own step. Every one is idempotent, so re-running after a failure continues rather than starting over.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Step</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>clusterctl binary</code></td><td>Downloads the pinned <code>clusterctl</code> to <code>dist/e2e/clusterctl</code> if absent</td></tr>
+<tr><td>2</td><td><code>registry container</code></td><td>Starts <code>distribution:3</code> as <code>caapz-e2e-registry</code>, published on <code>127.0.0.1:5001</code></td></tr>
+<tr><td>3</td><td><code>kind management cluster</code></td><td>Creates kind cluster <code>caapz-e2e</code> with the docker socket mounted (CAPD needs it to create sibling containers) and a containerd <code>config_path</code></td></tr>
+<tr><td>4</td><td><code>registry wiring on management nodes</code></td><td>Writes a containerd <code>hosts.toml</code> so the node resolves <code>caapz-e2e-registry:5000</code> over plain HTTP</td></tr>
+<tr><td>5</td><td><code>CAPI core + CAPD</code></td><td><code>clusterctl init --infrastructure docker</code> with <code>CLUSTER_TOPOLOGY=true</code></td></tr>
+<tr><td>6</td><td><code>provider deployments available</code></td><td>Waits for every provider deployment. Sized for a <strong>cold</strong> image pull - see the constant’s comment</td></tr>
+<tr><td>7</td><td><code>workload cluster</code></td><td>Generates a <code>--flavor development</code> cluster manifest, caches it keyed on the Kubernetes version, applies it with retries, waits for <code>ControlPlaneInitialized</code> and the kubeconfig secret</td></tr>
+<tr><td>8</td><td><code>registry wiring on workload nodes</code></td><td>Same <code>hosts.toml</code>, plus a containerd <code>config_path</code> patch and restart, because CAPD machines never saw kind’s config patches</td></tr>
+<tr><td>9</td><td><code>CNI on the workload cluster</code></td><td>Writes <code>dist/e2e/workload.kubeconfig</code>, applies Calico, waits for node <code>Ready</code>, labels the node for the registry’s affinity, removes the control-plane taint, installs local-path as the default StorageClass, and marks its namespace Pod-Security <code>privileged</code></td></tr>
+<tr><td>10</td><td><code>spike image in registry</code></td><td>Stages the busybox the Phase 0 assertions use</td></tr>
+<tr><td>11</td><td><code>fixture signing keypairs</code></td><td>Generates two Cosign keypairs into <code>dist/e2e/keys</code> - the signing pair, and an unrelated one for the bad-signature case</td></tr>
+<tr><td>12</td><td><code>fixture packages in registry</code></td><td>Builds and pushes three signed fixture packages through the vendored Zarf SDK</td></tr>
+<tr><td>13</td><td><code>init package mirror</code></td><td>Copies the v1beta1 init package into the local registry, registry to registry. The one large transfer; skipped when already present</td></tr>
+</tbody>
+</table>
+</div>
+<p>Step 9 is where four CAPD facts live, each of which is invisible until something needs it. A CAPD cluster has no CNI, no StorageClass, a control-plane taint that disqualifies every node from Zarf’s injector, and a <code>baseline</code> Pod Security standard that forbids the storage provisioner’s <code>hostPath</code> helper pod. All four are documented at the code.</p>
+<h2 id="what-e2erun-does"><a class="header" href="#what-e2erun-does">What <code>e2e:run</code> does</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>#</th><th>Step</th><th>What it does</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>controller image</code></td><td>Builds the manager with the release <code>Dockerfile</code> against a goreleaser-shaped context, so it is the release recipe</td></tr>
+<tr><td>2</td><td><code>controller image into kind</code></td><td><code>kind load docker-image</code> into the management cluster</td></tr>
+<tr><td>3</td><td><code>controller manifests</code></td><td>Renders a workdir kustomize overlay over <code>config/default</code>, applies it, restarts the rollout, waits for it</td></tr>
+</tbody>
+</table>
+</div>
+<p>Then it runs <code>go test</code> in <code>test/e2e</code> with the environment the suite reads:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Points at</th></tr>
+</thead>
+<tbody>
+<tr><td><code>E2E_KUBECONFIG</code></td><td>The management cluster</td></tr>
+<tr><td><code>E2E_WORKLOAD_KUBECONFIG</code></td><td>The workload cluster, host-reachable variant</td></tr>
+<tr><td><code>E2E_KEY_DIR</code></td><td>The fixture keypairs, so a test can name a public key a proxy verifies against</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>e2e:move</code> exports two more: <code>E2E_TARGET_KUBECONFIG</code> (the second management cluster, which is also what makes the pivot test run rather than skip) and <code>E2E_CLUSTERCTL</code>.</p>
+<p>The rollout restart in step 3 is not redundant. A reinstall with an unchanged manifest changes nothing, so the rollout wait would pass against the pod still running the <em>old</em> image - which is how a code change appears to have no effect.</p>
+<h2 id="what-e2eup-leaves-on-disk"><a class="header" href="#what-e2eup-leaves-on-disk">What <code>e2e:up</code> leaves on disk</a></h2>
+<p>Everything lives in <code>dist/e2e/</code>, which is gitignored build output. Deleting the directory is part of starting clean.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Path</th><th>What it is</th></tr>
+</thead>
+<tbody>
+<tr><td><code>mgmt.kubeconfig</code></td><td>The management cluster. This is what <code>kubectl --kubeconfig</code> wants for proxies and releases</td></tr>
+<tr><td><code>workload.kubeconfig</code></td><td>The workload cluster, rewritten for host access by <code>clusterctl get kubeconfig</code></td></tr>
+<tr><td><code>target.kubeconfig</code></td><td>The pivot’s second management cluster, only after <code>e2e:move</code></td></tr>
+<tr><td><code>clusterctl</code></td><td>The pinned binary</td></tr>
+<tr><td><code>kind.yaml</code></td><td>The management cluster’s kind config</td></tr>
+<tr><td><code>workload-v&lt;version&gt;.yaml</code></td><td>The generated workload cluster manifest, keyed on the Kubernetes version</td></tr>
+<tr><td><code>controller.yaml</code></td><td>The rendered controller manifest <code>e2e:run</code> applied</td></tr>
+<tr><td><code>controller/</code></td><td>The kustomize overlay it was rendered from</td></tr>
+<tr><td><code>image/</code></td><td>The goreleaser-shaped build context for the controller image</td></tr>
+<tr><td><code>keys/</code></td><td><code>cosign.key</code>/<code>cosign.pub</code> and <code>wrong.key</code>/<code>wrong.pub</code></td></tr>
+<tr><td><code>fixtures/</code></td><td>The generated fixture package definitions</td></tr>
+<tr><td><code>zarf-cache/</code></td><td>The SDK’s cache from building fixtures</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="driving-it-by-hand"><a class="header" href="#driving-it-by-hand">Driving it by hand</a></h2>
+<h3 id="first-run"><a class="header" href="#first-run">First run</a></h3>
+<pre><code class="language-sh">go run ./magefiles/core e2e:up
+go run ./magefiles/core e2e:run
+</code></pre>
+<p>Expect roughly ten to fifteen minutes for <code>e2e:up</code> on a cold cache - most of it pulling the CAPI provider images, the kind node image, and the init package - and a little over three minutes for <code>e2e:run</code>. A warm <code>e2e:up</code> that only has to re-check things is well under two minutes.</p>
+<p>If <code>e2e:up</code> fails, read the <code>==&gt;</code> line above the error: that is the step, and every step is safe to re-run. Just run <code>e2e:up</code> again.</p>
+<h3 id="iterating-on-controller-code"><a class="header" href="#iterating-on-controller-code">Iterating on controller code</a></h3>
+<p><code>e2e:run</code> rebuilds and reinstalls the controller every time, so the loop is just:</p>
+<pre><code class="language-sh"># edit internal/controller/...
+go run ./magefiles/core e2e:run
+</code></pre>
+<p>No teardown, no reinstall by hand. The topology outlives the controller.</p>
+<h3 id="running-one-test"><a class="header" href="#running-one-test">Running one test</a></h3>
+<p>The suite is a normal Go test binary, so <code>-run</code> works - but it has to be given the environment, and a bare <code>go test</code> in <code>test/e2e</code> silently skips everything rather than failing. Export what the target would:</p>
+<pre><code class="language-sh">cd test/e2e
+export E2E_KUBECONFIG="$PWD/../../dist/e2e/mgmt.kubeconfig"
+export E2E_WORKLOAD_KUBECONFIG="$PWD/../../dist/e2e/workload.kubeconfig"
+export E2E_KEY_DIR="$PWD/../../dist/e2e/keys"
+go test -count=1 -v -run TestAutoInitAndDeploy ./...
+</code></pre>
+<p>This skips <code>e2e:run</code>’s controller rebuild, so it runs whatever is already installed. After changing controller code, run <code>e2e:run</code> once to reinstall, then iterate with <code>-run</code>.</p>
+<p><code>-count=1</code> matters: without it a passing result can come from the test cache rather than from the cluster.</p>
+<h3 id="watching-it-work"><a class="header" href="#watching-it-work">Watching it work</a></h3>
+<p>The suite logs progress while it waits, which <code>go test</code> only shows with <code>-v</code> or on failure. Watching the cluster directly is usually faster:</p>
+<pre><code class="language-sh">watch 'kubectl --kubeconfig dist/e2e/mgmt.kubeconfig get zarfpackageproxy,zarfpackagerelease,jobs'
+</code></pre>
+<pre><code class="language-sh">watch 'kubectl --kubeconfig dist/e2e/workload.kubeconfig get pods -n zarf'
+</code></pre>
+<h3 id="when-a-test-fails"><a class="header" href="#when-a-test-fails">When a test fails</a></h3>
+<p>Work outward from the release, because that is where the controller records what it decided.</p>
+<pre><code class="language-sh">kubectl --kubeconfig dist/e2e/mgmt.kubeconfig get zarfpackagerelease -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].reason,MSG:.status.conditions[?(@.type=="Ready")].message'
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Where to look</th><th>Command</th></tr>
+</thead>
+<tbody>
+<tr><td>Controller decisions</td><td><code>kubectl --kubeconfig dist/e2e/mgmt.kubeconfig -n caapz-system logs deploy/caapz-controller-manager</code></td></tr>
+<tr><td>A deploy’s own error</td><td><code>kubectl --kubeconfig dist/e2e/mgmt.kubeconfig logs job/&lt;release&gt;-deploy</code></td></tr>
+<tr><td>An init’s own error</td><td><code>kubectl --kubeconfig dist/e2e/mgmt.kubeconfig logs job/&lt;release&gt;-init</code></td></tr>
+<tr><td>What Zarf believes</td><td><code>kubectl --kubeconfig dist/e2e/workload.kubeconfig get secret -n zarf</code></td></tr>
+<tr><td>What actually landed</td><td><code>kubectl --kubeconfig dist/e2e/workload.kubeconfig get configmap e2e-app -o yaml</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>A failed Job’s pod is kept rather than cleaned up, so its logs and its termination message survive for exactly this.</p>
+<h3 id="failures-that-are-the-environment-not-the-code"><a class="header" href="#failures-that-are-the-environment-not-the-code">Failures that are the environment, not the code</a></h3>
+<p>Worth recognising, because each one has cost someone an hour:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Symptom</th><th>Cause</th></tr>
+</thead>
+<tbody>
+<tr><td>Management-cluster pods crashloop with <code>too many open files</code></td><td>inotify limits. See the host prerequisites in <a href="#e2e-testing-the-kind--capd-topology"><code>e2e-testing.md</code></a></td></tr>
+<tr><td><code>timed out waiting for the condition</code> on a provider deployment, pods <code>ContainerCreating</code></td><td>Still pulling images on a cold cache. Check <code>crictl images</code> on the node before assuming anything broke</td></tr>
+<tr><td>A workload machine never boots and nothing says why</td><td>The Kubernetes version has no published <code>kindest/node</code> image. The pin tracks kind’s images for this reason</td></tr>
+<tr><td><code>no suitable injector image or node exists</code></td><td>The node carries a <code>NoSchedule</code> taint. Step 9 removes it; a hand-made cluster will not have</td></tr>
+<tr><td>A registry pod <code>Pending</code> with an unbound claim</td><td>No StorageClass, or the provisioner’s helper pod is blocked by Pod Security</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="starting-genuinely-clean"><a class="header" href="#starting-genuinely-clean">Starting genuinely clean</a></h3>
+<p>A clean run is the only thing that proves <code>e2e:up</code> encodes every step rather than depending on something applied by hand earlier. Three of the bugs in that table above were found exactly this way, and could not have been found any other way.</p>
+<pre><code class="language-sh">go run ./magefiles/core e2e:moveDown
+go run ./magefiles/core e2e:down
+rm -rf dist/e2e
+go run ./magefiles/core e2e:up
+go run ./magefiles/core e2e:run
+</code></pre>
+<p>Removing <code>dist/e2e</code> is the part that matters. <code>e2e:down</code> removes clusters and containers; the workdir is what holds cached manifests, generated fixtures, and keys, and a cached manifest is how a stale pin stays invisible.</p>
+<p>Do this before trusting the harness after any change to <code>magefiles/pkg/e2e/</code>.</p>
+<h3 id="the-pivot"><a class="header" href="#the-pivot">The pivot</a></h3>
+<pre><code class="language-sh">go run ./magefiles/core e2e:run    # the pivot carries what this deployed
+go run ./magefiles/core e2e:move
+go run ./magefiles/core e2e:moveDown
+</code></pre>
+<p><code>e2e:move</code> reuses the controller image and rendered manifest <code>e2e:run</code> produced rather than rebuilding, so the two management clusters are running the same binary - which is the situation a real migration is in.</p>
+<p>It leaves the topology pivoted onto the target: the workload cluster is managed by <code>caapz-e2e-target</code>, and the proxies are still on <code>caapz-e2e</code>. That is the behaviour under test, not a mess to clean up - but it does mean a subsequent <code>e2e:run</code> against the source has no cluster to match. Tear down and rebuild after a pivot.</p>
+<h2 id="things-that-will-catch-you-out"><a class="header" href="#things-that-will-catch-you-out">Things that will catch you out</a></h2>
+<ul>
+<li><strong>A bare <code>go test</code> in <code>test/e2e</code> skips everything and exits 0.</strong> It is a separate module precisely so the root <code>go test ./...</code> cannot reach it, and every test skips without <code>E2E_KUBECONFIG</code>. A fully-skipped suite reads as green; <code>e2e:run</code> is the invocation that means anything.</li>
+<li><strong>The suite shares one topology across tests.</strong> Tests clean up after themselves and establish their own preconditions - the auto-init test de-initializes the cluster first, for instance - but an interrupted run leaves state behind. If results stop making sense, start clean.</li>
+<li><strong><code>test/e2e</code> is its own module and is deliberately unvendored.</strong> Running <code>go mod tidy</code> there is part of changing it; CI checks it separately from the root module.</li>
+<li><strong>Only one deploy or removal Job runs per cluster at a time.</strong> A row of releases sitting in <code>Pending</code>/<code>WaitingForActiveDeploy</code> while one is <code>Deploying</code> is the design working, not a stall.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="new-repository-checklist"><a class="header" href="#new-repository-checklist">New repository checklist</a></h1>
 <p>Generating a repository from a template copies <strong>files, not settings</strong>. Everything in this template is a file, so it all arrives; everything in the Settings tab does not, and several of the files that arrive are inert until a matching setting exists. A <code>CODEOWNERS</code> that requires nothing and a workflow that goes green while the site 404s both look fine from the file list.</p>
