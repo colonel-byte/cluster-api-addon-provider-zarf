@@ -27,6 +27,11 @@ api/**/zz_generated.deepcopy.go linguist-generated
 config/crd/bases/*.yaml linguist-generated
 config/rbac/role.yaml linguist-generated
 
+# release-please
+# The changelog, rewritten wholesale from the conventional commit messages on main by
+# .github/workflows/release-please.yaml. It lives under docs/ so the book publishes it.
+docs/misc/CHANGELOG.md linguist-generated
+
 # A generator added under magefiles/pkg/gen/ gets its output path listed here in the
 # same change. Check a specific file rather than reasoning about the patterns:
 #

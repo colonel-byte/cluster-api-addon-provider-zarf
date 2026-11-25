@@ -91,6 +91,14 @@ var summarySections = []struct {
 		pattern: `(.+)\.md`,
 		note:    printExcludedNote,
 	},
+	{
+		// docs/misc/CHANGELOG.md is written by release-please, so the folder is empty
+		// until the first release cuts one.
+		title:   "Misc",
+		folder:  "misc",
+		pattern: `(.+)\.md`,
+		note:    printExcludedNote,
+	},
 }
 
 // generateSummary writes docs/SUMMARY.md, mdBook's table of contents, from the tree the rest of

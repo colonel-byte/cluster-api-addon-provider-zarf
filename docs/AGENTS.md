@@ -83,6 +83,8 @@ Parts of the `docs/` tree are generated and are overwritten wholesale on the nex
 
 The three above are rewritten in place on every run, and `docs/index.md` and `docs/security.md` are copies of files that live outside `docs/` because GitHub reads them where they are.
 
+One more generated page under `docs/` is not mage's: `docs/misc/CHANGELOG.md` is written by release-please from the conventional commit messages on `main`, which is why it sits under `docs/` at all - the book publishes it as the `Misc` chapter. It does not exist until the first release cuts one, and the `Misc` section of `SUMMARY.md` is empty until then. See [`docs/workflows/release-please.md`](workflows/release-please.md).
+
 To change one of those pages, change what it is generated from - a command's `Short`/`Long`/flag help, a godoc comment, or the struct and tags the schema generator reflects - and then regenerate:
 
 ```sh
