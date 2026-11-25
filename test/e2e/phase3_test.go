@@ -16,11 +16,14 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -212,5 +215,181 @@ func TestDeletionPolicyRetain(t *testing.T) {
 				Name:      deployedPackageRecordName(packageName).Name,
 			},
 		})
+	})
+}
+
+// TestApplyOnceAdoptsExistingRecord is §3's two-deletion rule in the order that must *not*
+// re-execute: a seed deploys once, its release is deleted, and the replacement release finds
+// zarf's deployed-package record already on the cluster and adopts it rather than running the
+// package again. "Never re-execute" is the whole promise of ApplyOnce, and the record on the
+// workload cluster - not the release object - is what it rests on.
+func TestApplyOnceAdoptsExistingRecord(t *testing.T) {
+	c := phase1Client(t)
+	workload := workloadClient(t)
+
+	proxy := deployProxy(t, c, "e2e-seed", addonsv1alpha1.PolicyRetain, addonsv1alpha1.StrategyApplyOnce)
+	t.Cleanup(func() {
+		_ = c.Delete(context.Background(), proxy) //nolint:errcheck // best-effort cleanup
+	})
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(proxy), proxy); err != nil {
+		t.Fatalf("re-reading the proxy: %v", err)
+	}
+	packageName := proxy.Status.PackageName
+
+	releaseKey := types.NamespacedName{Namespace: "default", Name: "e2e-seed-" + workloadCluster}
+	release := &addonsv1alpha1.ZarfPackageRelease{}
+	if err := c.Get(t.Context(), releaseKey, release); err != nil {
+		t.Fatalf("reading the seeded release: %v", err)
+	}
+	if !release.Status.Applied {
+		t.Fatalf("a completed seed release has applied=false")
+	}
+	deployedDigest := release.Status.DeployedDigest
+	if deployedDigest == "" {
+		t.Fatal("the seed release recorded no deployedDigest")
+	}
+
+	// Mark the deployed content, so a re-execution would be visible as the marker reverting to
+	// what the package carries.
+	configMap := &corev1.ConfigMap{}
+	cmKey := types.NamespacedName{Namespace: "default", Name: appPackageName}
+	if err := workload.Get(t.Context(), cmKey, configMap); err != nil {
+		t.Fatalf("reading the deployed ConfigMap: %v", err)
+	}
+	beforeEdit := configMap.DeepCopy()
+	configMap.Data["marker"] = "touched-after-seeding"
+	if err := workload.Patch(t.Context(), configMap, client.MergeFrom(beforeEdit)); err != nil {
+		t.Fatalf("marking the deployed ConfigMap: %v", err)
+	}
+
+	// Delete the release only. Retain policy means no removal is owed, so zarf's record - the
+	// thing adoption reads - survives on the cluster.
+	if err := c.Delete(t.Context(), release); err != nil {
+		t.Fatalf("deleting the release: %v", err)
+	}
+	if err := workload.Get(t.Context(), deployedPackageRecordName(packageName), &corev1.Secret{}); err != nil {
+		t.Fatalf("deleting the release took zarf's record with it: %v", err)
+	}
+
+	// The proxy stamps a replacement, which must complete by adoption rather than by deploying.
+	waitLong(t, "the replacement release never adopted the existing record", func(ctx context.Context) (bool, error) {
+		fresh := &addonsv1alpha1.ZarfPackageRelease{}
+		if err := c.Get(ctx, releaseKey, fresh); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		if fresh.UID == release.UID {
+			return false, nil
+		}
+		ready := meta.FindStatusCondition(fresh.Status.Conditions, addonsv1alpha1.ConditionReady)
+		if ready == nil {
+			return false, nil
+		}
+		t.Logf("waiting for adoption: phase=%s reason=%s", fresh.Status.Phase, ready.Reason)
+		if ready.Reason == addonsv1alpha1.ReasonAdoptedExistingRecord {
+			return true, nil
+		}
+		// Anything else reaching a terminal state means it re-executed, which is the bug.
+		if fresh.Status.Phase == addonsv1alpha1.PhaseCompleted {
+			return false, fmt.Errorf("the replacement release completed with reason %q, not by adoption", ready.Reason)
+		}
+		return false, nil
+	})
+
+	// No deploy Job was stamped, and the marker survives - together, proof nothing re-ran.
+	if err := c.Get(t.Context(),
+		types.NamespacedName{Namespace: "default", Name: "e2e-seed-" + workloadCluster + "-deploy"},
+		&batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("a deploy Job was stamped for an adopted seed (err=%v)", err)
+	}
+	if err := workload.Get(t.Context(), cmKey, configMap); err != nil {
+		t.Fatalf("re-reading the ConfigMap: %v", err)
+	}
+	if configMap.Data["marker"] != "touched-after-seeding" {
+		t.Fatalf("the seed re-executed: marker is %q, so the package was deployed again", configMap.Data["marker"])
+	}
+}
+
+// TestApplyOnceReseedsWithoutRecord is the other order of §3's two-deletion rule: remove zarf's
+// record first and the release second, and the seed is owed again. The record is the guarantee's
+// anchor, so deleting it is the documented way to deliberately re-run a seed.
+func TestApplyOnceReseedsWithoutRecord(t *testing.T) {
+	c := phase1Client(t)
+	workload := workloadClient(t)
+
+	proxy := deployProxy(t, c, "e2e-reseed", addonsv1alpha1.PolicyRetain, addonsv1alpha1.StrategyApplyOnce)
+	t.Cleanup(func() {
+		_ = c.Delete(context.Background(), proxy) //nolint:errcheck // best-effort cleanup
+	})
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(proxy), proxy); err != nil {
+		t.Fatalf("re-reading the proxy: %v", err)
+	}
+	packageName := proxy.Status.PackageName
+
+	releaseKey := types.NamespacedName{Namespace: "default", Name: "e2e-reseed-" + workloadCluster}
+	release := &addonsv1alpha1.ZarfPackageRelease{}
+	if err := c.Get(t.Context(), releaseKey, release); err != nil {
+		t.Fatalf("reading the seeded release: %v", err)
+	}
+	firstUID := release.UID
+
+	// Erase the evidence of the deploy from the cluster: zarf's record, and the content itself
+	// so a genuine re-execution is observable rather than inferred.
+	record := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: deployedPackageRecordName(packageName).Namespace,
+		Name:      deployedPackageRecordName(packageName).Name,
+	}}
+	if err := workload.Delete(t.Context(), record); err != nil {
+		t.Fatalf("deleting zarf's record: %v", err)
+	}
+	cmKey := types.NamespacedName{Namespace: "default", Name: appPackageName}
+	if err := workload.Delete(t.Context(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: cmKey.Namespace, Name: cmKey.Name},
+	}); err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("deleting the deployed ConfigMap: %v", err)
+	}
+
+	// Then the release, which is what prompts the proxy to stamp a replacement.
+	if err := c.Delete(t.Context(), release); err != nil {
+		t.Fatalf("deleting the release: %v", err)
+	}
+
+	// With no record to adopt, the replacement re-seeds: a real deploy, reaching Completed.
+	waitLong(t, "the replacement release never re-seeded", func(ctx context.Context) (bool, error) {
+		fresh := &addonsv1alpha1.ZarfPackageRelease{}
+		if err := c.Get(ctx, releaseKey, fresh); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		if fresh.UID == firstUID {
+			return false, nil
+		}
+		ready := meta.FindStatusCondition(fresh.Status.Conditions, addonsv1alpha1.ConditionReady)
+		reason := ""
+		if ready != nil {
+			reason = ready.Reason
+		}
+		if reason == addonsv1alpha1.ReasonAdoptedExistingRecord {
+			return false, fmt.Errorf("the replacement adopted a record that was deleted")
+		}
+		if reason == addonsv1alpha1.ReasonDeployFailed {
+			return false, terminalFailure(ctx, c, releaseKey, "the re-seed deploy Job failed")
+		}
+		t.Logf("waiting for the re-seed: phase=%s reason=%s", fresh.Status.Phase, reason)
+		return fresh.Status.Phase == addonsv1alpha1.PhaseCompleted, nil
+	})
+
+	// The package really ran again: its content and zarf's record are both back.
+	if err := workload.Get(t.Context(), cmKey, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("the re-seed did not redeploy the package's content: %v", err)
+	}
+	if err := workload.Get(t.Context(), deployedPackageRecordName(packageName), &corev1.Secret{}); err != nil {
+		t.Fatalf("the re-seed left no deployed-package record: %v", err)
+	}
+
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_ = workload.Delete(ctx, &corev1.ConfigMap{ //nolint:errcheck // best-effort cleanup
+			ObjectMeta: metav1.ObjectMeta{Namespace: cmKey.Namespace, Name: cmKey.Name},
+		})
+		_ = workload.Delete(ctx, record) //nolint:errcheck // best-effort cleanup
 	})
 }
