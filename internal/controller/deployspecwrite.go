@@ -34,6 +34,7 @@ import (
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
 	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/deployspec"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/resolver"
 )
 
 // writeDeploySpecs renders and writes each matched cluster's deploy-spec Secret - the deploy
@@ -48,6 +49,20 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 	log := ctrl.LoggerFrom(ctx)
 
 	packageRef := pinnedRef(proxy.Status.ResolvedRef, proxy.Status.ResolvedDigest)
+
+	// The same credentials and CA the controller resolved with, for the pod to pull the same
+	// bytes - resolved once per proxy rather than per release, since the source is the proxy's.
+	access := resolver.Options{}
+	reason, message, err := r.registryAccess(ctx, proxy.Namespace, &proxy.Spec.Package, &access)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		// Resolution already surfaced this on the proxy; the pod gets no half-credentialed spec.
+		log.Info("registry access refused; no deploy spec written", "proxy",
+			client.ObjectKeyFromObject(proxy), "reason", reason, "message", message)
+		return nil
+	}
 
 	// The init spec renders only from a resolved init package; until then the main spec is
 	// written alone and the init Job has nothing to start from (§6 step 5).
@@ -67,7 +82,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 			continue
 		}
 
-		files, renderErr := r.renderSpecs(proxy, cluster, packageRef, initPackageRef)
+		files, renderErr := r.renderSpecs(proxy, cluster, packageRef, initPackageRef, access)
 		releaseBefore := release.DeepCopy()
 		if renderErr != nil {
 			meta.SetStatusCondition(&release.Status.Conditions, metav1.Condition{
@@ -127,13 +142,13 @@ func pinnedRef(ref, digest string) string {
 // and set entries against the target cluster's object content: the main spec under
 // deployspec.FileName, and - when initPackageRef names a resolved init package - the auto-init
 // spec under deployspec.InitFileName (§6 step 5).
-func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, packageRef, initPackageRef string) (map[string][]byte, error) {
+func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, packageRef, initPackageRef string, access resolver.Options) (map[string][]byte, error) {
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
 	if err != nil {
 		return nil, err
 	}
 
-	spec, err := buildSpec(packageRef, proxy.Spec.Package.API, proxy.Spec.Values, proxy.Spec.Set, r.RegistryPlainHTTP, content)
+	spec, err := buildSpec(packageRef, proxy.Spec.Package.API, proxy.Spec.Values, proxy.Spec.Set, r.RegistryPlainHTTP, proxy.Spec.Package.InsecureSkipTLSVerify, content)
 	if err != nil {
 		return nil, err
 	}
@@ -148,10 +163,16 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 		return nil, err
 	}
 	files := map[string][]byte{deployspec.FileName: raw}
+	if len(access.DockerConfigJSON) > 0 {
+		files[deployspec.DockerConfigFileName] = access.DockerConfigJSON
+	}
+	if len(access.CABundle) > 0 {
+		files[deployspec.CAFileName] = access.CABundle
+	}
 
 	if initPackageRef != "" {
 		initOpts := proxy.Spec.Init
-		initSpec, err := buildSpec(initPackageRef, initOpts.Package.API, initOpts.Values, initOpts.Set, r.RegistryPlainHTTP, content)
+		initSpec, err := buildSpec(initPackageRef, initOpts.Package.API, initOpts.Values, initOpts.Set, r.RegistryPlainHTTP, initOpts.Package.InsecureSkipTLSVerify, content)
 		if err != nil {
 			return nil, err
 		}
@@ -172,11 +193,12 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 
 // buildSpec assembles one deploy-spec document from a source's fields, rendering its values and
 // set entries against the target cluster's object content.
-func buildSpec(packageRef string, api addonsv1alpha1.ZarfPackageAPI, values *apiextensionsv1.JSON, set map[string]string, plainHTTP bool, content map[string]any) (deployspec.Spec, error) {
+func buildSpec(packageRef string, api addonsv1alpha1.ZarfPackageAPI, values *apiextensionsv1.JSON, set map[string]string, plainHTTP, insecureSkipTLSVerify bool, content map[string]any) (deployspec.Spec, error) {
 	spec := deployspec.Spec{
-		Package:    packageRef,
-		PackageAPI: string(api),
-		PlainHTTP:  plainHTTP,
+		Package:               packageRef,
+		PackageAPI:            string(api),
+		PlainHTTP:             plainHTTP,
+		InsecureSkipTLSVerify: insecureSkipTLSVerify,
 	}
 	if values != nil {
 		rendered, err := deployspec.Render(string(values.Raw), content)
