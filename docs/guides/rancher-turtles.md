@@ -20,7 +20,7 @@ metadata:
 spec:
   name: zarf
   type: addon
-  version: v0.1.1
+  version: v0.1.2
   fetchConfig:
     url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases
 ```
@@ -47,7 +47,7 @@ spec:
   providers:
     - name: zarf
       type: AddonProvider
-      url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.1.1/addon-components.yaml
+      url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.1.2/addon-components.yaml
 ```
 <!-- x-release-please-end-version -->
 
@@ -59,10 +59,10 @@ The name and namespace are not free: Turtles merges this object into the `cluste
 
 <!-- x-release-please-start-version -->
 ```sh
-kubectl create configmap v0.1.1 --namespace caapz-system \
+kubectl create configmap v0.1.2 --namespace caapz-system \
   --from-file=components=addon-components.yaml \
   --from-file=metadata=metadata.yaml
-kubectl label configmap v0.1.1 --namespace caapz-system provider-components=addon-zarf
+kubectl label configmap v0.1.2 --namespace caapz-system provider-components=addon-zarf
 ```
 <!-- x-release-please-end-version -->
 
@@ -85,7 +85,7 @@ The ConfigMap and the `CAPIProvider` are pre-rendered into the air-gapped Zarf p
 
 <!-- x-release-please-start-version -->
 ```sh
-zarf package deploy zarf-package-cluster-api-addon-provider-zarf-amd64-0.1.1.tar.zst \
+zarf package deploy zarf-package-cluster-api-addon-provider-zarf-amd64-0.1.2.tar.zst \
   --components rancher-turtle-artifacts
 ```
 <!-- x-release-please-end-version -->
@@ -98,7 +98,7 @@ It is optional, so it has to be named - `zarf package deploy --confirm` skips ev
 
 <!-- x-release-please-start-version -->
 ```sh
-go run ./magefiles/core release:ociArtifact v0.1.1
+go run ./magefiles/core release:ociArtifact v0.1.2
 ```
 <!-- x-release-please-end-version -->
 

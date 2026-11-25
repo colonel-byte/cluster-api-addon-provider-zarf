@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.1.2](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.1...v0.1.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **e2e:** pin the workload Kubernetes version to kind's node images ([#351](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/351)) ([f6511d7](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f6511d7449f63aa1d3230612922085231d113d70))
+* **e2e:** size the provider wait for a cold image pull ([#352](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/352)) ([a67bf01](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a67bf0169a5800788e1cc2e26dc0884021c7cd83))
+
+
+### Documentation
+
+* add getting-started and bootstrap-order guides ([#350](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/350)) ([31236c0](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/31236c01a9476bb8f9491b2d06ad0287c66c432e))
+* **dev:** add an e2e walkthrough and a rule to keep it current ([#353](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/353)) ([9846558](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/984655893ff064a8944a4c3823a91b4384bb848f))
+
+
+### Miscellaneous
+
+* **deps:** update module github.com/alibabacloud-go/alibabacloud-gateway-pop to v0.1.7 ([#347](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/347)) ([cd2e417](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/cd2e417078d285cfb6195983e54ea7cb6aa2d8e2))
+* **deps:** update module github.com/theupdateframework/go-tuf/v2 to v2.5.0 ([#348](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/348)) ([1bd939f](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/1bd939f15bd8f63a78cb2c283eb145cb0d51a291))
+* **e2e:** tidy the e2e module against the current root module ([#331](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/331)) ([01d045e](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/01d045e1c094c5dac67bfd6491daa4314aad85dc))
+
+
+### CI/CD
+
+* check the e2e module is tidy and let renovate manage it ([#332](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/332)) ([3980f30](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/3980f301bb8354e3288aac2deca1d6b5147c09f6))
+* **release:** build linux binaries only and drop the latest image tag ([#356](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/356)) ([e960c59](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/e960c59fe01fcf04d33f78f1a6d902983b33546c))
+* **vendor:** stop scoring vendored Python as CAAPZ vulns ([#355](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/355)) ([a89a588](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a89a5889c05aa140a5c886966f6c4b218af7f815))
+
 ## [0.1.1](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.0...v0.1.1) (2026-11-25)
 
 
