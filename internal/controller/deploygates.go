@@ -153,11 +153,16 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		if !hasState {
 			return r.convergeInit(ctx, proxy, cluster, release, setReady)
 		}
-		// The cluster has state; a finished auto-init Job that produced (or raced) it is
-		// scaffolding whose record is the state itself - reap it so nothing lingers.
+		// The cluster has state, but that is not on its own proof the init finished: zarf
+		// writes state early and can fail after, leaving a cluster with state and no registry.
+		// So an auto-init release settles its own init Job before anything deploys.
 		if proxy.Spec.Init != nil && proxy.Spec.Init.AutoInit {
-			if err := r.reapInitJob(ctx, release); err != nil {
+			hold, err := r.settleInitJob(ctx, release, setReady)
+			if err != nil {
 				return nil, err
+			}
+			if hold {
+				return nil, nil
 			}
 		}
 	}
@@ -239,26 +244,40 @@ func (r *ZarfPackageProxyReconciler) convergeInit(ctx context.Context, proxy *ad
 	return job, nil
 }
 
-// reapInitJob deletes the release's finished init Job once its cluster carries zarf state - the
-// state is the record, so a finished init Job is scaffolding. A still-running one is left alone;
-// it holds the §6 step 6 slot until it finishes.
-func (r *ZarfPackageProxyReconciler) reapInitJob(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease) error {
+// settleInitJob decides what an auto-init release's own init Job means now that its cluster
+// carries zarf state, and reports whether the release holds instead of deploying.
+//
+// A completed Job is scaffolding - the state is the record - so it is deleted and the release
+// proceeds. A *failed* one is the case worth care: zarf writes state before it finishes, so a
+// failed init leaves a cluster that has state and may have no registry, and there is no way
+// from here to tell that apart from a cluster someone else initialized properly. Holding with
+// the failure visible is the honest answer; deploying onto it would bury the failure under a
+// deploy that reads as success. A running Job holds the §6 step 6 slot until it finishes.
+func (r *ZarfPackageProxyReconciler) settleInitJob(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, setReady func(metav1.ConditionStatus, string, string)) (bool, error) {
 	job := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-init"}, job)
 	if apierrors.IsNotFound(err) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if DeployJobPhase(job, addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseDeploying {
-		return nil
+
+	switch DeployJobPhase(job, addonsv1alpha1.StrategyReconcile) {
+	case addonsv1alpha1.PhaseDeploying:
+		release.Status.Phase = addonsv1alpha1.PhaseDeploying
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonInitializing,
+			"the init Job is deploying the init package")
+		return true, nil
+	case addonsv1alpha1.PhaseFailed:
+		return true, r.absorbFinishedInitJob(ctx, release, job)
 	}
+
 	propagation := metav1.DeletePropagationBackground
 	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
 // clusterSlotHolder returns the name of the deploy or removal Job currently running against
