@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e97784dc.js";
+            window.path_to_searchindex_js = "../searchindex-85375336.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-2d1c84fc.js"></script>
+        <script src="../toc-9ab3151e.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -186,8 +186,8 @@
 <p><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/workflows/release.yaml"><code>.github/workflows/release.yaml</code></a> builds and publishes the release artifacts. It fires on any pushed tag, and in practice that tag comes from <a href="release-please.html"><code>release-please.yaml</code></a> merging its release pull request.</p>
 <p>What it produces, from <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.goreleaser.yaml"><code>.goreleaser.yaml</code></a>:</p>
 <ul>
-<li>one binary per <code>goos</code>/<code>goarch</code> pair, version and commit baked in via <code>-ldflags -X</code></li>
-<li>a <code>tar.gz</code> per platform, <code>zip</code> on Windows, named to match <code>uname</code> output</li>
+<li>one <code>linux</code> binary per <code>goarch</code>, version and commit baked in via <code>-ldflags -X</code></li>
+<li>a <code>tar.gz</code> per architecture, named to match <code>uname</code> output</li>
 <li>the controller image <code>ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller</code>, built for <code>linux/amd64</code> and <code>linux/arm64</code> from <code>containers/manager/Dockerfile</code> and cosign-signed (<code>docker_signs:</code>) - which is why the workflow sets up QEMU, Buildx, and a ghcr.io login before goreleaser runs, and why the job holds <code>packages: write</code></li>
 <li><code>out/addon-components.yaml</code> and <code>out/metadata.yaml</code> - the component manifest and provider metadata clusterctl fetches by name from the release assets, rendered by the <code>release:manifests</code> before hook at the release version and checked for presence after publish</li>
 <li><code>checksums.txt</code>, an SBOM per archive, a cosign bundle per archive and for the checksums file</li>
