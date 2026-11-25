@@ -425,9 +425,6 @@ github.com/ProtonMail/go-crypto/openpgp/x448
 # github.com/STARRY-S/zip v0.2.3
 ## explicit; go 1.23
 github.com/STARRY-S/zip
-# github.com/ThalesIgnite/crypto11 v1.2.5
-## explicit; go 1.13
-github.com/ThalesIgnite/crypto11
 # github.com/acobaugh/osrelease v0.1.0
 ## explicit; go 1.17
 github.com/acobaugh/osrelease
@@ -1280,6 +1277,9 @@ github.com/dustin/go-humanize
 # github.com/dylibso/observe-sdk/go v0.0.0-20240828172851-9145d8ad07e1
 ## explicit; go 1.21
 github.com/dylibso/observe-sdk/go
+# github.com/eclipse-keypont/crypto11 v1.6.8
+## explicit; go 1.25.0
+github.com/eclipse-keypont/crypto11
 # github.com/elliotchance/phpserialize v1.4.0
 ## explicit
 github.com/elliotchance/phpserialize
@@ -1648,6 +1648,8 @@ github.com/goccy/go-yaml/parser
 github.com/goccy/go-yaml/printer
 github.com/goccy/go-yaml/scanner
 github.com/goccy/go-yaml/token
+# github.com/godbus/dbus/v5 v5.2.2
+## explicit; go 1.20
 # github.com/gofrs/flock v0.13.2
 ## explicit; go 1.26.0
 github.com/gofrs/flock
@@ -2524,8 +2526,8 @@ github.com/shibumi/go-pathspec
 # github.com/shopspring/decimal v1.6.0
 ## explicit; go 1.10
 github.com/shopspring/decimal
-# github.com/sigstore/cosign/v3 v3.1.3
-## explicit; go 1.26.0
+# github.com/sigstore/cosign/v3 v3.1.5
+## explicit; go 1.27
 github.com/sigstore/cosign/v3/cmd/cosign/cli/fulcio
 github.com/sigstore/cosign/v3/cmd/cosign/cli/options
 github.com/sigstore/cosign/v3/cmd/cosign/cli/rekor
@@ -3020,9 +3022,11 @@ github.com/zclconf/go-cty/cty/set
 # github.com/zeebo/xxh3 v1.1.1-0.20261118193009-e05079abbd7d
 ## explicit; go 1.22
 github.com/zeebo/xxh3
-# gitlab.com/gitlab-org/api/client-go v1.46.0
-## explicit; go 1.24.0
-gitlab.com/gitlab-org/api/client-go
+# gitlab.com/gitlab-org/api/client-go/v3 v3.13.0
+## explicit; go 1.26.0
+gitlab.com/gitlab-org/api/client-go/v3
+gitlab.com/gitlab-org/api/client-go/v3/internal/graphql
+gitlab.com/gitlab-org/api/client-go/v3/internal/graphqlfields
 # go.opentelemetry.io/auto/sdk v1.2.2
 ## explicit; go 1.25.0
 go.opentelemetry.io/auto/sdk
