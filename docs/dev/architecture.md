@@ -335,7 +335,7 @@ Directed Acyclic Graph (DAG) validation runs **at reconcile time, not admission*
 
 Verification is about *what* the artifact is. Reachability is the separate question of whether the controller can get to the registry at all, and in an air gap the answer usually involves a credential and a certificate authority nothing public signed.
 
-Four fields on `spec.package` - and on `spec.init.package`, which is the same type - cover it:
+Five fields on `spec.package` - and on `spec.init.package`, which is the same type - cover it:
 
 | Field                   | What it supplies                                                                                               |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------- |

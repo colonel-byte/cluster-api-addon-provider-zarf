@@ -21,6 +21,10 @@ So resolution passes a `CredentialFunc` built for that one call, and a `Transpor
 
 Cargoship had no such hook - `distro.Load` builds the oras modifier list internally from `RemoteOptions` alone - so it writes a merged Docker config file on its cache volume and accepts a documented last-writer-wins where two resources name the same registry with different credentials. We do not inherit that shortcut.
 
+### The scheme negotiator is scoped per call for the same reason
+
+`zoci.NewRemote` probes for plain HTTP when `PlainHTTP` is set, through `ocischeme.From(ctx)` - a package-level negotiator that caches its answer per registry host for the whole process, failures included for 30 seconds. In a CLI that is right; in this controller it means a proxy that cannot verify a registry's certificate caches that failure *for every other proxy naming the same registry*, correctly configured or not. The e2e suite found it the honest way: three cases that should have resolved inherited the refusal of the case that should not have. So `internal/resolver` installs a negotiator per resolution. The zero TTL is the second half of the same problem - a long-lived process holding a scheme decision forever - and a per-call negotiator answers both.
+
 ## The deploy pod gets a file, because it has no other way
 
 `packager.LoadOptions` - what the deploy subcommand calls `LoadPackage` with - carries `types.RemoteOptions` and nothing else:

@@ -151,6 +151,45 @@ Naming a key makes verification a **precondition**: an unsigned package, a bad s
 
 Leaving it unset verifies nothing, and the controller says so in its log rather than pretending otherwise. The `PackageSignatureVerified` condition is **absent** in that case, not `True`.
 
+## Reach a registry that needs credentials or a private CA
+
+An air-gapped registry usually wants both: a pull credential, and a certificate authority nothing public signed. Both are named per package, beside the repository they apply to.
+
+```sh
+kubectl create secret docker-registry registry-creds \
+  --docker-server=registry.internal \
+  --docker-username=zarf-pull \
+  --docker-password="$REGISTRY_PASSWORD"
+kubectl create configmap registry-ca --from-file=ca.crt=internal-ca.crt
+```
+
+```yaml
+spec:
+  package:
+    repository: registry.internal/packages/podinfo
+    version: "1.0.0"
+    pullSecretRef:
+      name: registry-creds
+    caBundleConfigMapRef:
+      name: registry-ca
+```
+
+| Field                   | What it names                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `pullSecretRef`         | A `kubernetes.io/dockerconfigjson` Secret, exactly what `kubectl create secret docker-registry` writes. Unset means anonymous   |
+| `caBundleConfigMapRef`  | A ConfigMap holding PEM under `ca.crt`. A CA is not a secret, so this is the usual form                                         |
+| `caBundleSecretRef`     | The same from a Secret, because cert-manager writes its CAs into Secrets. One or the other, not both                            |
+| `fromZarfState`         | Both, read from this management cluster's own Zarf deployment, for the common case where the registry is the one Zarf installed |
+| `insecureSkipTLSVerify` | Skips certificate verification. The escape hatch, and per-package, so one unfixable registry cannot lower the fleet's bar       |
+
+Three things are worth knowing before you use them:
+
+- **The CA is added to the system roots, not substituted for them.** A mirror sitting in front of a public registry keeps working.
+- **Every reference resolves in the proxy's own namespace** unless the operator started the controller with `--secret-namespaces` naming another. A refused cross-namespace reference says so, with reason `CrossNamespaceNotEnabled`.
+- **`fromZarfState` supplies the credentials *and* the CA**, so naming it alongside `pullSecretRef` or either CA reference is refused by the API server rather than silently half-applied.
+
+The same fields exist on `spec.init.package`, and an init package in a different registry from the one it installs is a normal arrangement - so set them there too rather than assuming the main package's apply.
+
 ## Choose how it behaves over time
 
 | `spec.strategy`       | Behaviour                                                                                         |
