@@ -432,7 +432,7 @@ require (
 	github.com/sigstore/sigstore v1.11.4 // indirect
 	github.com/sigstore/sigstore-go v1.4.1 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.11.4 // indirect
-	github.com/sigstore/sigstore/pkg/signature/kms/azure v1.11.3 // indirect
+	github.com/sigstore/sigstore/pkg/signature/kms/azure v1.11.4 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/gcp v1.11.4 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.11.4 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.2.2 // indirect
