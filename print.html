@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0d1eddda.js";
+            window.path_to_searchindex_js = "searchindex-27afa2a5.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-db8ebe34.js"></script>
+        <script src="toc-48ae56d2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -285,6 +285,338 @@ go run ./magefiles/core generate:document   # regenerate the mdBook pages
 <p>Where a page pins this project’s own version - an image tag, a release archive’s filename - it needs release-please annotations <em>and</em> an entry in the release-please config, or it goes stale on the next release. <a href="AGENTS.html"><code>docs/AGENTS.md</code></a> has the exact form, including why the per-line marker is the wrong one to use inside a fenced block.</p>
 <h2 id="what-does-not-belong-here"><a class="header" href="#what-does-not-belong-here">What does not belong here</a></h2>
 <p>Anything a contributor needs and an operator does not: build flags, test harness setup, release mechanics. That is <a href="dev/README.html"><code>docs/dev/</code></a>. Decisions and their tradeoffs are <a href="agent/README.html"><code>docs/agent/</code></a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="bootstrap-order"><a class="header" href="#bootstrap-order">Bootstrap order</a></h1>
+<p>The order a first install has to follow, and why. If you deploy one package to one already-initialized cluster, you do not need this page. If you are standing up clusters from nothing - which is the case this provider exists for - the ordering is the part that fails, and it fails by waiting rather than by erroring.</p>
+<p>This page is the declarative counterpart to <a href="https://github.com/colonel-byte/ansible-collection-zarf/blob/main/ansible/examples/playbooks/zarf-bundle-order.yml"><code>zarf-bundle-order.yml</code></a> in the Ansible collection, which performs the same ordering imperatively against a single cluster. The constraint is identical; what differs is that you describe the end state and the controller sequences it, across every matching cluster, instead of you sequencing it once per cluster.</p>
+<h2 id="the-constraint"><a class="header" href="#the-constraint">The constraint</a></h2>
+<p>Zarf’s own internal registry wants persistent storage. Your storage provider is a package, and a package’s images are pulled from a registry. On a cluster with neither, that is a cycle:</p>
+<pre><code>zarf init ──needs──&gt; a StorageClass ──provided by──&gt; a storage package ──needs──&gt; a registry ──provided by──&gt; zarf init
+</code></pre>
+<p>Nothing reports this as an error. <code>zarf init</code> stands up its injector and a temporary seed registry, then the permanent registry’s <code>PersistentVolumeClaim</code> goes <code>Pending</code> and stays there, because nothing in the cluster provisions volumes yet. Meanwhile every other package you declared sits in <code>Pending</code> with reason <code>WaitingForZarfState</code>, because the init-first gate holds non-init packages until the cluster has Zarf state. The cluster looks busy and is stuck.</p>
+<p>You break the cycle in one of four ways. They are listed cheapest-first, and the first one is the right answer far more often than it looks.</p>
+<h2 id="option-1-provide-storage-outside-the-package-system"><a class="header" href="#option-1-provide-storage-outside-the-package-system">Option 1: provide storage outside the package system</a></h2>
+<p>If a <code>StorageClass</code> already exists when <code>zarf init</code> runs, there is no cycle and no ordering problem. Nothing to sequence, nothing to stage, one proxy.</p>
+<p>This is the right answer whenever the storage is something your cluster images or your infrastructure provider can carry: <code>local-path</code> on a single-node or lab cluster, a CSI driver your node image already ships, a cloud provider’s default class, or a Cluster API <code>ClusterResourceSet</code> that applies the provisioner as the cluster comes up.</p>
+<p><code>local-path</code> as a <code>ClusterResourceSet</code>, applied by Cluster API itself at cluster creation:</p>
+<pre><code class="language-yaml">apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-storage
+  namespace: default
+data:
+  # The provisioner's own manifest. Stage it from
+  # https://github.com/rancher/local-path-provisioner/blob/v0.0.37/deploy/local-path-storage.yaml
+  local-path-storage.yaml: |
+    # ... contents of local-path-storage.yaml ...
+---
+apiVersion: addons.cluster.x-k8s.io/v1beta1
+kind: ClusterResourceSet
+metadata:
+  name: local-path-storage
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      storage: local-path
+  resources:
+    - name: local-path-storage
+      kind: ConfigMap
+  strategy: ApplyOnce
+</code></pre>
+<p>Then the whole Zarf side is one proxy, because by the time it runs there is storage:</p>
+<pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageProxy
+metadata:
+  name: baseline
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      zarf: enabled
+  package:
+    repository: registry.internal/packages/baseline
+    version: "1.0.0"
+    api: v1beta1
+  init:
+    autoInit: true
+    package:
+      repository: registry.internal/packages/init-slim
+      version: "v1.0.1"
+      api: v1beta1
+    components:
+      - name: zarf-injector
+      - name: zarf-seed-registry
+      - name: zarf-registry
+      - name: zarf-agent
+</code></pre>
+<p>Two details in that <code>init</code> block that are easy to get wrong:</p>
+<ul>
+<li><strong><code>init.components</code> is not optional in practice.</strong> An init package built to bring a cluster up in stages marks every component optional, so the default selection - required components only - is empty, and the init deploys nothing while reporting success. Name the components you want.</li>
+<li><strong><code>autoInit</code> is keyed on observed cluster state, never on a name.</strong> The controller probes for Zarf state and only initializes a cluster that has none, so this commutes with a fleet that manages init through its own proxy. Whoever gets there first wins, and the other no-ops.</li>
+</ul>
+<p><strong>Two things <code>local-path</code> will want on a real cluster</strong>, both learned by running it rather than reading about it. Its volume-provisioning helper pod mounts a <code>hostPath</code>, which the <code>baseline</code> Pod Security standard forbids - so its namespace needs <code>pod-security.kubernetes.io/enforce: privileged</code>. And a single-node cluster whose only node carries a control-plane <code>NoSchedule</code> taint has nowhere to put the registry: Zarf’s injector treats any <code>NoSchedule</code> or <code>NoExecute</code> taint as disqualifying and reports <code>no suitable injector image or node exists</code>.</p>
+<h2 id="option-2-put-the-storage-inside-a-custom-init-package"><a class="header" href="#option-2-put-the-storage-inside-a-custom-init-package">Option 2: put the storage inside a custom init package</a></h2>
+<p>Zarf’s component <code>import</code> mechanism composes a <code>ZarfInitConfig</code> that carries your storage provider’s components alongside the registry’s. One package, one proxy, no ordering - the cycle is resolved inside the package instead of between packages.</p>
+<p>This is the documented escape hatch for exactly this constraint, and the cost is that each fleet segment needing different storage carries its own init package. Worth it when storage genuinely cannot exist before init; not worth it otherwise, because you have taken on building and maintaining an init package.</p>
+<h2 id="option-3-let-the-whole-thing-wait-on-a-seeded-registry"><a class="header" href="#option-3-let-the-whole-thing-wait-on-a-seeded-registry">Option 3: let the whole thing wait on a seeded registry</a></h2>
+<p>If your storage provider can run from an ephemeral registry, you can order the pieces with <code>dependsOn</code> and let the controller sequence them. The seed registry that <code>zarf init</code> stands up before the permanent one is enough to pull from:</p>
+<pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageProxy
+metadata:
+  name: zarf-init
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      zarf: enabled
+  strategy: Reconcile
+  deletionPolicy: Retain
+  package:
+    repository: registry.internal/packages/init-slim
+    version: "v1.0.1"
+    api: v1beta1
+  components:
+    - name: zarf-injector
+    - name: zarf-seed-registry
+    - name: zarf-registry
+    - name: zarf-agent
+---
+apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageProxy
+metadata:
+  name: storage
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      zarf: enabled
+  dependsOn:
+    - zarf-init
+  package:
+    repository: registry.internal/packages/local-path
+    version: "0.0.37"
+    api: v1beta1
+</code></pre>
+<p>The init package is declared as a package in its own right here, not through <code>init.autoInit</code>. It resolves as <code>ZarfInitConfig</code>, which makes it init-capable, so the gate lets it take the cluster’s deploy slot while everything else waits. <code>dependsOn</code> then holds <code>storage</code> until that release reports deployed, and <code>Retain</code> keeps a later deletion of the proxy from uninstalling the thing the cluster is built on.</p>
+<p>Whether this works depends on your storage provider tolerating a registry that is about to be replaced. If it does not, you are in option 1 or 2.</p>
+<h2 id="option-4-stage-it-in-two-passes-like-the-ansible-playbook"><a class="header" href="#option-4-stage-it-in-two-passes-like-the-ansible-playbook">Option 4: stage it in two passes, like the Ansible playbook</a></h2>
+<p>The Ansible flow deploys the init package <strong>twice</strong>: once with seed components only, then the storage package, then init again with the full component set - because the permanent registry cannot come up until storage exists, and storage cannot be pulled until the seed registry does.</p>
+<p>You can do the same here, with one proxy and two commits. Declare it with the seed components:</p>
+<pre><code class="language-yaml">spec:
+  components:
+    - name: zarf-injector
+    - name: zarf-seed-registry
+</code></pre>
+<p>let the storage proxy land, then edit the same proxy to the full set:</p>
+<pre><code class="language-yaml">spec:
+  components:
+    - name: zarf-injector
+    - name: zarf-seed-registry
+    - name: zarf-registry
+    - name: zarf-agent
+</code></pre>
+<p>Editing the component list re-renders the deploy and the package redeploys with the wider selection, which is Zarf doing an in-place upgrade of a package it already has a record for.</p>
+<p><strong>What you cannot do today is split those two passes across two proxies.</strong> Both would manage the same package name, so both would own the same deployed-package record on the cluster, and this provider has no <code>takeOwnership</code> knob to hand one to the other. So the staging is a sequence of edits - a GitOps commit each - rather than something the DAG performs for you. If your bootstrap genuinely needs two passes without a human between them, option 2 is the one that gets you there.</p>
+<h2 id="day-two"><a class="header" href="#day-two">Day two</a></h2>
+<p>Once a cluster has Zarf state, none of the above applies to it again. The gate is open, <code>autoInit</code> no-ops because it probes and finds state, and packages deploy in whatever order <code>dependsOn</code> describes.</p>
+<p>The Ansible playbook distinguishes bootstrap from convergence by inspecting what is installed and branching. Here that distinction does not exist, because the controller re-derives it on every pass: a release that is already on the declared digest is left alone, a release whose proxy moved to a new version redeploys, and <code>ApplyOnce</code> packages adopt zarf’s existing record rather than re-running. You declare the end state once and the same declaration is correct on day one and day two.</p>
+<p>What still needs a person:</p>
+<ul>
+<li><strong>A new version</strong> - bump <code>spec.package.version</code>. Nothing moves on its own, including a re-pushed tag, which raises <code>TagDrift</code> and waits.</li>
+<li><strong>A failed deploy</strong> - the controller does not yet retry on a timer. Editing the spec is what re-runs it.</li>
+<li><strong>A failed init</strong> - the release holds with <code>InitFailed</code> and the failing Job is kept as evidence. Nothing deploys onto a half-initialized cluster, which is deliberate: a cluster with Zarf state and no registry is indistinguishable from a properly initialized one from the outside, so the provider refuses to guess.</li>
+</ul>
+<h2 id="migrating-a-management-cluster"><a class="header" href="#migrating-a-management-cluster">Migrating a management cluster</a></h2>
+<p><code>clusterctl move</code> carries a <code>Cluster</code> to a new management cluster. It does not carry your <code>ZarfPackageProxy</code> objects, and that is not a defect: a proxy is owned by nothing on purpose - it selects clusters by label and spans a fleet - so it is in no cluster’s object graph and clusterctl has no reason to associate it with the cluster being moved. The <code>ZarfPackageRelease</code> objects do not survive either; they are owner-referenced to the <code>Cluster</code>, so Kubernetes garbage-collects them when the move deletes the source <code>Cluster</code> at the end.</p>
+<p>What is left untouched is the part that matters. <strong>Zarf’s record of what is deployed lives on the workload cluster, not on the management cluster</strong>, so a migration loses bookkeeping, not state. Verified by moving one: the deployed content and <code>zarf-package-&lt;name&gt;</code> secrets are exactly as they were.</p>
+<p>So the runbook is:</p>
+<ol>
+<li><code>clusterctl move --to-kubeconfig=...</code> as normal. The clusters arrive.</li>
+<li><strong>Re-apply your proxies to the new management cluster.</strong> They are declarations and should already be in Git, which is the whole reason this step is cheap.</li>
+<li>The controller re-stamps a release per matching cluster and converges.</li>
+</ol>
+<p>Step 3 behaves differently by strategy, and it is worth knowing which you have:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>spec.strategy</code></th><th>What happens after the proxies are re-applied</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ApplyOnce</code></td><td>The rebuilt release probes the cluster, finds Zarf’s existing record, and completes with reason <code>AdoptedExistingRecord</code>. Nothing re-runs</td></tr>
+<tr><td><code>Reconcile</code></td><td>The rebuilt release has no deploy history to compare against, so it deploys the declared digest again - a redeploy per cluster, not a no-op</td></tr>
+</tbody>
+</table>
+</div>
+<p>That <code>Reconcile</code> row is the one to plan around. The redeploy is of the same digest, so it converges on the state the cluster is already in, but on a large fleet it is a burst of deploy Jobs and registry pulls immediately after a migration. One deploy Job runs per cluster at a time, so it is paced rather than simultaneous - but pace it further if that matters: move in batches, or re-apply the proxies in batches rather than all at once.</p>
+<h2 id="checking-where-a-cluster-is"><a class="header" href="#checking-where-a-cluster-is">Checking where a cluster is</a></h2>
+<pre><code class="language-sh">kubectl get zarfpackagerelease -o custom-columns='NAME:.metadata.name,CLUSTER:.spec.clusterRef.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].reason'
+</code></pre>
+<p>A fleet mid-bootstrap reads as a column of <code>Pending</code>/<code>WaitingForZarfState</code> with one <code>Deploying</code> - the init package holding its cluster’s slot. That is the system working; one deploy or removal Job runs per cluster at a time, so the ordering you declared is an invariant rather than a race.</p>
+<p>To see whether a cluster is initialized at all, ask the cluster:</p>
+<pre><code class="language-sh">kubectl --kubeconfig ./workload.kubeconfig get secret -n zarf zarf-state
+</code></pre>
+<p>And what Zarf believes is deployed there:</p>
+<pre><code class="language-sh">kubectl --kubeconfig ./workload.kubeconfig get secret -n zarf -o name | grep zarf-package-
+</code></pre>
+<p>Those secrets, not the objects on the management cluster, are what <code>ApplyOnce</code> adoption and uninstall both key on. Deleting a release does not delete them; that is why a recreated release adopts instead of re-running a seed.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
+<p>What you end up with: this provider running in a Cluster API management cluster, and one Zarf package deployed to a workload cluster because you declared that it should be.</p>
+<!-- x-release-please-start-version -->
+<p>Every command here was run against <code>v0.1.1</code>.</p>
+<!-- x-release-please-end-version -->
+<p>Nothing in this guide reaches the public internet from the workload cluster. The packages come from a registry you stage them in, which is the point of the thing.</p>
+<h2 id="what-you-need-first"><a class="header" href="#what-you-need-first">What you need first</a></h2>
+<ul>
+<li>A <strong>Cluster API management cluster</strong> with core Cluster API installed and at least one <code>Cluster</code> whose control plane is up. <code>clusterctl init</code> is what puts core Cluster API there; this provider installs beside it.</li>
+<li><strong>An OCI registry</strong> the management cluster and the workload clusters can both reach, holding the packages you want to deploy. In an air gap this is the registry you staged everything into.</li>
+<li><strong>A Zarf-initialized workload cluster</strong>, or a plan for getting one - read <a href="#bootstrap-order">Bootstrap order</a> before you deploy anything real, because the order is the part that bites.</li>
+</ul>
+<h2 id="install-the-provider"><a class="header" href="#install-the-provider">Install the provider</a></h2>
+<p><code>clusterctl</code> learns about a provider it does not ship with from your own configuration file. Add this provider to <code>~/.config/cluster-api/clusterctl.yaml</code>:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-yaml">providers:
+  - name: zarf
+    url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.1.1/addon-components.yaml
+    type: AddonProvider
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>Then install it:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-sh">clusterctl init --addon zarf:v0.1.1
+</code></pre>
+<!-- x-release-please-end-version -->
+<p><code>clusterctl</code> fetches <code>addon-components.yaml</code> and <code>metadata.yaml</code> from that release, so pinning the version in the URL and on the command line is what keeps an install reproducible. To check what it would apply without applying it:</p>
+<!-- x-release-please-start-version -->
+<pre><code class="language-sh">clusterctl generate provider --addon zarf:v0.1.1
+</code></pre>
+<!-- x-release-please-end-version -->
+<p>Confirm the controller is up:</p>
+<pre><code class="language-sh">kubectl -n caapz-system wait --for=condition=Available deploy/caapz-controller-manager --timeout=180s
+</code></pre>
+<h3 id="air-gapped-installs"><a class="header" href="#air-gapped-installs">Air-gapped installs</a></h3>
+<p>The release also publishes the same component manifest as an OCI artifact and as a Zarf package, so the install itself can cross an air gap the same way everything else does. <a href="#installing-the-provider-with-rancher-turtles">Rancher Turtles</a> covers the OCI artifact path.</p>
+<h2 id="declare-a-package"><a class="header" href="#declare-a-package">Declare a package</a></h2>
+<p>A <code>ZarfPackageProxy</code> says <em>what</em> should be deployed and <em>where</em>. The controller matches it against <code>Cluster</code> objects by label, and stamps one <code>ZarfPackageRelease</code> per matching cluster to track that cluster’s own outcome.</p>
+<pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageProxy
+metadata:
+  name: podinfo
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      zarf: enabled
+  package:
+    repository: registry.internal/packages/podinfo
+    version: "1.0.0"
+    api: v1beta1
+</code></pre>
+<p>Label a cluster to opt it in:</p>
+<pre><code class="language-sh">kubectl label cluster my-cluster zarf=enabled
+</code></pre>
+<p>Only <code>Cluster</code> objects in the proxy’s own namespace match, unless the controller was started with <code>--cluster-namespaces</code> naming others. That default is deliberate: a label on a cluster in another team’s namespace cannot pull your package onto it.</p>
+<h2 id="watch-what-happens"><a class="header" href="#watch-what-happens">Watch what happens</a></h2>
+<p>The proxy reports what it resolved; each release reports what happened on its own cluster.</p>
+<pre><code class="language-sh">kubectl get zarfpackageproxy,zarfpackagerelease
+</code></pre>
+<pre><code class="language-sh">kubectl get zarfpackageproxy podinfo -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
+</code></pre>
+<p>Three things on the proxy are worth reading before anything else:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>What it tells you</th></tr>
+</thead>
+<tbody>
+<tr><td><code>status.resolvedDigest</code></td><td>The digest the tag resolved to, pinned on first resolution. Every pull and deploy uses this, never the tag</td></tr>
+<tr><td><code>status.packageKind</code></td><td><code>ZarfPackageConfig</code>, or <code>ZarfInitConfig</code> for an init package</td></tr>
+<tr><td><code>PackageResolved</code></td><td><code>False</code> here means nothing was deployed; the message says whether the registry, the signature, or the API claim refused</td></tr>
+</tbody>
+</table>
+</div>
+<p>And on a release:</p>
+<pre><code class="language-sh">kubectl get zarfpackagerelease podinfo-my-cluster -o jsonpath='{.status.phase}{"\n"}'
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Phase</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Pending</code></td><td>Waiting on something - read the <code>Ready</code> condition’s reason, which names it</td></tr>
+<tr><td><code>Deploying</code></td><td>A deploy Job is running</td></tr>
+<tr><td><code>Deployed</code></td><td>The declared digest is on the cluster</td></tr>
+<tr><td><code>Completed</code></td><td>An <code>ApplyOnce</code> package ran its one deploy</td></tr>
+<tr><td><code>Failed</code></td><td>The Job failed; the <code>Ready</code> condition carries the error the pod reported</td></tr>
+</tbody>
+</table>
+</div>
+<p>A <code>Pending</code> release is the normal case worth understanding rather than worrying about. The usual reasons:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Reason</th><th>What to do</th></tr>
+</thead>
+<tbody>
+<tr><td><code>WaitingForZarfState</code></td><td>The cluster is not Zarf-initialized. See <a href="#bootstrap-order">Bootstrap order</a></td></tr>
+<tr><td><code>WaitingForActiveDeploy</code></td><td>Another deploy or removal Job holds that cluster’s slot; one runs at a time</td></tr>
+<tr><td><code>WaitingForDependency</code></td><td>A <code>dependsOn</code> package has not deployed to this cluster yet</td></tr>
+<tr><td><code>DependencyNotFound</code></td><td>A <code>dependsOn</code> entry names no proxy in this namespace - usually a typo</td></tr>
+</tbody>
+</table>
+</div>
+<p>Each deploy runs in its own Job rather than in the controller, so when something fails the pod’s logs are the record:</p>
+<pre><code class="language-sh">kubectl logs job/podinfo-my-cluster-deploy
+</code></pre>
+<h2 id="verify-the-signature"><a class="header" href="#verify-the-signature">Verify the signature</a></h2>
+<p>A package’s signature is only verified if you name a key to verify it against. Put the Cosign public key in a Secret and reference it:</p>
+<pre><code class="language-sh">kubectl create secret generic cosign-pubkey --from-file=cosign.pub=cosign.pub
+</code></pre>
+<pre><code class="language-yaml">spec:
+  package:
+    repository: registry.internal/packages/podinfo
+    version: "1.0.0"
+    signatureKeySecretRef:
+      name: cosign-pubkey
+</code></pre>
+<p>Naming a key makes verification a <strong>precondition</strong>: an unsigned package, a bad signature, or one that cannot be checked is refused in the controller before any Job exists, so unverified content never reaches a pod holding a cluster’s kubeconfig. Verification binds to the pinned digest, so a re-pushed tag never inherits an earlier verification.</p>
+<p>Leaving it unset verifies nothing, and the controller says so in its log rather than pretending otherwise. The <code>PackageSignatureVerified</code> condition is <strong>absent</strong> in that case, not <code>True</code>.</p>
+<h2 id="choose-how-it-behaves-over-time"><a class="header" href="#choose-how-it-behaves-over-time">Choose how it behaves over time</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>spec.strategy</code></th><th>Behaviour</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Reconcile</code> (default)</td><td>Tracks the declared version. Bump <code>spec.package.version</code> and the package redeploys</td></tr>
+<tr><td><code>ApplyOnce</code></td><td>Deploys exactly once per cluster and never re-executes, even if the spec changes later. For seeds</td></tr>
+</tbody>
+</table>
+</div>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>spec.deletionPolicy</code></th><th>On deleting the proxy or release</th></tr>
+</thead>
+<tbody>
+<tr><td><code>Delete</code> (default)</td><td>Runs a removal Job that uninstalls the package, then releases the finalizer</td></tr>
+<tr><td><code>Retain</code></td><td>The release goes away immediately and the deployed package keeps running, owned by nobody</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>Retain</code> is the honest choice for large or foundational packages, where an orphaned-but-working package beats a half-removed one. An <code>ApplyOnce</code> package always behaves as <code>Retain</code> - a seed cannot be un-run.</p>
+<p>Deleting a workload <code>Cluster</code> never waits on any of this. A cluster being torn down is infrastructure going away, so the controller drops its removal work rather than blocking the teardown on a cluster that can no longer answer.</p>
+<h2 id="updating-a-package"><a class="header" href="#updating-a-package">Updating a package</a></h2>
+<p>Edit <code>spec.package.version</code>. The controller re-resolves, re-verifies, and redeploys, and <code>status.resolvedDigest</code> moves to the new digest.</p>
+<p>It will not move on its own. If someone re-pushes the same tag with different content, the proxy raises <code>TagDrift</code> with reason <code>TagContentChanged</code>, keeps running the digest it pinned, and waits for you - because a tag that changed under you is news, not an instruction.</p>
+<h2 id="where-to-go-next"><a class="header" href="#where-to-go-next">Where to go next</a></h2>
+<ul>
+<li><a href="#bootstrap-order">Bootstrap order</a> - the dependency order a first install has to follow, and why Zarf’s own registry is the hard part</li>
+<li><a href="#installing-the-provider-with-rancher-turtles">Rancher Turtles</a> - installing this provider through Turtles and the CAPI Operator</li>
+<li><a href="#architecture-proposal-cluster-api-add-on-provider-for-zarf-caapz"><code>docs/dev/architecture.md</code></a> - the full design, if you want to know why any of this is shaped the way it is</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="installing-the-provider-with-rancher-turtles"><a class="header" href="#installing-the-provider-with-rancher-turtles">Installing the provider with Rancher Turtles</a></h1>
 <p><a href="https://turtles.docs.rancher.com">Rancher Turtles</a> installs Cluster API providers through the Cluster API Operator rather than through <code>clusterctl</code>, so on a Turtles management cluster the install path is one <code>CAPIProvider</code> object. Everything else about the provider - the CRDs, the controller, the flags - is the same install; this guide mirrors cluster-api-provider-cargoship’s Turtles guide, adapted to a single addon provider.</p>
