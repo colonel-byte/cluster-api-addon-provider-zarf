@@ -17,9 +17,11 @@ package deploy
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/zarf-dev/zarf/src/api"
 	"sigs.k8s.io/yaml"
 
 	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/deployspec"
@@ -134,6 +136,72 @@ func TestOptions(t *testing.T) {
 	bad.Values = "::not yaml"
 	if _, _, err := Options(bad, "/cache"); err == nil {
 		t.Error("want an error for unparsable values")
+	}
+}
+
+// TestOptionsComponentFilter is the behaviour the filter exists for: an optional component -
+// the Zarf init package's k3s, which reprovisions the node - stays out of a deploy unless it is
+// named, and required components come along either way. Before this filter was applied
+// unconditionally, an empty spec.components deployed every component the package carried.
+func TestOptionsComponentFilter(t *testing.T) {
+	pkg := api.Package{
+		Components: []api.Component{
+			{
+				Name: "required-core",
+			},
+			{
+				Name:     "optional-k3s",
+				Optional: true,
+			},
+		},
+	}
+
+	cases := []struct {
+		name       string
+		components []deployspec.Component
+		want       []string
+	}{
+		{
+			name:       "nothing selected takes the package's defaults",
+			components: nil,
+			want:       []string{"required-core"},
+		},
+		{
+			name: "naming the optional one opts into it",
+			components: []deployspec.Component{
+				{
+					Name: "optional-k3s",
+				},
+			},
+			want: []string{"required-core", "optional-k3s"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := deployspec.Spec{
+				Package:    "registry.local/pkg@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				Components: tc.components,
+			}
+			loadOpts, _, err := Options(spec, "/cache")
+			if err != nil {
+				t.Fatalf("Options: %v", err)
+			}
+			if loadOpts.Filter == nil {
+				t.Fatal("Options left no component filter, so every component would deploy")
+			}
+			selected, err := loadOpts.Filter.Apply(pkg)
+			if err != nil {
+				t.Fatalf("applying the filter: %v", err)
+			}
+			got := make([]string, 0, len(selected))
+			for _, component := range selected {
+				got = append(got, component.Name)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("selected components = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
