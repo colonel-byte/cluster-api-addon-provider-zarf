@@ -434,7 +434,7 @@ require (
 	github.com/shopspring/decimal v1.6.0 // indirect
 	github.com/sigstore/protobuf-specs v0.5.3-0.20261124074135-7eccec11d5be // indirect
 	github.com/sigstore/rekor v1.6.5 // indirect
-	github.com/sigstore/rekor-tiles/v2 v2.4.6 // indirect
+	github.com/sigstore/rekor-tiles/v2 v2.4.7 // indirect
 	github.com/sigstore/sigstore v1.11.4 // indirect
 	github.com/sigstore/sigstore-go v1.4.1 // indirect
 	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.11.4 // indirect
