@@ -2727,6 +2727,28 @@ spec:
                       fleet that manages init through its own proxy: whoever initialized first, the probe finds
                       the state and auto-init no-ops.
                     type: boolean
+                  components:
+                    description: |-
+                      components filters which of the init package's components deploy, with spec.components'
+                      semantics: empty means the package's defaults. Init packages commonly mark every
+                      component optional so an operator can bring a cluster up in stages, and a package built
+                      that way deploys nothing at all unless its components are named here.
+                    items:
+                      description: ComponentSelector names a package component to
+                        deploy, optionally pinning its flavor.
+                      properties:
+                        flavor:
+                          description: flavor selects a component flavor, overriding
+                            auto-detection.
+                          type: string
+                        name:
+                          description: name is the component's name in the package
+                            definition.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
                   package:
                     description: |-
                       package is the init package to deploy - resolved, digest-pinned, and signature-verified
