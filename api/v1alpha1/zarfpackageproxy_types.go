@@ -190,7 +190,15 @@ const (
 	PackageAPIV1Beta1 ZarfPackageAPI = "v1beta1"
 )
 
-// ZarfPackageSource says where a package comes from and how it is verified.
+// ZarfPackageSource says where a package comes from, how it is reached, and how it is verified.
+//
+// Each rule below guards an optional boolean with has() before reading it. A boolean that was
+// never set is absent from the stored object rather than false, and reading an absent key is an
+// evaluation error that rejects the whole resource - so `!self.fromZarfState || ...` would refuse
+// every proxy that never mentioned the field. The sister repository learned this from an envtest
+// suite and nothing else would have caught it.
+// +kubebuilder:validation:XValidation:rule="!has(self.caBundleSecretRef) || !has(self.caBundleConfigMapRef)",message="set caBundleSecretRef or caBundleConfigMapRef, not both"
+// +kubebuilder:validation:XValidation:rule="!has(self.fromZarfState) || !self.fromZarfState || (!has(self.pullSecretRef) && !has(self.caBundleSecretRef) && !has(self.caBundleConfigMapRef))",message="fromZarfState supplies the credentials and the CA, so pullSecretRef, caBundleSecretRef and caBundleConfigMapRef must be unset"
 type ZarfPackageSource struct {
 	// repository is the OCI repository holding the package, without a tag.
 	// +required
@@ -210,8 +218,76 @@ type ZarfPackageSource struct {
 	// the package signature is verified against before extraction. When unset, signature
 	// verification is skipped. In the proxy's namespace unless its namespace field names one
 	// the controller's --secret-namespaces flag permits.
+	//
+	// Unlike the authentication fields below, this stands alongside fromZarfState rather than
+	// instead of it: Zarf's own state carries no signing key, so a package pulled from a Zarf
+	// registry is verified through this field like any other.
 	// +optional
 	SignatureKeySecretRef *NamespacedReference `json:"signatureKeySecretRef,omitempty"`
+
+	// pullSecretRef names a kubernetes.io/dockerconfigjson Secret holding credentials for the
+	// registry this package is pulled from - what `kubectl create secret docker-registry`
+	// produces. Empty means anonymous access, which is what every registry had to allow before
+	// this field existed.
+	//
+	// The credentials are needed in two places and reach them differently. The controller
+	// resolves and verifies the package itself, and passes them per-call, so two proxies
+	// pulling from two registries with two different credentials never see each other's. The
+	// deploy pod pulls the package by digest, and there they arrive as a mounted Docker config
+	// file the pod's own environment points at - the pod holds no management-cluster access and
+	// cannot look a Secret up, and one pod serves exactly one package, so a file scoped to the
+	// pod is scoped to the pull. See docs/agent/choice-registry-credentials.md.
+	// +optional
+	PullSecretRef *NamespacedReference `json:"pullSecretRef,omitempty"`
+
+	// caBundleSecretRef names a Secret holding PEM-encoded certificates to trust when reaching
+	// this registry, in its "ca.crt" key. They are trusted *in addition to* the system roots,
+	// so naming a private CA does not stop the controller reaching anything else.
+	//
+	// This is the field for a registry serving a certificate nothing public signed, and a
+	// Secret is the shape cert-manager already writes one into. Prefer it to
+	// insecureSkipTLSVerify, which verifies nothing at all.
+	// +optional
+	CABundleSecretRef *NamespacedReference `json:"caBundleSecretRef,omitempty"`
+
+	// caBundleConfigMapRef is caBundleSecretRef from a ConfigMap instead, same "ca.crt" key.
+	// A certificate authority is not secret, so a ConfigMap is the honest place for one; the
+	// Secret form exists because that is where cert-manager puts the CA it generates. Set one
+	// or the other, never both.
+	// +optional
+	CABundleConfigMapRef *NamespacedReference `json:"caBundleConfigMapRef,omitempty"`
+
+	// fromZarfState reads this registry's credentials and certificate authority out of the Zarf
+	// deployment in the *management* cluster, instead of from pullSecretRef and caBundleSecretRef.
+	//
+	// This is the air-gapped case with nothing to wire up: where the registry the fleet pulls
+	// packages from is a Zarf registry in the management cluster, Zarf generated its credentials
+	// and signed its certificate itself, and both are already present as the `zarf-state` and
+	// `zarf-registry-server-tls` secrets. The pull-only credentials are preferred over the push
+	// pair. It replaces the manual step of running `zarf tools get-creds`, creating a
+	// docker-registry Secret whose server had to match the repository host exactly, and
+	// extracting the CA by hand.
+	//
+	// The repository is still named in this spec rather than read from that state, and that is
+	// the part worth knowing: Zarf records the address a *node* reaches the registry at - a
+	// NodePort, or an external host - and a controller inside the cluster wants the service,
+	// which the state does not carry.
+	//
+	// No client certificate is presented, and that is measured rather than assumed: Zarf's
+	// registry chart sets `verify-client-cert-if-given`, so a client offering none is still
+	// served, and the certificate Zarf issues belongs to the per-node registry proxy rather than
+	// to anything a management-cluster controller runs.
+	// +optional
+	FromZarfState bool `json:"fromZarfState,omitempty"`
+
+	// insecureSkipTLSVerify accepts this registry's certificate without verifying it, rather
+	// than trusting it through caBundleSecretRef. It covers reaching the package registry only,
+	// and neither the management cluster's API nor any workload cluster's.
+	//
+	// Per-package on purpose rather than a manager flag: one registry nobody can issue a
+	// certificate for must not lower the bar for every other package in the fleet.
+	// +optional
+	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
 }
 
 // InitOptions controls Zarf initialization of a target cluster that has no Zarf state yet -

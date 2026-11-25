@@ -55,6 +55,7 @@
 - [choice-capi-client](agent/choice-capi-client.md)
 - [choice-deploy-job](agent/choice-deploy-job.md)
 - [choice-osv-vendor-overrides](agent/choice-osv-vendor-overrides.md)
+- [choice-registry-credentials](agent/choice-registry-credentials.md)
 - [choice-zarf-package](agent/choice-zarf-package.md)
 
 -----------
