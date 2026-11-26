@@ -214,6 +214,52 @@ The last row is the one that matters, because independent versioning is the whol
 
 If you do end up with two packages over one release, `deletionPolicy: Retain` on both is not optional - the default `Delete` runs precisely the removal that destroyed the registry above.
 
+## If you package a storage driver, make it prove itself ready
+
+Whatever comes next in the order starts when your package's deploy Job exits zero, and that Job exits when **Zarf** says the deploy succeeded. The controller does not inspect your driver. So if your package reports success while its controller pods are still starting, the next thing in the order runs against a `StorageClass` that cannot yet provision - and the failure surfaces somewhere else entirely, as a `PersistentVolumeClaim` stuck `Pending` in a package that is not at fault.
+
+Zarf installs charts with a readiness wait of its own, so the common case is handled: a chart whose Deployment never becomes available fails the deploy. That is not the same as the driver *working*, which is what the next stage depends on. Add a wait that only a functioning provisioner can satisfy.
+
+In a `zarf.dev/v1beta1` package that is a component action. `healthChecks` is **not** available - it is a `v1alpha1` field, and v1beta1 rejects it - so use `actions.onDeploy.onSuccess` with a `wait.cluster`:
+
+```yaml
+components:
+  - name: registry-bucket
+    manifests:
+      - name: registry-bucket
+        namespace: zarf
+        files:
+          - manifests/obc-registry-bucket.yaml
+    actions:
+      onDeploy:
+        onSuccess:
+          - wait:
+              cluster:
+                kind: ObjectBucketClaim
+                name: registry-bucket
+                namespace: zarf
+                condition: "'{.status.phase}'=Bound"
+            maxTotalSeconds: 2700
+            description: Waiting for ceph bucket to be created and bound
+```
+
+That is Rook-Ceph's, and it is the right shape because a `Bound` `ObjectBucketClaim` cannot exist unless the operator, the Ceph cluster, the object store and the provisioner are all genuinely working. Pick the equivalent for your driver:
+
+| Driver      | A wait that proves the chart is installed        | A wait that proves the driver works                                         |
+| ----------- | ------------------------------------------------ | --------------------------------------------------------------------------- |
+| Rook-Ceph   | the operator Deployment is available             | an `ObjectBucketClaim`, or a `CephCluster` whose `.status.phase` is `Ready` |
+| Longhorn    | the `longhorn-manager` DaemonSet rolled out      | a `PersistentVolumeClaim` against its `StorageClass` reaching `Bound`       |
+| vSphere CSI | the controller Deployment is available           | a `CSINode` per node, which only appears once the node plugin registers     |
+| AWS EBS CSI | the `ebs-csi-controller` Deployment is available | a `Bound` claim - it is the only thing that proves the credentials work too |
+| local-path  | the provisioner Deployment is available          | a `Bound` claim, which also proves the helper pod's `hostPath` is permitted |
+
+The second column is the one that matters, and for most drivers the honest answer is a claim that actually binds, because that exercises the credentials, the node plugin and the backing storage in one go. A small `PersistentVolumeClaim` plus a wait for `Bound`, deleted again by a later action, costs seconds and removes a whole class of ordering bug.
+
+Two things to get right:
+
+- **`maxTotalSeconds` is the real bound on how long your package can take**, and it is invisible to whoever declares the order. Ceph forming quorum on slow disks is minutes, not seconds; the 2700 above is not paranoia.
+- **Keep it under the deploy Job's timeout.** A package that waits longer than the Job is allowed to run fails the stage, and the pod log is the only place that says why.
+
 ## Day two
 
 Once a cluster has Zarf state, none of the above applies to it again. The gate is open, `autoInit` no-ops because it probes and finds state, and packages deploy in whatever order `dependsOn` describes.
