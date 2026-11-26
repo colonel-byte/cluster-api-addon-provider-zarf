@@ -27,3 +27,11 @@ releaseSeries:
   - major: 0 # x-release-please-major
     minor: 2 # x-release-please-minor
     contract: v1beta2
+  # The current series is deliberately listed again here: the duplicate is inert today, and is
+  # what keeps this series mapped the moment release-please bumps the marked entry above it.
+  - major: 0
+    minor: 2
+    contract: v1beta2
+  - major: 0
+    minor: 1
+    contract: v1beta2
