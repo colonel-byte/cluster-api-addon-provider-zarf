@@ -152,8 +152,13 @@ Nothing about deployment changes, which is most of the value of this shape:
 - resolution, digest pinning, signature verification, and the `spec.package.api` check, per stage
 - the registry reachability fields - credentials, CA bundles, `fromZarfState` - per stage, since a bundle may cross registries
 - `{{ .Cluster... }}` rendering of values and set entries against the target cluster
-- the deploy-spec Secret, the deploy Job, and the pod's termination-message result
-- the per-cluster deploy slot, which already serialises one deploy at a time per cluster - so stages are sequential per cluster for free, while different clusters progress independently
+- the pod's termination-message result, and the deploy Job's shape
+- the per-cluster deploy slot, which already stops two deploys running at once on one cluster, while different clusters progress independently
+
+Two things it does **not** get for free, both of which an earlier draft claimed:
+
+- **The slot prevents concurrency, not ordering.** `clusterSlotHolder` refuses to stamp a second Job while one is running on that cluster; nothing in it says stage 2 wins the slot before stage 4. Stage ordering is the bundle reconciler's job. The slot is also opt-out-able per `Cluster` through the `concurrent-deploys` annotation, so a bundle cannot lean on it as an invariant at all.
+- **The deploy Job and the deploy-spec Secret are per-release singletons, deliberately.** `release.Name + "-deploy-spec"` and `release.Name + <suffix>`, with `jobabsorb.go` stating the reason: *"Delete-and-recreate rather than generation-suffixed names, so the one-Job-per-cluster listing and the `<release>-deploy` lookup stay single-valued."* A multi-stage release needs per-stage names - `<release>-<stage>-deploy` plus a stage label - or a controller restart between creating a Job and writing status leaves a running Job whose stage nothing can recover. For an `ApplyOnce` seed stage, guessing wrong there is the destructive direction. That makes **Job creation the commit point**, with status read back off the labelled Job, and it puts the 63-character name limit on the budget alongside the release name that is already proxy-plus-cluster derived.
 - Zarf's own deployed-package records on the workload cluster, which remain the source of truth for what is installed
 
 ## Interactions worth getting right
@@ -208,9 +213,13 @@ One thing this leaves open, and it is small: **how a `dependsOn` entry resolves 
 
 ## Two managers of one package is a hard stop
 
-A package managed by both a bundle and a proxy on one cluster is the shared-record collision one layer up from the Helm one: both own `zarf-package-<name>`, so whichever ran last owns it, removing either uninstalls it, and re-running the other reverts it. The controller refuses to deploy either side rather than picking one, which is the stance it already takes wherever intent is ambiguous - the init gate will not guess at a half-initialized cluster, and `DependencyNotApplicable` is an error rather than a silent auto-satisfy.
+A package managed by both a bundle and a proxy on one cluster is the shared-record collision one layer up from the Helm one: both own `zarf-package-<name>`, so whichever ran last owns it, removing either uninstalls it, and re-running the other reverts it.
 
-**Both sides hold, not just the newcomer.** There is no ordering between two declarations that makes one of them the intruder, and holding only the second would let whichever reconciled first keep deploying over the other's work. Symmetric refusal is also deterministic under a race: two objects created together both observe the same conflict and both hold.
+**The refusal has to be narrower than "two managers", because one such pair is already a supported pattern.** `architecture.md`'s seed-then-manage handoff is exactly two managers of one package name: an `ApplyOnce` proxy seeds `zarf-init` and a `Reconcile` proxy takes over the same name for day-two lifecycle, which *"works by construction"* because the Reconcile path never consults the seed record and Zarf treats a same-name deploy as an in-place upgrade. A symmetric refusal keyed on "two managers, one package, one cluster" would hold both sides of every fleet using it, fleet-wide, with no obvious fix. An earlier draft of this section claimed the hard stop matched *"the stance it already takes wherever intent is ambiguous"*; that was wrong - §3 permits this ambiguity deliberately and documents its rules.
+
+So the conflict is **two managers that will both re-execute**. A manager whose release is `Completed` with `applied` set will never deploy again, so it cannot collide with anything; excluding it leaves the handoff alone and still catches the case bundles introduce, which is a bundle stage and a `Reconcile` proxy both converging one package name. The successor must still be `deletionPolicy: Retain` for the reason §3 gives - under `Delete`, deleting it runs `zarf package remove` on the shared name and destroys the record the seed's guarantee rests on.
+
+**Where it does apply, both sides hold rather than just the newcomer.** There is no ordering between two live declarations that makes one of them the intruder, and holding only the second would let whichever reconciled first keep deploying over the other's work. Symmetric refusal is also deterministic under a race: two objects created together both observe the same conflict and both hold.
 
 **It is a hold, not a failure.** Level-triggered like every other verdict here: narrow a selector, drop a stage, delete one object, and the next reconcile clears it with no operator action and no retry timer.
 
@@ -222,7 +231,7 @@ Three things have to be true at once, and each of them narrows it:
 
 - **The same *resolved package name*,** not the same repository and not the same object name. The record is keyed on the name the artifact declares, which the controller only learns at resolution and holds in `status.packageName`. Two objects naming different repositories that both build a package called `init-slim` do conflict; two objects on one repository that resolve to different names do not.
 - **On the same cluster.** Two managers whose selectors never overlap are not in conflict, and saying otherwise would make a fleet-wide refusal out of a per-cluster fact.
-- **Between distinct managing objects.** One bundle naming one package in several stages is the entire point of bundles and must never trip this. The check is over managers, never within one.
+- **Between distinct managing objects, both of which can still deploy.** One bundle naming one package in several stages is the entire point of bundles and must never trip this, so the check is over managers rather than within one - and a manager that has finished for good (`Completed` with `applied`) is not one of them, which is what keeps §3's seed-then-manage handoff working.
 
 Two consequences of keying on the resolved name. **This cannot be an admission check** - no CEL rule or webhook can see a name that only exists after a registry read, so the refusal lands as a condition after resolution and before any Job is stamped. And **the scan is not single-namespace**: with `--cluster-namespaces`, proxies in other namespaces may select the same cluster, so the search covers every namespace the controller is permitted to select from. Both kinds are read from the informer cache, as §5C's cycle walk already does.
 
@@ -237,23 +246,9 @@ The point of "loudly" is that whichever object somebody opens tells them the who
 | a Kubernetes Event on both objects                                             | `Warning`, because that is what `kubectl describe` shows and what alerting scrapes |
 | the controller log                                                             | once per transition, not once per reconcile                                        |
 
-Two of those four do not exist yet, and both are worth having for their own sake rather than only for conflicts.
+All four exist. The `EventRecorder` and the status columns were added after this section was first written - `internal/controller/events.go` emits one Event per changed condition from the single status-write choke point, and the proxy's columns are now `Ready`, `Deployed`, `Clusters`, `Status` and `Superseded` with `Strategy` and the resolution pair at `-o wide`. A bundle's conditions therefore get Events with no extra wiring, and the column idiom is settled rather than proposed.
 
-**There is no `EventRecorder` in this controller at all.** Nothing emits Events today, so `kubectl describe` on a proxy shows an empty event list and anything scraping Events sees nothing from this provider. Wiring a recorder into the manager is small, and a conflict is a good first thing to emit: a condition is only loud to somebody already looking at the right object, while an Event reaches somebody who is not.
-
-**`kubectl get` shows no status.** The proxy's printer columns are `Strategy`, `Version` and `Age` - nothing from `status` - so a conflict, a failed resolution and a dependency cycle all look identical at a terminal, and an operator has to know to reach for `-o yaml`. The release at least carries `Phase`.
-
-That gap is worth closing with a `Ready`-style column and the reason beside it, which is the `kubectl get helmrelease` idiom; printer columns do support the condition filter:
-
-```
-NAME          STRATEGY    VERSION   READY   STATUS                AGE
-baseline      Reconcile   1.0.0     True    Deployed              4d
-rook-storage  Reconcile   1.21.2    False   PackageManagedTwice   4d
-```
-
-**And that is why the status-shape question has to be answered first.** A one-line status needs one aggregate condition, and neither kind has one - the proxy's conditions are `DependenciesValid`, `PackageResolved`, `PackageSignatureVerified` and `TagDrift`, none of which means "this object is fine". So the printer column is the forcing function for the aggregate rather than a task beside it: decide what `Ready` means for a fleet-scoped object whose clusters may disagree, and the column follows for both kinds at once. A conflict is a useful case to design against, being unambiguously not-Ready on every cluster it touches.
-
-Printer columns are additive and render into `config/crd/bases`, so they break nothing and can land ahead of bundles.
+What a bundle still has to add is its own columns, which this design does not yet specify: the obvious set is `READY`, `DEPLOYED`/`CLUSTERS`, a `STAGES` count such as `4/6` - needing integer status fields for the same reason `readyClusterCount` does, since a column cannot take the length of a list - then `STATUS` and `AGE`, with `CLUSTER`, `STAGE`, `PHASE` and `REASON` on the release. A bundle without a stage count has exactly the blindness the proxy columns were added to fix.
 
 ### The migration path this forces, which is the point
 
@@ -263,7 +258,9 @@ This is also where a `takeOwnership` knob would eventually fit - §3's name-disc
 
 ## Re-running a stage
 
-A stage re-runs when its **applied identity** no longer matches what the bundle declares. That identity is the resolved digest plus the stage's own `components`, `values` and `set` - content changes move the digest, selection changes move the spec, and either is a reason to deploy again. A stage whose identity is unchanged is not re-run, which is what makes a bundle's packages independently updatable.
+A stage re-runs when its **applied identity** no longer matches what the bundle declares. That identity is the resolved digest plus the stage's own `components`, `values` and `set` - content changes move the digest, selection changes move the spec, and either is a reason to deploy again.
+
+**It has to be the controller's own hash of the rendered spec, not a value the pod reported back.** `status.deployedDigest` is parsed from the pod's termination message, and `jobabsorb.go` already tolerates its absence - *"the completed deploy pod left no readable result; deployedDigest stays unset"* - because a pod evicted or deleted by hand leaves nothing to read. Today that is cosmetic, since the re-run trigger is the Job's `spec-hash` annotation. Keying a stage's identity on the reported digest instead would make a lost termination message permanent: the recorded identity stays empty, so it mismatches forever, and the stage either hot-loops under `Reconcile` or records nothing under `ApplyOnce`. The existing `specHash` over the rendered deploy spec already covers the digest, components, values and set, so it is the thing to compare; the pod's digest stays a status field for display. A stage whose identity is unchanged is not re-run, which is what makes a bundle's packages independently updatable.
 
 Two rules, and they do not conflict the way the open question feared:
 
@@ -341,7 +338,9 @@ Three shapes, and they are not equally honest:
 | **Worst-of-releases** - True when every matched cluster is `Deployed`/`Completed` | `Ready=False`, reason from the worst cluster | Honest, but one broken cluster out of two hundred reads the same as total failure             |
 | **Counts beside the condition**                                                   | `READY 11/12` and the worst reason           | Needs integer status fields, because printer columns cannot take the length of a list         |
 
-**Worst-of-releases for the condition, counts for the columns.** The condition is what Events and `dependsOn`-style gating can key on, and it should mean "the fleet has converged", because that is the question an operator is actually asking. The counts are what stop a single bad cluster reading as a dead fleet. CAPI's own objects do exactly this - `MachineDeployment` carries `readyReplicas` and friends as integers precisely because a column cannot count a list.
+**A roll-up condition for the verdict, counts for the columns** - which is what `internal/controller/aggregate.go` now implements, and a bundle should reuse it rather than re-derive it. One correction to what this section originally said: the reason is taken from **the first cluster that is not done, in selector order**, not from the "worst" by severity. The implementation says why - every hold is equally a reason the fleet has not converged, and a stable choice beats one that moves as phases churn. A bundle reusing "the answer" needs to reuse that answer, not this paragraph's earlier one.
+
+The counts are what stop a single bad cluster reading as a dead fleet. CAPI's own objects do the same - `MachineDeployment` carries `readyReplicas` and friends as integers precisely because a column cannot count a list.
 
 The roll-up is nearly free to compute: the reconciler already resolves `status.matchingClusters` and already looks up each cluster's release through `findRelease`, so counting the ones in `Deployed` or `Completed` is a pass over work it has done. The reason to surface on failure is the worst release's `Ready` reason - which is why `WaitingForDependency` or `PackageManagedTwice` ends up on the proxy's own line, naming the actual blocker rather than a generic failure.
 
@@ -382,6 +381,19 @@ Two sub-questions D leaves, both small:
 - **Is a removed stage's record pruned or kept?** Keeping it means status grows without bound on a long-lived bundle; pruning loses the only evidence that the stage ever ran, which is what an `ApplyOnce` decision depends on. Keeping it, marked as no longer declared, is the safer default.
 - **What refuses an `ApplyOnce` edit - the API server or the reconciler?** CEL cannot see the per-cluster record, so this is a reconciler-time hold rather than admission, with the same consequence as every other verdict here: it is level-triggered, and putting the name back clears it.
 
+## What a first implementation needs that this design does not yet cover
+
+Found by a design review rather than by building, and recorded here so they are not rediscovered as surprises. Each is a prerequisite rather than a nice-to-have.
+
+- **A retry that is not a fleet-wide edit.** `BackoffLimit: 0` means one pod attempt, and there is no retry timer, so a single node eviction fails a stage. The documented lever - edit the spec - changes the stage's identity on *every* cluster, redeploying hundreds of healthy ones to retry one. At six stages across a large fleet, at least one eviction per rollout is the expected case rather than the unlucky one. Either a bounded per-release retry with backoff, which `finalize.go`'s removal retry already models, or a way to re-run one stage on one cluster.
+- **A bound on how much deploys at once.** There is no global concurrency cap: the deploy slot is per cluster, and nothing limits clusters in flight. Every cluster of a fleet created from one template enters stage 1 together, so the bursts are correlated in a way single-package proxies never are - hundreds of pods each pulling a multi-gigabyte package to an `emptyDir`, against one registry. A `--max-concurrent-deploys` or a per-bundle `maxConcurrentClusters` is worth having for proxies alone.
+- **`spec.paused` is not honoured anywhere today.** `clusterctl move` pauses objects before moving them; this controller keeps resolving, stamping and creating Jobs regardless. With a multi-stage bundle in flight a move can leave the source cluster's Job deploying one stage while the destination's rebuilt release starts the same stage again against the same workload cluster. This is a provider-conformance gap with or without bundles, and bundles make it dangerous rather than merely untidy.
+- **Stage 1 has to be init-capable, and nothing says so.** The init gate holds any package whose kind is not `ZarfInitConfig` on a cluster with no Zarf state, and a bundle drops `init.autoInit`. A bundle whose first stage is an ordinary package therefore holds forever with reason `WaitingForZarfState`, naming the symptom rather than the mistake. Either a check that stage 1 resolves as `ZarfInitConfig`, or a condition that says what is wrong.
+- **Per-stage resolution status.** The per-cluster record carries an applied digest; resolution is fleet-level and belongs on the bundle - `resolvedRef`, `resolvedDigest`, `packageName`, `packageKind` and the signature and drift conditions, per stage. That is a second status list this design does not have.
+- **A test plan.** The headline four-stage Ceph bootstrap is not reproducible in the CAPD-plus-local-registry e2e topology, so as specified it can never be regression-tested. A synthetic four-stage bundle over two trivial packages that deliberately share one Helm release would exercise every decision here and does fit the existing topology.
+- **One source per package, not one per stage.** `stages[]` of near-complete sources means a version bump is edited in two places, and a half-finished edit produces two digests of one package name - two revisions of one Helm release lineage with disagreeing values, which is the measured revert reintroduced inside a single object. Hoisting the sources to `spec.packages` with `stages[].packageRef` makes that structurally impossible and roughly halves the document.
+- **Why a second kind rather than a field.** The reuse table lists ten types reused verbatim against three genuinely new fields. That is the shape of `spec.stages[]` on `ZarfPackageProxy` plus `status.stages[]` on `ZarfPackageRelease`, which would reuse the slot, `dependsOn`, the roll-up, the columns, the finalizers, the Events and every watch *literally* rather than mirroring them, and would delete the cross-kind conflict detector, the cross-kind cycle walk and the `bundleRef` outright. None of the four reasons given under "Why the existing API cannot express it" is a reason a new *kind* is needed - they are reasons the existing *schema* is not enough. This design should either answer that or take it.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
@@ -391,7 +403,7 @@ These are the things to settle before writing a reconciler, and each one changes
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
 4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
 5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, reordering, or renaming one? Still open; the options are in [Editing a stage list that clusters have already run](#editing-a-stage-list-that-clusters-have-already-run), along with the one hazard that is sharper than it looks.
-6. **Status shape**, and it is the next thing worth building rather than a bundle prerequisite. See [One aggregate condition, and the column that needs it](#one-aggregate-condition-and-the-column-that-needs-it).
+6. ~~**Status shape.**~~ **Decided and implemented** for the proxy in `internal/controller/aggregate.go`: a `Ready` roll-up plus `clusterCount`, `readyClusterCount` and `supersededClusterCount`, with the reason taken from the first not-done cluster in selector order. A bundle reuses it. What a bundle still owes is its own printer columns, including a stage count - see [One aggregate condition, and the column that needs it](#one-aggregate-condition-and-the-column-that-needs-it).
 7. ~~**Conflict detection with proxies.**~~ **Decided: refuse, on both sides, loudly.** See [Two managers of one package is a hard stop](#two-managers-of-one-package-is-a-hard-stop).
 
 ## Out of scope for a first version
