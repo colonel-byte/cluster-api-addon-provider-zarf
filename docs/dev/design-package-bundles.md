@@ -201,6 +201,61 @@ So the linear-bundle rule never blocks a sequence; it only decides which object 
 
 One thing this leaves open, and it is small: **how a `dependsOn` entry resolves now that two kinds answer to a name.** The field is a bare string list resolved in the proxy's namespace. The backwards-compatible reading is that a name matches a proxy or a bundle in that namespace, and a name matching *both* is refused with a condition rather than guessed at - which keeps the existing field shape and makes the ambiguity detectable. A typed `{kind, name}` reference would be cleaner and would change an existing field.
 
+## Two managers of one package is a hard stop
+
+A package managed by both a bundle and a proxy on one cluster is the shared-record collision one layer up from the Helm one: both own `zarf-package-<name>`, so whichever ran last owns it, removing either uninstalls it, and re-running the other reverts it. The controller refuses to deploy either side rather than picking one, which is the stance it already takes wherever intent is ambiguous - the init gate will not guess at a half-initialized cluster, and `DependencyNotApplicable` is an error rather than a silent auto-satisfy.
+
+**Both sides hold, not just the newcomer.** There is no ordering between two declarations that makes one of them the intruder, and holding only the second would let whichever reconciled first keep deploying over the other's work. Symmetric refusal is also deterministic under a race: two objects created together both observe the same conflict and both hold.
+
+**It is a hold, not a failure.** Level-triggered like every other verdict here: narrow a selector, drop a stage, delete one object, and the next reconcile clears it with no operator action and no retry timer.
+
+**The DAG stop falls out for free.** A held package never reaches `Deployed`, so anything with `dependsOn` pointing at it is already held by `WaitingForDependency`. Nothing new is needed to stop dependents, and the blast radius stays the conflicting objects plus their dependents rather than the fleet - unrelated proxies on that cluster carry on.
+
+### What counts as a conflict
+
+Three things have to be true at once, and each of them narrows it:
+
+- **The same *resolved package name*,** not the same repository and not the same object name. The record is keyed on the name the artifact declares, which the controller only learns at resolution and holds in `status.packageName`. Two objects naming different repositories that both build a package called `init-slim` do conflict; two objects on one repository that resolve to different names do not.
+- **On the same cluster.** Two managers whose selectors never overlap are not in conflict, and saying otherwise would make a fleet-wide refusal out of a per-cluster fact.
+- **Between distinct managing objects.** One bundle naming one package in several stages is the entire point of bundles and must never trip this. The check is over managers, never within one.
+
+Two consequences of keying on the resolved name. **This cannot be an admission check** - no CEL rule or webhook can see a name that only exists after a registry read, so the refusal lands as a condition after resolution and before any Job is stamped. And **the scan is not single-namespace**: with `--cluster-namespaces`, proxies in other namespaces may select the same cluster, so the search covers every namespace the controller is permitted to select from. Both kinds are read from the informer cache, as §5C's cycle walk already does.
+
+### Loudly means every object an operator might look at
+
+The point of "loudly" is that whichever object somebody opens tells them the whole story, including the name of the other one:
+
+| Where                                                                          | What it says                                                                       |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| the bundle, and the proxy, fleet-level                                         | a `False` condition naming the other manager, the package, and the clusters        |
+| the `ZarfBundleRelease` and the `ZarfPackageRelease` for each affected cluster | `Pending` with the same reason, naming the other manager                           |
+| a Kubernetes Event on both objects                                             | `Warning`, because that is what `kubectl describe` shows and what alerting scrapes |
+| the controller log                                                             | once per transition, not once per reconcile                                        |
+
+Two of those four do not exist yet, and both are worth having for their own sake rather than only for conflicts.
+
+**There is no `EventRecorder` in this controller at all.** Nothing emits Events today, so `kubectl describe` on a proxy shows an empty event list and anything scraping Events sees nothing from this provider. Wiring a recorder into the manager is small, and a conflict is a good first thing to emit: a condition is only loud to somebody already looking at the right object, while an Event reaches somebody who is not.
+
+**`kubectl get` shows no status.** The proxy's printer columns are `Strategy`, `Version` and `Age` - nothing from `status` - so a conflict, a failed resolution and a dependency cycle all look identical at a terminal, and an operator has to know to reach for `-o yaml`. The release at least carries `Phase`.
+
+That gap is worth closing with a `Ready`-style column and the reason beside it, which is the `kubectl get helmrelease` idiom; printer columns do support the condition filter:
+
+```
+NAME          STRATEGY    VERSION   READY   STATUS                AGE
+baseline      Reconcile   1.0.0     True    Deployed              4d
+rook-storage  Reconcile   1.21.2    False   PackageManagedTwice   4d
+```
+
+**And that is why the status-shape question has to be answered first.** A one-line status needs one aggregate condition, and neither kind has one - the proxy's conditions are `DependenciesValid`, `PackageResolved`, `PackageSignatureVerified` and `TagDrift`, none of which means "this object is fine". So the printer column is the forcing function for the aggregate rather than a task beside it: decide what `Ready` means for a fleet-scoped object whose clusters may disagree, and the column follows for both kinds at once. A conflict is a useful case to design against, being unambiguously not-Ready on every cluster it touches.
+
+Printer columns are additive and render into `config/crd/bases`, so they break nothing and can land ahead of bundles.
+
+### The migration path this forces, which is the point
+
+Moving a package from a proxy to a bundle (or back) cannot be done by declaring both and letting one win. It is deliberate and two-step: set `deletionPolicy: Retain` so nothing uninstalls, delete the old manager, then let the new one adopt the cluster's existing record through the `ApplyOnce` probe. The hard stop is what makes that the only path, instead of a race whose outcome depends on which object reconciled first.
+
+This is also where a `takeOwnership` knob would eventually fit - §3's name-discontinuous handoff - and the hard stop is a better default than that knob, because it fails closed while the knob fails open.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
@@ -210,8 +265,8 @@ These are the things to settle before writing a reconciler, and each one changes
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
 4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
 5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, or reordering? A name per stage (rather than position alone) exists so this is answerable at all.
-6. **Status shape.** A per-cluster release is clear. What a fleet-wide bundle reports in its own status is the same unsolved question as proxy `Ready` aggregation, and should probably be answered once for both.
-7. **Conflict detection with proxies.** Refuse, warn, or document?
+6. **Status shape.** A per-cluster release is clear. What a fleet-wide bundle reports in its own status is the same unsolved question as proxy `Ready` aggregation, and should be answered once for both - it is what a `kubectl get` status column needs, which is the surface an operator actually reads. See [Loudly means every object an operator might look at](#loudly-means-every-object-an-operator-might-look-at).
+7. ~~**Conflict detection with proxies.**~~ **Decided: refuse, on both sides, loudly.** See [Two managers of one package is a hard stop](#two-managers-of-one-package-is-a-hard-stop).
 
 ## Out of scope for a first version
 
