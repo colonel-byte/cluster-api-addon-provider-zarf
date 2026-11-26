@@ -304,11 +304,34 @@ A stage can be correct only because of an *earlier* stage's side effect, and the
 
 Nothing in the stage list expresses "re-run me whenever an earlier stage does", and a first version should not invent it. The operator's lever is to bump both, and the design's obligation is to say so rather than to imply changed-stage-only is always sufficient. A per-stage `rerunAfterEarlierStages` flag is the obvious later addition if real bundles need it; a flag nobody has needed yet is not.
 
+## Adopting a cluster the bundle has not seen
+
+A bundle will meet clusters it did not bootstrap: ones brought up by hand or by the Ansible collection, ones whose `ZarfBundleRelease` was garbage-collected when `clusterctl move` deleted the source `Cluster`, and ones adopted into GitOps after the fact. It has to decide whether each `ApplyOnce` stage already happened there.
+
+**The two ways of being wrong are not symmetric, and that decides the bias.** Deciding "not satisfied" when a stage did run re-applies seed values over a converged cluster - measured to revert the permanent registry, and with upstream's `seedRegistry.persistence.enabled: false` to strip its storage configuration. Deciding "satisfied" when a stage did not run means a later stage deploys onto a cluster that is missing something and fails, loudly, with the failing Job kept as evidence. The first is destruction; the second is a recoverable error. So where the evidence is ambiguous, lean towards satisfied.
+
+| Option                                               | Cost                                          | Why it is or is not enough                                                                                                                                                                                                           |
+| ---------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A. Zarf state exists on the cluster**              | nothing - `hasZarfState` already exists       | Too coarse: state is evidence about the *init* package, yet it would satisfy every `ApplyOnce` stage, including a storage seed stage that never ran                                                                                  |
+| **B. Zarf's record for that stage's own package**    | nothing - `hasDeployedPackage` already exists | Per-stage evidence from the cluster itself. Cannot tell two stages of one package apart, which does not matter here: if the init package was deployed at all, re-running its seed stage is the dangerous act                         |
+| **C. An explicit operator declaration**              | a field or a Cluster annotation               | Unambiguous and auditable, but it is per-cluster toil, and forgetting it is the destructive direction                                                                                                                                |
+| **D. Refuse and hold until told**                    | a condition and a documented runbook          | Never destructive and never silently wrong, which is this controller's house style - but every migrated cluster then needs a human touch, where a proxy needs none                                                                   |
+| **E. Keep the stage record on the workload cluster** | a secret the deploy pod writes                | Solves move, re-creation and adoption at once, and matches the architecture's own principle that *Zarf's record of what is deployed lives on the workload cluster, not on the management cluster*. The most robust and the most work |
+
+**B is the one to start with, and it is also the cheapest thing that is not wrong.** It needs no API, no operator action and no new write path - `hasDeployedPackage(ctx, workload, <stage's package name>)` is the probe a proxy's `ApplyOnce` already uses. An `ApplyOnce` stage whose package Zarf has no record of has not run here; one it does have a record of is treated as done. That is correct for the converged cluster, correct for the mid-bootstrap cluster, and correct after a `clusterctl move`.
+
+Two holes B leaves, neither of which argues for a different starting point:
+
+- **A driver installed by something that is not Zarf** - a plain Helm install, or a `ClusterResourceSet` - leaves no Zarf record, so the seed stage runs and collides with the existing Helm release. That is the `takeOwnership` case, and it is already a known gap for proxies rather than something bundles introduce.
+- **A cluster whose init genuinely half-finished** - Zarf writes state early, so a record can exist for an init that never stood up a registry. B skips the seed stage and the next stage fails, which is the recoverable direction and the same thing the init gate already refuses to guess about.
+
+E is where this goes if B's holes start being hit in practice. It is worth preferring over C and D when that day comes, because it removes the question rather than delegating it: a bundle that remembers its own stages on the cluster they ran against does not need to infer anything, and `clusterctl move` stops being a special case for bundles the way it already is not one for Zarf's own records.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
 
-1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move`? A proposal: if the cluster already has Zarf state the first time the bundle reconciles it, mark every `ApplyOnce` stage satisfied without running it. That is consistent with how `autoInit` keys on observed state, and it is wrong for a cluster that has state but never finished - which is the same ambiguity the init gate already refuses to guess at.
+1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move` discarded the per-cluster state? Still open, but the option space is worked out in [Adopting a cluster the bundle has not seen](#adopting-a-cluster-the-bundle-has-not-seen), including which option is cheap enough to start with.
 2. ~~**May a `Reconcile` stage re-run out of order?**~~ **Decided: changed stages only, always in stage order.** See [Re-running a stage](#re-running-a-stage).
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
 4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
