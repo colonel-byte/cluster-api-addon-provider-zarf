@@ -110,7 +110,7 @@ func (r *ZarfPackageProxyReconciler) stampReleases(ctx context.Context, proxy *a
 		}
 		before := release.DeepCopy()
 		release.Status.Phase = addonsv1alpha1.PhasePending
-		if err := r.Status().Patch(ctx, release, client.MergeFrom(before)); err != nil {
+		if err := r.patchStatus(ctx, release, before); err != nil {
 			return err
 		}
 		log.Info("stamped release", "release", client.ObjectKeyFromObject(release), "cluster", cluster.Name)

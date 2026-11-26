@@ -91,7 +91,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 				Reason:  addonsv1alpha1.ReasonRenderFailed,
 				Message: renderErr.Error(),
 			})
-			if err := r.Status().Patch(ctx, release, client.MergeFrom(releaseBefore)); err != nil {
+			if err := r.patchStatus(ctx, release, releaseBefore); err != nil {
 				return err
 			}
 			log.Info("deploy spec rendering refused", "release", client.ObjectKeyFromObject(release),
@@ -119,7 +119,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 				Message: verified.Message,
 			})
 		}
-		if err := r.Status().Patch(ctx, release, client.MergeFrom(releaseBefore)); err != nil {
+		if err := r.patchStatus(ctx, release, releaseBefore); err != nil {
 			return err
 		}
 	}
