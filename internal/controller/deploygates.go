@@ -67,6 +67,20 @@ func (r *ZarfPackageProxyReconciler) convergeDeploys(ctx context.Context, proxy 
 	return nil
 }
 
+// applyOnceSupersededMessage reports whether an applied ApplyOnce release has been left behind
+// by its proxy - the declared version is no longer the one this cluster was seeded with - and
+// the message that says so. False means the declaration and the cluster agree, where there is
+// nothing to report and the release's existing reason is the better record.
+func applyOnceSupersededMessage(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease) (string, bool) {
+	seeded := release.Status.DeployedVersion
+	declared := proxy.Spec.Package.Version
+	if seeded == "" || declared == "" || declared == seeded {
+		return "", false
+	}
+	return fmt.Sprintf("this cluster was seeded with %s and ApplyOnce never re-executes, so the declared %s will not deploy here - switch the strategy to Reconcile, or re-seed deliberately",
+		seeded, declared), true
+}
+
 // convergeDeploy applies the gates to one release, mutating its status in place and returning
 // the Job to stamp when every gate passes. A nil Job with nil error means the release holds.
 func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, release *addonsv1alpha1.ZarfPackageRelease) (*batchv1.Job, error) {
@@ -80,8 +94,18 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	}
 
 	// §3's first tier: an applied ApplyOnce release never round-trips anywhere again.
+	//
+	// It speaks up only when the proxy has been bumped since the seed, which is the state an
+	// operator cannot otherwise see: the release reports Completed either way, and the only
+	// difference between "the declared version is deployed here" and "the declared version will
+	// never deploy here" is two fields compared by eye. When they agree there is nothing to add,
+	// and overwriting whatever reason recorded how this release completed - an adoption, say -
+	// would lose the more specific fact and re-write the condition on every pass.
 	if proxy.Spec.Strategy == addonsv1alpha1.StrategyApplyOnce && release.Status.Applied {
 		release.Status.Phase = addonsv1alpha1.PhaseCompleted
+		if message, diverged := applyOnceSupersededMessage(proxy, release); diverged {
+			setReady(metav1.ConditionTrue, addonsv1alpha1.ReasonAlreadySeeded, message)
+		}
 		return nil, nil
 	}
 

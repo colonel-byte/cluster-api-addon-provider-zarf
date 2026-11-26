@@ -225,6 +225,20 @@ The same fields exist on `spec.init.package`, and an init package in a different
 
 `Retain` is the honest choice for large or foundational packages, where an orphaned-but-working package beats a half-removed one. An `ApplyOnce` package always behaves as `Retain` - a seed cannot be un-run.
 
+**Bumping `spec.package.version` on an `ApplyOnce` proxy does not redeploy anything**, which is the contract rather than a bug - and the release says so instead of leaving you to compare fields:
+
+```sh
+kubectl get zarfpackagerelease seed-my-cluster -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}: {.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+```
+
+```
+AlreadySeeded: this cluster was seeded with 1.0.0 and ApplyOnce never re-executes, so the declared 2.0.0 will not deploy here - switch the strategy to Reconcile, or re-seed deliberately
+```
+
+The release says this only while the two disagree. An `ApplyOnce` release whose declared version is the one it was seeded with keeps whatever reason recorded how it completed - `AdoptedExistingRecord`, for a cluster whose package Zarf had already deployed before the proxy existed.
+
+The proxy still re-resolves and re-pins the new version, so `status.resolvedDigest` moves while the clusters keep what they were seeded with. If you want the new version on those clusters, either switch the proxy to `Reconcile` or remove zarf's deployed-package record on the cluster deliberately.
+
 Deleting a workload `Cluster` never waits on any of this. A cluster being torn down is infrastructure going away, so the controller drops its removal work rather than blocking the teardown on a cluster that can no longer answer.
 
 ## Updating a package
