@@ -171,6 +171,36 @@ Two consequences for this design:
 - **A stage's timeout is the Job's timeout.** A driver whose own wait exceeds it fails the stage, so the two have to be set with each other in mind.
 - **`maxTotalSeconds` inside the package is the real bound** on how long a stage can take, and it is invisible from the bundle. A stage that appears hung is usually a package waiting on something that will never happen.
 
+## A bundle is one node in the DAG
+
+A bundle is a **linear, isolated** run. Any `dependsOn` edge between whole objects is allowed - a proxy may depend on a bundle, a bundle on a proxy, a bundle on another bundle - and **no edge may point at a stage**. Stage 3 of a bundle cannot depend on anything; the stage list is its own and only order.
+
+This reuses the dependency machinery unchanged rather than extending it. `dependsOn` is already evaluated per cluster, not per fleet - the condition reads `every dependency is deployed on this cluster` - so the semantics fall out:
+
+| Edge            | Satisfied when                                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------------------------- |
+| proxy → bundle  | every stage of that bundle has been applied on *this* cluster                                               |
+| bundle → proxy  | that proxy's release is `Deployed` (or `Completed`, for `ApplyOnce`) on this cluster, before stage 1 starts |
+| bundle → bundle | the same rule, applied to the whole of the other bundle                                                     |
+
+**A bundle is all-or-nothing as a dependency target.** Partially complete is not a satisfying state, which is what makes it a single node rather than a sub-graph somebody can reach into.
+
+Three reasons the stage-level edge is excluded, beyond keeping the first revision small:
+
+- **It would be a second ordering mechanism over one object.** The stage list already says what runs when; a per-stage `dependsOn` would let the two disagree, and nothing good follows from that.
+- **Cycle detection would have to span `(object, stage)` pairs** rather than objects. Today a cycle is found over proxy names; a stage-level graph makes every bundle an N-node sub-graph, and the existing `DependencyCycle` detection would have to be rewritten rather than reused.
+- **A half-run bundle as a dependency target has no good answer** for status or for the deploy slot. "Stage 3 is done, stage 4 is not" is not a state another object should be able to build on, because the bundle is not finished converging and may yet re-run a stage.
+
+**The restriction costs nothing, which is why it is the right first revision.** If something genuinely has to happen between two stages, that is two bundles with a proxy between them - expressible entirely with object-level edges:
+
+```
+bundle: seed-and-storage  ──▶  proxy: something-else  ──▶  bundle: registry-and-images
+```
+
+So the linear-bundle rule never blocks a sequence; it only decides which object expresses it. A bundle that wants an external dependency in the middle is a bundle that should have been two.
+
+One thing this leaves open, and it is small: **how a `dependsOn` entry resolves now that two kinds answer to a name.** The field is a bare string list resolved in the proxy's namespace. The backwards-compatible reading is that a name matches a proxy or a bundle in that namespace, and a name matching *both* is refused with a condition rather than guessed at - which keeps the existing field shape and makes the ambiguity detectable. A typed `{kind, name}` reference would be cleaner and would change an existing field.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
@@ -178,7 +208,7 @@ These are the things to settle before writing a reconciler, and each one changes
 1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move`? A proposal: if the cluster already has Zarf state the first time the bundle reconciles it, mark every `ApplyOnce` stage satisfied without running it. That is consistent with how `autoInit` keys on observed state, and it is wrong for a cluster that has state but never finished - which is the same ambiguity the init gate already refuses to guess at.
 2. **May a `Reconcile` stage re-run out of order?** If `registry` is bumped, stages after it may or may not need re-running. Strictly-forward re-runs are simple to reason about; re-running only changed stages is what makes independent updates work. The two conflict when a changed early stage would revert a later one.
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
-4. **Is a bundle allowed to interleave with `dependsOn`?** Can a proxy depend on a bundle reaching its last stage, and should a bundle be able to depend on a proxy?
+4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
 5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, or reordering? A name per stage (rather than position alone) exists so this is answerable at all.
 6. **Status shape.** A per-cluster release is clear. What a fleet-wide bundle reports in its own status is the same unsolved question as proxy `Ready` aggregation, and should probably be answered once for both.
 7. **Conflict detection with proxies.** Refuse, warn, or document?
