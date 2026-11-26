@@ -83,10 +83,31 @@ Only `Cluster` objects in the proxy's own namespace match, unless the controller
 
 ## Watch what happens
 
-The proxy reports what it resolved; each release reports what happened on its own cluster.
+The proxy reports the fleet; each release reports what happened on its own cluster.
 
 ```sh
 kubectl get zarfpackageproxy,zarfpackagerelease
+```
+
+```
+NAME       READY   DEPLOYED   CLUSTERS   STATUS                 VERSION   AGE
+podinfo    False   11         12         WaitingForDependency   1.0.0     4d
+```
+
+`READY` is the whole fleet: true only when every matching cluster has the package deployed. `DEPLOYED` and `CLUSTERS` are what tell one stuck cluster from a fleet that deployed nowhere - both read `READY: False`, and only the counts say which. `STATUS` is why, taken from the first cluster that has not finished, so the blocker is named on the proxy's own line rather than found by opening releases one at a time.
+
+Three states worth recognising:
+
+| `READY`   | Means                                                                                                 |
+| --------- | ----------------------------------------------------------------------------------------------------- |
+| `True`    | Every matching cluster is `Deployed`, or `Completed` for `ApplyOnce`                                  |
+| `False`   | Something is holding the fleet back - `STATUS` names it, and the counts say how much of the fleet     |
+| `Unknown` | The selector matches no clusters. Not success: usually a label that does not exist on any cluster yet |
+
+`kubectl get -o wide` adds the strategy and the package-resolution condition, which is where to look when `STATUS` names a resolution or signature failure. The controller also records Events on every one of these transitions, so `kubectl describe` is a history rather than a snapshot:
+
+```sh
+kubectl describe zarfpackageproxy podinfo
 ```
 
 ```sh

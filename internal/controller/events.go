@@ -49,11 +49,23 @@ func emitConditionEvents(recorder record.EventRecorder, obj client.Object, befor
 	if recorder == nil {
 		return
 	}
+	// One event per reason per pass. The fleet-level Ready condition deliberately borrows the
+	// reason of whatever is blocking it - a refused signature surfaces as
+	// SignatureVerificationFailed on Ready too, so `kubectl get` names the actual cause - which
+	// means a single failure changes two conditions carrying one reason. Two Warnings saying
+	// the same word is the noise the transition keying above exists to avoid, so the second is
+	// dropped. Conditions that are genuinely different facts carry different reasons and both
+	// still emit.
+	emitted := make(map[string]bool, len(after))
 	for _, condition := range after {
 		old := meta.FindStatusCondition(before, condition.Type)
 		if old != nil && old.Status == condition.Status && old.Reason == condition.Reason {
 			continue
 		}
+		if emitted[condition.Reason] {
+			continue
+		}
+		emitted[condition.Reason] = true
 		eventType := corev1.EventTypeNormal
 		if condition.Status == metav1.ConditionFalse {
 			eventType = corev1.EventTypeWarning

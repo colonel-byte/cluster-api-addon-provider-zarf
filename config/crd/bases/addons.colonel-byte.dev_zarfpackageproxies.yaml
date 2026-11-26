@@ -19,25 +19,43 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Reconcile or ApplyOnce
-      jsonPath: .spec.strategy
-      name: Strategy
+    - description: Every matching cluster is deployed
+      jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - description: Matching clusters with the package deployed
+      jsonPath: .status.readyClusterCount
+      name: Deployed
+      type: integer
+    - description: Clusters the selector matches
+      jsonPath: .status.clusterCount
+      name: Clusters
+      type: integer
+    - description: Why Ready holds its status
+      jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Status
       type: string
     - description: Declared package version
       jsonPath: .spec.package.version
       name: Version
       type: string
-    - description: Package digest resolved and verified
-      jsonPath: .status.conditions[?(@.type=="PackageResolved")].status
-      name: Resolved
-      type: string
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - description: Reconcile or ApplyOnce
+      jsonPath: .spec.strategy
+      name: Strategy
+      priority: 1
+      type: string
+    - description: Package digest resolved and verified
+      jsonPath: .status.conditions[?(@.type=="PackageResolved")].status
+      name: Resolved
+      priority: 1
+      type: string
     - description: Why PackageResolved holds its status
       jsonPath: .status.conditions[?(@.type=="PackageResolved")].reason
-      name: Reason
+      name: Resolution
       priority: 1
       type: string
     name: v1alpha1
@@ -3185,6 +3203,13 @@ spec:
           status:
             description: status is the observed state of ZarfPackageProxy.
             properties:
+              clusterCount:
+                description: |-
+                  clusterCount is how many Clusters the selector matches - the length of
+                  matchingClusters, carried as a number because a printer column cannot take the length
+                  of a list and `kubectl get` is where an operator looks first.
+                format: int32
+                type: integer
               conditions:
                 description: |-
                   conditions summarize the proxy's state. Ready is true when every matching cluster's
@@ -3274,6 +3299,14 @@ spec:
                   deployed-package record on each workload cluster is keyed on (§3), which is what the
                   ApplyOnce probe-and-adopt looks up.
                 type: string
+              readyClusterCount:
+                description: |-
+                  readyClusterCount is how many of those Clusters carry a release in Deployed or
+                  Completed. Beside Ready rather than instead of it: one stuck cluster out of two hundred
+                  and a fleet that deployed nowhere are both Ready: False, and only the counts tell them
+                  apart.
+                format: int32
+                type: integer
               resolvedDigest:
                 description: |-
                   resolvedDigest is the package manifest digest the declared tag resolved to, pinned on

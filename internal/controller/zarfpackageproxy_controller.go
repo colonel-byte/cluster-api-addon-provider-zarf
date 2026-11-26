@@ -181,6 +181,11 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	} else {
 		meta.RemoveStatusCondition(&proxy.Status.Conditions, addonsv1alpha1.ConditionDependenciesValid)
 	}
+	// Last, so the roll-up reads the conditions this pass has already settled rather than the
+	// previous pass's.
+	if err := r.aggregateReady(ctx, proxy, matched); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.patchStatus(ctx, proxy, before); err != nil {
 		return ctrl.Result{}, err
 	}

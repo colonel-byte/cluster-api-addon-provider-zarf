@@ -84,6 +84,25 @@ const (
 	ReasonDependencyCycle = "DependencyCycle"
 )
 
+// Ready on a proxy is the fleet-level roll-up: True when every matching cluster's release is
+// Deployed or Completed. A proxy-level refusal - an unresolved package, a dependency cycle -
+// surfaces its own reason here instead, because that is the blocker worth naming when nothing
+// can deploy anywhere. The condition type itself is declared with ZarfPackageRelease, where the
+// same name means the single cluster that release is for.
+const (
+	// ReasonConverged is Ready: True - every matching cluster is deployed.
+	ReasonConverged = "Converged"
+
+	// ReasonNoMatchingClusters is Ready: Unknown - the selector matches nothing, so the proxy
+	// has not converged and has not been asked to do anything either. Unknown rather than True
+	// so a label typo does not read as success.
+	ReasonNoMatchingClusters = "NoMatchingClusters"
+
+	// ReasonAwaitingReleases is Ready: False with no release yet stamped to borrow a reason
+	// from - the window between matching a cluster and stamping its release.
+	ReasonAwaitingReleases = "AwaitingReleases"
+)
+
 // ConditionPackageResolved is the proxy condition for §6 step 4's digest resolution and
 // signature verification: True once the tag is pinned to status.resolvedDigest (and verified,
 // when a key is named), False when resolution or verification refused.
@@ -486,6 +505,19 @@ type ZarfPackageProxyStatus struct {
 	// +optional
 	MatchingClusters []string `json:"matchingClusters,omitempty"`
 
+	// clusterCount is how many Clusters the selector matches - the length of
+	// matchingClusters, carried as a number because a printer column cannot take the length
+	// of a list and `kubectl get` is where an operator looks first.
+	// +optional
+	ClusterCount int32 `json:"clusterCount,omitempty"`
+
+	// readyClusterCount is how many of those Clusters carry a release in Deployed or
+	// Completed. Beside Ready rather than instead of it: one stuck cluster out of two hundred
+	// and a fleet that deployed nowhere are both Ready: False, and only the counts tell them
+	// apart.
+	// +optional
+	ReadyClusterCount int32 `json:"readyClusterCount,omitempty"`
+
 	// resolvedDigest is the package manifest digest the declared tag resolved to, pinned on
 	// first resolution. Every pull, verification, and deploy uses this digest, never the tag,
 	// so a re-pushed tag cannot change what the fleet runs. See docs/dev/architecture.md §3.
@@ -527,11 +559,19 @@ type ZarfPackageProxyStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=zarfpackageproxies,scope=Namespaced,categories=cluster-api,shortName=zpp
 // +kubebuilder:storageversion
-// +kubebuilder:printcolumn:name="Strategy",type="string",JSONPath=".spec.strategy",description="Reconcile or ApplyOnce"
+// The default width answers "is this proxy fine, how broadly, and why not" - Ready, the two
+// counts that tell one stuck cluster from a dead fleet, and the reason behind Ready. Strategy
+// and the PackageResolved pair move to -o wide: they are rarely what an operator is scanning
+// for, and the roll-up already surfaces a resolution failure as its own reason.
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description="Every matching cluster is deployed"
+// +kubebuilder:printcolumn:name="Deployed",type="integer",JSONPath=".status.readyClusterCount",description="Matching clusters with the package deployed"
+// +kubebuilder:printcolumn:name="Clusters",type="integer",JSONPath=".status.clusterCount",description="Clusters the selector matches"
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].reason",description="Why Ready holds its status"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.package.version",description="Declared package version"
-// +kubebuilder:printcolumn:name="Resolved",type="string",JSONPath=".status.conditions[?(@.type==\"PackageResolved\")].status",description="Package digest resolved and verified"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
-// +kubebuilder:printcolumn:name="Reason",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"PackageResolved\")].reason",description="Why PackageResolved holds its status"
+// +kubebuilder:printcolumn:name="Strategy",type="string",priority=1,JSONPath=".spec.strategy",description="Reconcile or ApplyOnce"
+// +kubebuilder:printcolumn:name="Resolved",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"PackageResolved\")].status",description="Package digest resolved and verified"
+// +kubebuilder:printcolumn:name="Resolution",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"PackageResolved\")].reason",description="Why PackageResolved holds its status"
 
 // ZarfPackageProxy declares a Zarf package's desired state across every CAPI Cluster matching its
 // selector. The controller stamps one ZarfPackageRelease per matching cluster and deploys through
