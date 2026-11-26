@@ -27,3 +27,9 @@ releaseSeries:
   - major: 0 # x-release-please-major
     minor: 2 # x-release-please-minor
     contract: v1beta2
+  - major: 0
+    minor: 2
+    contract: v1beta2
+  - major: 0
+    minor: 1
+    contract: v1beta2
