@@ -60,7 +60,7 @@ func (r *ZarfPackageProxyReconciler) convergeDeploys(ctx context.Context, proxy 
 				return err
 			}
 		}
-		if err := r.Status().Patch(ctx, release, client.MergeFrom(before)); err != nil {
+		if err := r.patchStatus(ctx, release, before); err != nil {
 			return err
 		}
 	}

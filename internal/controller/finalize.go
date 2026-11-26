@@ -196,7 +196,7 @@ func (r *ZarfPackageProxyReconciler) finalizeRelease(ctx context.Context, proxy 
 		switch DeployJobPhase(job, addonsv1alpha1.StrategyReconcile) {
 		case addonsv1alpha1.PhaseDeploying:
 			setReady(addonsv1alpha1.ReasonRemoving, "the removal Job is running")
-			return 0, r.Status().Patch(ctx, release, client.MergeFrom(before))
+			return 0, r.patchStatus(ctx, release, before)
 		case addonsv1alpha1.PhaseFailed:
 			result, _ := r.jobResult(ctx, job)
 			message := result.Error
@@ -210,7 +210,7 @@ func (r *ZarfPackageProxyReconciler) finalizeRelease(ctx context.Context, proxy 
 				Reason:  addonsv1alpha1.ReasonRemovalJobFailed,
 				Message: message,
 			})
-			if err := r.Status().Patch(ctx, release, client.MergeFrom(before)); err != nil {
+			if err := r.patchStatus(ctx, release, before); err != nil {
 				return 0, err
 			}
 			// Delete the failed Job so the retry can stamp a fresh one after the delay.
@@ -253,11 +253,11 @@ func (r *ZarfPackageProxyReconciler) finalizeRelease(ctx context.Context, proxy 
 	if holder != "" {
 		setReady(addonsv1alpha1.ReasonWaitingForActiveDeploy,
 			fmt.Sprintf("Job %s holds the cluster's deploy slot", holder))
-		return 0, r.Status().Patch(ctx, release, client.MergeFrom(before))
+		return 0, r.patchStatus(ctx, release, before)
 	}
 
 	setReady(addonsv1alpha1.ReasonRemoving, "the removal Job is starting")
-	if err := r.Status().Patch(ctx, release, client.MergeFrom(before)); err != nil {
+	if err := r.patchStatus(ctx, release, before); err != nil {
 		return 0, err
 	}
 	_, err = r.EnsureDeployJob(ctx, BuildRemovalJob(proxy, release, r.DeployImage, r.CachePath, proxy.Status.PackageName))

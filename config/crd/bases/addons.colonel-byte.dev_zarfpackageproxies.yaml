@@ -27,10 +27,19 @@ spec:
       jsonPath: .spec.package.version
       name: Version
       type: string
+    - description: Package digest resolved and verified
+      jsonPath: .status.conditions[?(@.type=="PackageResolved")].status
+      name: Resolved
+      type: string
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - description: Why PackageResolved holds its status
+      jsonPath: .status.conditions[?(@.type=="PackageResolved")].reason
+      name: Reason
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

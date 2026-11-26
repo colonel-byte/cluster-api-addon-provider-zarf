@@ -140,6 +140,9 @@ func main() {
 		SecretNamespaces:  *secretNamespaces,
 		Resolver:          resolver.Resolver{},
 		RegistryPlainHTTP: registryPlainHTTP,
+		// The core/v1 events API rather than events.k8s.io/v1: record.EventRecorder is what
+		// every CAPI provider records against, and what kubectl describe reads.
+		Recorder: mgr.GetEventRecorderFor("zarfpackageproxy-controller"), //nolint:staticcheck // deliberate: see above
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		ctrl.Log.Error(err, "unable to set up the ZarfPackageProxy controller")

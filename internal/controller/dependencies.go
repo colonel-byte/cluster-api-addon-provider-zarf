@@ -164,7 +164,7 @@ func (r *ZarfPackageProxyReconciler) applyDependencyVerdicts(ctx context.Context
 		if !meta.SetStatusCondition(&release.Status.Conditions, condition) {
 			continue
 		}
-		if err := r.Status().Patch(ctx, release, client.MergeFrom(before)); err != nil {
+		if err := r.patchStatus(ctx, release, before); err != nil {
 			return err
 		}
 	}

@@ -495,7 +495,9 @@ type ZarfPackageProxyStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Strategy",type="string",JSONPath=".spec.strategy",description="Reconcile or ApplyOnce"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.package.version",description="Declared package version"
+// +kubebuilder:printcolumn:name="Resolved",type="string",JSONPath=".status.conditions[?(@.type==\"PackageResolved\")].status",description="Package digest resolved and verified"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+// +kubebuilder:printcolumn:name="Reason",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"PackageResolved\")].reason",description="Why PackageResolved holds its status"
 
 // ZarfPackageProxy declares a Zarf package's desired state across every CAPI Cluster matching its
 // selector. The controller stamps one ZarfPackageRelease per matching cluster and deploys through

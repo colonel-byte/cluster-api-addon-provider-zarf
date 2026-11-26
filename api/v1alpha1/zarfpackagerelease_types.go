@@ -179,6 +179,7 @@ type ZarfPackageReleaseStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Release phase"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.deployedVersion",description="Deployed package version"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
+// +kubebuilder:printcolumn:name="Reason",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"Ready\")].reason",description="Why Ready holds its status"
 
 // ZarfPackageRelease records one cluster's deployment of one ZarfPackageProxy. The controller
 // creates it with an ownerReference to the CAPI Cluster, so deleting the Cluster garbage-collects

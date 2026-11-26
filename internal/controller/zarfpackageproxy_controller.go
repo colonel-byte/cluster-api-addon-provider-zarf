@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,6 +66,10 @@ type ZarfPackageProxyReconciler struct {
 	// RegistryPlainHTTP speaks HTTP to the package registry, from --registry-plain-http.
 	// Test-topology escape hatch, never the default.
 	RegistryPlainHTTP bool
+
+	// Recorder emits the condition-transition Events patchStatus publishes. Nil is allowed and
+	// emits nothing, which is what most unit and envtest cases want.
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=addons.colonel-byte.dev,resources=zarfpackageproxies,verbs=get;list;watch;update;patch
@@ -75,6 +80,7 @@ type ZarfPackageProxyReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile matches the proxy against clusters and converges its releases.
 func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -175,7 +181,7 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	} else {
 		meta.RemoveStatusCondition(&proxy.Status.Conditions, addonsv1alpha1.ConditionDependenciesValid)
 	}
-	if err := r.Status().Patch(ctx, proxy, client.MergeFrom(before)); err != nil {
+	if err := r.patchStatus(ctx, proxy, before); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Non-zero only under the follow-tag annotation: the timer that re-resolves the tag.
