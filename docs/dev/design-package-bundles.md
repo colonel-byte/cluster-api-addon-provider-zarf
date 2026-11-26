@@ -75,7 +75,7 @@ spec:
       components:
         - name: zarf-registry
         - name: zarf-agent
-    - name: storage-images
+    - name: storage-final
       strategy: Reconcile
       package:
         repository: registry.internal/zarf/csi-rook-ceph
@@ -83,6 +83,11 @@ spec:
       components:
         - name: operator-images
         - name: cluster-images
+        # The plain charts, not the seed ones: by now the agent is running and rewrites
+        # image references itself, so the templated addresses are no longer needed - and
+        # keeping them would hard-code the registry address into the release's values.
+        - name: operator-chart
+        - name: cluster-chart
         - name: registry-bucket
 ```
 
@@ -121,12 +126,12 @@ Three fields are deliberately **not** carried onto a stage, and the reason is th
 
 A cursor integer ("this cluster has reached stage 3") cannot answer the question an operator actually has, which is *what happens when I bump one thing*. Recording the applied digest per stage answers it:
 
-| Change                                    | Re-runs                                                                                        |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `csi-rook-ceph` version bumped            | the stages naming it - here `storage-images`, and `storage-seed` only if it is not `ApplyOnce` |
-| `init-slim` version bumped                | `registry`; `init-seed` is `ApplyOnce` and stays put                                           |
-| A stage's `components` or `values` edited | that stage                                                                                     |
-| Nothing                                   | nothing - a converged bundle is quiet                                                          |
+| Change                                    | Re-runs                                                                                      |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `csi-rook-ceph` version bumped            | `storage-final`, which carries its plain charts; `storage-seed` is `ApplyOnce` and stays put |
+| `init-slim` version bumped                | `registry`; `init-seed` is `ApplyOnce` and stays put                                         |
+| A stage's `components` or `values` edited | that stage                                                                                   |
+| Nothing                                   | nothing - a converged bundle is quiet                                                        |
 
 This is what recovers the property that splitting packages was supposed to buy: **the CSI and the init package keep independent lifecycles even though one object sequences them.** They are independent because their stages are, not because their packages are.
 
@@ -271,22 +276,31 @@ The reason those can both hold is the per-stage `strategy`. The feared case - a 
 
 > A stage must be `ApplyOnce` exactly when re-running it would re-apply values that a later stage supersedes **on the same Helm release**.
 
-Worked through on the reference bundle:
+Worked through on the reference bundle, where the storage driver ships its charts in two flavours - `-seed`, whose image repositories are templated to `{{ .State.Registry.Address }}`, and plain, whose references stay upstream:
 
-| Stage            | Carries                     | Strategy    | Why                                                                                   |
-| ---------------- | --------------------------- | ----------- | ------------------------------------------------------------------------------------- |
-| `init-seed`      | injector, seed registry     | `ApplyOnce` | Same release as `registry`, with values that stage supersedes - re-running reverts it |
-| `storage-seed`   | images, seed charts, bucket | `Reconcile` | Nothing later touches those releases, so a re-run is an ordinary chart upgrade        |
-| `registry`       | permanent registry, agent   | `Reconcile` | The convergent half of the init package                                               |
-| `storage-images` | images, bucket, no charts   | `Reconcile` | Idempotent re-push                                                                    |
+| Stage           | Carries                          | Strategy    | Why                                                                                   |
+| --------------- | -------------------------------- | ----------- | ------------------------------------------------------------------------------------- |
+| `init-seed`     | injector, seed registry          | `ApplyOnce` | Same release as `registry`, with values that stage supersedes - re-running reverts it |
+| `storage-seed`  | images, **seed** charts, bucket  | `ApplyOnce` | Same releases as `storage-final`, whose plain charts supersede these                  |
+| `registry`      | permanent registry, **agent**    | `Reconcile` | The convergent half of the init package                                               |
+| `storage-final` | images, **plain** charts, bucket | `Reconcile` | The end state, and where storage upgrades flow                                        |
 
-**`storage-seed` being `Reconcile` is load-bearing, and the opposite is a trap worth naming.** It is the stage carrying the storage driver's *charts*; `storage-images` carries only images. Make `storage-seed` `ApplyOnce` and a bump to the storage package pushes new images that nothing uses, while the driver runs the old chart forever, with no error anywhere. Re-running it is safe because the seed charts differ from the plain ones only in templating image repositories to `{{ .State.Registry.Address }}`, and that address does not change across the seed-to-permanent handover - measured in nodeport mode, `127.0.0.1:31999` before and after. The stage also carries its own images, so it is self-contained on a re-run.
+**The last stage must apply the plain charts, not merely re-push images.** This is the part that is easy to get wrong, and the reference bundle as originally written gets it wrong - its final stage selects images and the bucket but no charts, so the driver runs on seed values forever.
 
-A corollary: once `storage-seed` is `Reconcile`, `storage-images` earns its keep on day one and is close to a no-op afterwards. That is fine - it is cheap - but it is worth knowing which stage is actually upgrading the driver.
+Both forms resolve, which is why the mistake is quiet. Zarf pushes every image twice (`src/pkg/images/push.go`): once as `<registry>/<path>:<tag>-<crc32>`, which is what the agent's rewrite produces, and once as `<registry>/<path>:<tag>`, which is what a hand-templated address asks for. So a cluster left on seed values pulls successfully and looks healthy.
+
+What it has lost is that **the agent re-evaluates image references on every pod admission, while templated values were evaluated once.** Seed values hard-code the registry address into the Helm release, so they are correct only while nothing about the registry ever changes - a mode switch between nodeport and proxy, a port change, a move to an external registry, or any re-init that re-addresses it leaves every pod in that release pointing somewhere that no longer serves. The plain charts delegate to the agent, which is the component whose job this is, and which reads the address from state each time.
+
+That is also why the seed flavour exists at all: during stage 2 the agent is not running yet - `registry` installs it - so there is nothing to do the rewriting and the addresses must be templated by hand. The seed charts are scaffolding for exactly one stage, and leaving them in place is leaving the scaffolding up.
+
+Two consequences follow, and both are improvements:
+
+- **Storage upgrades flow through the final stage**, which is `Reconcile` and carries the charts. Bumping the storage package upgrades the driver.
+- **The seed stage is genuinely `ApplyOnce`**, by the criterion above rather than by instinct: its values are superseded on the same Helm releases.
 
 ### The hazard this leaves
 
-A stage can be correct only because of an *earlier* stage's side effect, and the controller cannot see that. `storage-images` exists because the images must live in the registry `registry` stood up; if a re-run of `registry` ever recreated that registry's storage rather than upgrading it in place, the images would be gone and `storage-images` would need to re-run even though its own identity did not change.
+A stage can be correct only because of an *earlier* stage's side effect, and the controller cannot see that. `storage-final` needs its images to live in the registry `registry` stood up; if a re-run of `registry` ever recreated that registry's storage rather than upgrading it in place, the images would be gone and `storage-final` would need to re-run even though its own identity did not change.
 
 Nothing in the stage list expresses "re-run me whenever an earlier stage does", and a first version should not invent it. The operator's lever is to bump both, and the design's obligation is to say so rather than to imply changed-stage-only is always sufficient. A per-stage `rerunAfterEarlierStages` flag is the obvious later addition if real bundles need it; a flag nobody has needed yet is not.
 
