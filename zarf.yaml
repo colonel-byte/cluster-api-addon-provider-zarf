@@ -25,7 +25,7 @@ kind: ZarfPackageConfig
 metadata:
   name: cluster-api-addon-provider-zarf
   description: The Zarf add-on provider for Cluster API
-  version: 0.1.2 # x-release-please-version
+  version: 0.2.0 # x-release-please-version
   annotations:
     org.opencontainers.image.source: https://github.com/colonel-byte/cluster-api-addon-provider-zarf
 components:
@@ -40,7 +40,7 @@ components:
         files:
           - out/addon-components.yaml
     images:
-      - name: ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.1.2 # x-release-please-version
+      - name: ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.2.0 # x-release-please-version
 
   - name: rancher-turtle-artifacts
     description: The provider's components as one OCI artifact, which the Cluster API Operator and Rancher Turtles install from
@@ -49,8 +49,8 @@ components:
     # everyone installing this with clusterctl instead. Turtles has to be on the cluster first.
     optional: true
     images:
-      - name: ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.1.2 # x-release-please-version
-      - name: ghcr.io/colonel-byte/turtle/addon-zarf:v0.1.2 # x-release-please-version
+      - name: ghcr.io/colonel-byte/cluster-api-addon-provider-zarf-controller:0.2.0 # x-release-please-version
+      - name: ghcr.io/colonel-byte/turtle/addon-zarf:v0.2.0 # x-release-please-version
     # The ConfigMap a CAPIProvider with a `fetchConfig` selector reads its components out of,
     # and the CAPIProvider itself - so the operator's ConfigMap install path needs no
     # `kubectl create configmap` by hand on the inside. See docs/guides/rancher-turtles.md. No
