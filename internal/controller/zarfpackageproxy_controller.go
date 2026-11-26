@@ -200,7 +200,16 @@ func (r *ZarfPackageProxyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // jobToProxy maps a deploy Job event to the proxy whose release the Job realizes, through the
-// release label the Job carries and the release's own packageProxyRef.
+// release label the Job carries and the release's own packageProxyRef - plus every other proxy
+// holding a release on the same cluster.
+//
+// That fan-out is what keeps the §6 step 6 deploy slot live. The slot is *cluster*-scoped:
+// clusterSlotHolder lists every Job labelled with the cluster, whichever proxy stamped it. So a
+// release held with WaitingForActiveDeploy is waiting on a Job that belongs to a different
+// proxy, and mapping the Job to its own proxy alone leaves nothing to wake the waiter when the
+// slot frees - the gate holds without requeueing, by design, because an event is meant to bring
+// it back. Without this it never comes, and the blocked release sits Pending against a Job that
+// has already finished and been reaped.
 func (r *ZarfPackageProxyReconciler) jobToProxy(ctx context.Context, obj client.Object) []reconcile.Request {
 	name, ok := obj.GetLabels()[releaseLabel]
 	if !ok {
@@ -210,7 +219,29 @@ func (r *ZarfPackageProxyReconciler) jobToProxy(ctx context.Context, obj client.
 	if err := r.Get(ctx, types.NamespacedName{Namespace: obj.GetNamespace(), Name: name}, release); err != nil {
 		return nil
 	}
-	return releaseToProxy(ctx, release)
+	requests := releaseToProxy(ctx, release)
+
+	cluster, ok := obj.GetLabels()[clusterLabel]
+	if !ok {
+		return requests
+	}
+	releases := &addonsv1alpha1.ZarfPackageReleaseList{}
+	if err := r.List(ctx, releases, client.InNamespace(obj.GetNamespace())); err != nil {
+		// The owning proxy still gets its event; a missed wake-up is better than none.
+		return requests
+	}
+	for i := range releases.Items {
+		other := &releases.Items[i]
+		if other.Name == release.Name || other.Spec.ClusterRef.Name != cluster {
+			continue
+		}
+		for _, request := range releaseToProxy(ctx, other) {
+			if !slices.Contains(requests, request) {
+				requests = append(requests, request)
+			}
+		}
+	}
+	return requests
 }
 
 // releaseToProxy maps a release event to the proxy its packageProxyRef names, in the release's
