@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-26a09373.js";
+            window.path_to_searchindex_js = "../searchindex-8d0f7399.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-2757b64a.js"></script>
@@ -183,18 +183,43 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="changelog"><a class="header" href="#changelog">Changelog</a></h1>
-<h2 id="012-2026-11-25"><a class="header" href="#012-2026-11-25"><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.1...v0.1.2">0.1.2</a> (2026-11-25)</a></h2>
+<h2 id="020-2026-11-26"><a class="header" href="#020-2026-11-26"><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.2...v0.2.0">0.2.0</a> (2026-11-26)</a></h2>
+<h3 id="-breaking-changes"><a class="header" href="#-breaking-changes">⚠ BREAKING CHANGES</a></h3>
+<ul>
+<li>document the registry credential and CA fields (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/371">#371</a>)</li>
+<li>resolve registry credentials and CA bundles for package resolution (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/367">#367</a>)</li>
+</ul>
+<h3 id="features"><a class="header" href="#features">Features</a></h3>
+<ul>
+<li><strong>api:</strong> add registry credentials, CA bundles and TLS options to the package source (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/365">#365</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/ce35510be9ca4f872b8c4388b8c2e7bf61f66411">ce35510</a>)</li>
+<li>mount the registry credentials and CA into deploy pods (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/368">#368</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/3730b2c89866652d9614990acceb8128d543f1b8">3730b2c</a>)</li>
+<li>resolve registry credentials and CA bundles for package resolution (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/367">#367</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f064b8c5907fbf05c63664f420e7d814fe0044c5">f064b8c</a>)</li>
+</ul>
 <h3 id="bug-fixes"><a class="header" href="#bug-fixes">Bug Fixes</a></h3>
+<ul>
+<li>wake releases blocked on another proxy’s deploy slot (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/375">#375</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a8e71e1470baa9535b02e75a4ead066fa4e917ae">a8e71e1</a>)</li>
+</ul>
+<h3 id="documentation"><a class="header" href="#documentation">Documentation</a></h3>
+<ul>
+<li>document the registry credential and CA fields (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/371">#371</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/c283132c2e834b1ff419a116f3cf97cd3a25ce0e">c283132</a>)</li>
+</ul>
+<h3 id="miscellaneous"><a class="header" href="#miscellaneous">Miscellaneous</a></h3>
+<ul>
+<li>re-render the CRDs for the registry auth and TLS fields (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/366">#366</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/1e3c0154eadd7976287be9aec5d5212d2d68d022">1e3c015</a>)</li>
+<li>re-render the manager role for configmap reads (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/369">#369</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/fa4fd75b0820eb32886e6d5d02ba65aedee9ab55">fa4fd75</a>)</li>
+</ul>
+<h2 id="012-2026-11-25"><a class="header" href="#012-2026-11-25"><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.1...v0.1.2">0.1.2</a> (2026-11-25)</a></h2>
+<h3 id="bug-fixes-1"><a class="header" href="#bug-fixes-1">Bug Fixes</a></h3>
 <ul>
 <li><strong>e2e:</strong> pin the workload Kubernetes version to kind’s node images (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/351">#351</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f6511d7449f63aa1d3230612922085231d113d70">f6511d7</a>)</li>
 <li><strong>e2e:</strong> size the provider wait for a cold image pull (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/352">#352</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a67bf0169a5800788e1cc2e26dc0884021c7cd83">a67bf01</a>)</li>
 </ul>
-<h3 id="documentation"><a class="header" href="#documentation">Documentation</a></h3>
+<h3 id="documentation-1"><a class="header" href="#documentation-1">Documentation</a></h3>
 <ul>
 <li>add getting-started and bootstrap-order guides (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/350">#350</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/31236c01a9476bb8f9491b2d06ad0287c66c432e">31236c0</a>)</li>
 <li><strong>dev:</strong> add an e2e walkthrough and a rule to keep it current (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/353">#353</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/984655893ff064a8944a4c3823a91b4384bb848f">9846558</a>)</li>
 </ul>
-<h3 id="miscellaneous"><a class="header" href="#miscellaneous">Miscellaneous</a></h3>
+<h3 id="miscellaneous-1"><a class="header" href="#miscellaneous-1">Miscellaneous</a></h3>
 <ul>
 <li><strong>deps:</strong> update module github.com/alibabacloud-go/alibabacloud-gateway-pop to v0.1.7 (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/347">#347</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/cd2e417078d285cfb6195983e54ea7cb6aa2d8e2">cd2e417</a>)</li>
 <li><strong>deps:</strong> update module github.com/theupdateframework/go-tuf/v2 to v2.5.0 (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/348">#348</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/1bd939f15bd8f63a78cb2c283eb145cb0d51a291">1bd939f</a>)</li>
@@ -207,7 +232,7 @@
 <li><strong>vendor:</strong> stop scoring vendored Python as CAAPZ vulns (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/355">#355</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a89a5889c05aa140a5c886966f6c4b218af7f815">a89a588</a>)</li>
 </ul>
 <h2 id="011-2026-11-25"><a class="header" href="#011-2026-11-25"><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.0...v0.1.1">0.1.1</a> (2026-11-25)</a></h2>
-<h3 id="miscellaneous-1"><a class="header" href="#miscellaneous-1">Miscellaneous</a></h3>
+<h3 id="miscellaneous-2"><a class="header" href="#miscellaneous-2">Miscellaneous</a></h3>
 <ul>
 <li><strong>deps:</strong> update ghcr.io/renovatebot/renovate docker tag to v44.263.1 (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/329">#329</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/31e4bb7f70866600db08dfaf9cbd014db3e8f5a7">31e4bb7</a>)</li>
 </ul>
@@ -216,11 +241,11 @@
 <li>fix cosign public key (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/328">#328</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/e2535b2c8c9ec818d1590d0eda120770a2d027d3">e2535b2</a>)</li>
 </ul>
 <h2 id="010-2026-11-25"><a class="header" href="#010-2026-11-25"><a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.0.1...v0.1.0">0.1.0</a> (2026-11-25)</a></h2>
-<h3 id="-breaking-changes"><a class="header" href="#-breaking-changes">⚠ BREAKING CHANGES</a></h3>
+<h3 id="-breaking-changes-1"><a class="header" href="#-breaking-changes-1">⚠ BREAKING CHANGES</a></h3>
 <ul>
 <li>harden the seed-then-manage handoff semantics (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/23">#23</a>)</li>
 </ul>
-<h3 id="features"><a class="header" href="#features">Features</a></h3>
+<h3 id="features-1"><a class="header" href="#features-1">Features</a></h3>
 <ul>
 <li>absorb deploy Job results into release status (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/60">#60</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/401ca180fcd4978675f602852faefb6afcd1663c">401ca18</a>)</li>
 <li>add controller manager and ZarfPackageProxy reconciler skeleton (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/4">#4</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/5053bbe94465d10bf9aada31cecf19cf48c8620a">5053bbe</a>)</li>
@@ -261,7 +286,7 @@
 <li>uninstall through release finalizers and removal Jobs (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/70">#70</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a6b39c854a5146a3c108fd7b4d4c494f99cc495f">a6b39c8</a>)</li>
 <li>wire the deploy subcommand into the manager binary (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/57">#57</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/af65cba68521f03ee9e78314b5d047e451fffbf2">af65cba</a>)</li>
 </ul>
-<h3 id="bug-fixes-1"><a class="header" href="#bug-fixes-1">Bug Fixes</a></h3>
+<h3 id="bug-fixes-2"><a class="header" href="#bug-fixes-2">Bug Fixes</a></h3>
 <ul>
 <li>default deploy Jobs to the controller’s own running image (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/173">#173</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/4facf4f61c32224cd6b8b277c56e3a4db85120af">4facf4f</a>)</li>
 <li><strong>deploy:</strong> apply the deployment component filter unconditionally (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/174">#174</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/c9a243e262699e04ff4f383b3c6c96f65a3825fd">c9a243e</a>)</li>
@@ -271,7 +296,7 @@
 <li><strong>resolver:</strong> keep the cosign key out of the package directory (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/172">#172</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f045c69e58da0ab1faef0fca9312fa592766eacc">f045c69</a>)</li>
 <li>route release events to proxies via packageProxyRef (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/18">#18</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a18a74bfa53264f3102471b68f50c55ff4acfd8a">a18a74b</a>)</li>
 </ul>
-<h3 id="documentation-1"><a class="header" href="#documentation-1">Documentation</a></h3>
+<h3 id="documentation-2"><a class="header" href="#documentation-2">Documentation</a></h3>
 <ul>
 <li>add the clusterctl provider contract (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/15">#15</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/31343b0baae7c4d4d2463eb62c636e3af5d326f7">31343b0</a>)</li>
 <li>add the Rancher Turtles install guide (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/39">#39</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f16bcb2d8d55c7a43b6baf7c417365b30fdf6d6a">f16bcb2</a>)</li>
@@ -284,7 +309,7 @@
 <li>pin package identity to a resolved digest (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/14">#14</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/68c4df1be1fe1acef0ddb0edad896d68d72cb201">68c4df1</a>)</li>
 <li>serialize package operations to one job per cluster (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/24">#24</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/94a6e1429aca8cc9c838e581bec2cbb4183f57ba">94a6e14</a>)</li>
 </ul>
-<h3 id="miscellaneous-2"><a class="header" href="#miscellaneous-2">Miscellaneous</a></h3>
+<h3 id="miscellaneous-3"><a class="header" href="#miscellaneous-3">Miscellaneous</a></h3>
 <ul>
 <li>bootstrap repository from template for CAAPZ (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/2">#2</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/78441fb5eef906eaefdb7d7d3762488a17a5e42b">78441fb</a>)</li>
 <li><strong>deps:</strong> update all-actions (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/209">#209</a>) (<a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/d378ac37d67135e5df4b2f63e6d983cbe06a2b72">d378ac3</a>)</li>
