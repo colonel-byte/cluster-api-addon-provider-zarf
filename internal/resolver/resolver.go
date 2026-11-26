@@ -29,6 +29,7 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/zarf-dev/zarf/src/api"
+	"github.com/zarf-dev/zarf/src/pkg/ocischeme"
 	"github.com/zarf-dev/zarf/src/pkg/packager/layout"
 	"github.com/zarf-dev/zarf/src/pkg/signing"
 	"github.com/zarf-dev/zarf/src/pkg/zoci"
@@ -44,6 +45,18 @@ type Options struct {
 	// PlainHTTP speaks HTTP to the registry, for test-only registries behind the
 	// --registry-plain-http manager flag. Never the default.
 	PlainHTTP bool
+
+	// DockerConfigJSON is a Docker config the registry credentials are read out of, from the
+	// source's pullSecretRef or synthesized from Zarf state. Empty authenticates nothing.
+	DockerConfigJSON []byte
+
+	// CABundle is PEM added to the system roots for this call alone, from the source's
+	// caBundleSecretRef, caBundleConfigMapRef, or Zarf's own registry TLS secret.
+	CABundle []byte
+
+	// InsecureSkipTLSVerify skips certificate verification entirely. The escape hatch for an
+	// operator who cannot name their CA; never the way to reach a known registry.
+	InsecureSkipTLSVerify bool
 
 	// Architecture selects the package's platform in a multi-arch index. Empty means amd64.
 	// shortcut: no per-proxy or detected architecture yet - the §4D detection source is a
@@ -94,8 +107,18 @@ func remote(ctx context.Context, repository, version string, opts Options) (*zoc
 	}
 	// OS "multi" is how zarf publishes package platforms - verified in the spike.
 	platform := ocispec.Platform{OS: "multi", Architecture: arch}
-	return zoci.NewRemote(ctx, fmt.Sprintf("oci://%s:%s", repository, version), platform,
-		zoci.RemoteClientOptions{PlainHTTP: opts.PlainHTTP})
+	clientOpts, err := clientOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	// A plain-HTTP negotiator scoped to this call. The package-level one caches its decision -
+	// and, for 30 seconds, its failure - per registry host across the whole process, so one
+	// proxy that cannot verify a registry's certificate hands that failure to every other
+	// proxy naming the same registry, correctly configured or not. The e2e suite caught
+	// exactly that. A long-lived controller also has no business holding a scheme decision
+	// forever, which is what the shared negotiator's zero TTL means.
+	ctx = ocischeme.WithNegotiator(ctx, ocischeme.New(ocischeme.Options{}))
+	return zoci.NewRemote(ctx, fmt.Sprintf("oci://%s:%s", repository, version), platform, clientOpts)
 }
 
 // ResolveDigest resolves the tag to its current digest and nothing more - the cheap read the
