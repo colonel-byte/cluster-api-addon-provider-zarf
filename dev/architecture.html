@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-1fc5a538.js";
+            window.path_to_searchindex_js = "../searchindex-b0c4488d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-9ab3151e.js"></script>
+        <script src="../toc-2757b64a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -507,6 +507,27 @@ Why a Job rather than the in-process SDK - and why verification precedes it - is
 Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready: True</code> on the release and proxy objects.</p>
 </li>
 </ol>
+<h3 id="registry-reachability"><a class="header" href="#registry-reachability">Registry Reachability</a></h3>
+<p>Verification is about <em>what</em> the artifact is. Reachability is the separate question of whether the controller can get to the registry at all, and in an air gap the answer usually involves a credential and a certificate authority nothing public signed.</p>
+<p>Four fields on <code>spec.package</code> - and on <code>spec.init.package</code>, which is the same type - cover it:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>What it supplies</th></tr>
+</thead>
+<tbody>
+<tr><td><code>pullSecretRef</code></td><td>A <code>kubernetes.io/dockerconfigjson</code> Secret. Empty means anonymous, which was the only option before it</td></tr>
+<tr><td><code>caBundleSecretRef</code></td><td>PEM certificates under <code>ca.crt</code>, trusted <em>in addition to</em> the system roots - the cert-manager shape</td></tr>
+<tr><td><code>caBundleConfigMapRef</code></td><td>The same, from a ConfigMap. A CA is not secret; the Secret form exists because cert-manager writes one</td></tr>
+<tr><td><code>fromZarfState</code></td><td>Both of the above, read from the management cluster’s own Zarf deployment instead of from an operator’s Secret</td></tr>
+<tr><td><code>insecureSkipTLSVerify</code></td><td>Accepts the certificate unverified. Per-package, so one unfixable registry cannot lower the fleet’s bar</td></tr>
+</tbody>
+</table>
+</div>
+<p>Every reference resolves through the same <code>--secret-namespaces</code> gate as <code>signatureKeySecretRef</code> (§2C), so a proxy author can only name material their own namespace holds unless the operator widened it.</p>
+<p><strong>The material reaches two consumers by two routes, and that is deliberate.</strong> The controller resolves and verifies the package itself, and passes credentials and a root pool per call - so two proxies naming two registries with two credentials never see each other’s. The deploy pod pulls by digest through an upstream API that carries neither, so there the credentials and the CA arrive as files mounted from the release’s deploy-spec Secret, with the pod’s environment pointing at them. The pod holds no management-cluster access and could not look a Secret up; one pod also serves exactly one package, so a file scoped to the pod is scoped to the pull. <code>docs/agent/choice-registry-credentials.md</code> records why, and what would have to change upstream for the pod to use the same hook the controller does.</p>
+<p><strong><code>fromZarfState</code> reads the management cluster, not the workload cluster</strong>, which is the opposite of every other Zarf-state read in this controller. The init gate, probe-and-adopt, and removal all probe a <em>workload</em> cluster through its CAPI kubeconfig; this one reads the controller’s own cluster, because that is where the registry being pulled <em>from</em> lives. A workload cluster’s internal Zarf registry is not a package source - its recorded address is node-local, and nothing in the management cluster can route to it.</p>
+<p>No client certificate is presented, measured rather than assumed: Zarf’s registry serves clients that offer none, and the certificate it issues belongs to the per-node registry proxy. A registry that genuinely requires one needs an upstream change before this provider can carry it.</p>
 <h3 id="signature-trust-model"><a class="header" href="#signature-trust-model">Signature Trust Model</a></h3>
 <p><code>signatureKeySecretRef</code> adopts the sister cargoship repository’s semantics verbatim (its <code>signatureKeySecretRef</code> field and the reasoning in its doc comment):</p>
 <ul>

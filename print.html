@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1fc5a538.js";
+            window.path_to_searchindex_js = "searchindex-b0c4488d.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-9ab3151e.js"></script>
+        <script src="toc-2757b64a.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1082,6 +1082,27 @@ Why a Job rather than the in-process SDK - and why verification precedes it - is
 Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready: True</code> on the release and proxy objects.</p>
 </li>
 </ol>
+<h3 id="registry-reachability"><a class="header" href="#registry-reachability">Registry Reachability</a></h3>
+<p>Verification is about <em>what</em> the artifact is. Reachability is the separate question of whether the controller can get to the registry at all, and in an air gap the answer usually involves a credential and a certificate authority nothing public signed.</p>
+<p>Four fields on <code>spec.package</code> - and on <code>spec.init.package</code>, which is the same type - cover it:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>What it supplies</th></tr>
+</thead>
+<tbody>
+<tr><td><code>pullSecretRef</code></td><td>A <code>kubernetes.io/dockerconfigjson</code> Secret. Empty means anonymous, which was the only option before it</td></tr>
+<tr><td><code>caBundleSecretRef</code></td><td>PEM certificates under <code>ca.crt</code>, trusted <em>in addition to</em> the system roots - the cert-manager shape</td></tr>
+<tr><td><code>caBundleConfigMapRef</code></td><td>The same, from a ConfigMap. A CA is not secret; the Secret form exists because cert-manager writes one</td></tr>
+<tr><td><code>fromZarfState</code></td><td>Both of the above, read from the management cluster’s own Zarf deployment instead of from an operator’s Secret</td></tr>
+<tr><td><code>insecureSkipTLSVerify</code></td><td>Accepts the certificate unverified. Per-package, so one unfixable registry cannot lower the fleet’s bar</td></tr>
+</tbody>
+</table>
+</div>
+<p>Every reference resolves through the same <code>--secret-namespaces</code> gate as <code>signatureKeySecretRef</code> (§2C), so a proxy author can only name material their own namespace holds unless the operator widened it.</p>
+<p><strong>The material reaches two consumers by two routes, and that is deliberate.</strong> The controller resolves and verifies the package itself, and passes credentials and a root pool per call - so two proxies naming two registries with two credentials never see each other’s. The deploy pod pulls by digest through an upstream API that carries neither, so there the credentials and the CA arrive as files mounted from the release’s deploy-spec Secret, with the pod’s environment pointing at them. The pod holds no management-cluster access and could not look a Secret up; one pod also serves exactly one package, so a file scoped to the pod is scoped to the pull. <code>docs/agent/choice-registry-credentials.md</code> records why, and what would have to change upstream for the pod to use the same hook the controller does.</p>
+<p><strong><code>fromZarfState</code> reads the management cluster, not the workload cluster</strong>, which is the opposite of every other Zarf-state read in this controller. The init gate, probe-and-adopt, and removal all probe a <em>workload</em> cluster through its CAPI kubeconfig; this one reads the controller’s own cluster, because that is where the registry being pulled <em>from</em> lives. A workload cluster’s internal Zarf registry is not a package source - its recorded address is node-local, and nothing in the management cluster can route to it.</p>
+<p>No client certificate is presented, measured rather than assumed: Zarf’s registry serves clients that offer none, and the certificate it issues belongs to the per-node registry proxy. A registry that genuinely requires one needs an upstream change before this provider can carry it.</p>
 <h3 id="signature-trust-model"><a class="header" href="#signature-trust-model">Signature Trust Model</a></h3>
 <p><code>signatureKeySecretRef</code> adopts the sister cargoship repository’s semantics verbatim (its <code>signatureKeySecretRef</code> field and the reasoning in its doc comment):</p>
 <ul>
@@ -1875,6 +1896,46 @@ gh api "repos/$REPO/pages" --jq .html_url                                  # 404
 </table>
 </div>
 <p>More broadly, none of this makes anything safer. <code>govulncheck ./cmd/...</code> reported zero reachable vulnerabilities before the overrides existed and reports zero after; what changed is that a check which was describing go-tuf’s test harness is now describing CAAPZ. That is worth the two files and the mage target, and it is worth being clear that it is a measurement fix and not a security fix. The maintenance cost is real and lands on whoever next adds a dependency that carries a lockfile - <code>dev:verifyVendor</code> exists so that person gets a clear failure rather than a mystery.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="registry-credentials-reach-the-controller-and-the-deploy-pod-by-different-routes"><a class="header" href="#registry-credentials-reach-the-controller-and-the-deploy-pod-by-different-routes">Registry credentials reach the controller and the deploy pod by different routes</a></h1>
+<p>The controller gets them per call. The deploy pod gets them as a file. That is not an inconsistency to tidy up later - the two consumers sit behind different upstream APIs, and the right answer differs.</p>
+<p>This is the same problem cluster-api-provider-cargoship solved in its own <a href="https://github.com/colonel-byte/cluster-api-provider-cargoship/blob/main/docs/agent/choice-registry-credentials.md"><code>choice-registry-credentials.md</code></a>, and the API here is deliberately named after that one - <code>pullSecretRef</code>, <code>caBundleSecretRef</code>, <code>fromZarfState</code>, <code>insecureSkipTLSVerify</code> - so an operator running both reads one vocabulary. The mechanism diverges, and this records why.</p>
+<h2 id="the-controller-can-use-the-in-process-hook-cargoship-could-not"><a class="header" href="#the-controller-can-use-the-in-process-hook-cargoship-could-not">The controller can use the in-process hook; cargoship could not</a></h2>
+<p><code>internal/resolver</code> builds its remote itself, by calling <code>zoci.NewRemote</code> directly. That means <code>zoci.RemoteClientOptions</code> is ours to fill:</p>
+<pre><code class="language-go">type RemoteClientOptions struct {
+	CachePath      string
+	CredentialFunc auth.CredentialFunc  // nil falls back to the Docker credential store
+	Transport      *http.Transport      // proxies and mTLS
+	types.RemoteOptions                 // PlainHTTP, InsecureSkipTLSVerify
+}
+</code></pre>
+<p>So resolution passes a <code>CredentialFunc</code> built for that one call, and a <code>Transport</code> whose root pool is the system roots plus whatever <code>caBundleSecretRef</code> names. Nothing is process-wide, which matters here in a way it did not for cargoship: this controller reconciles every proxy in the cluster, and two proxies may name two registries with two different credentials. A per-call hook makes that a non-question.</p>
+<p>Cargoship had no such hook - <code>distro.Load</code> builds the oras modifier list internally from <code>RemoteOptions</code> alone - so it writes a merged Docker config file on its cache volume and accepts a documented last-writer-wins where two resources name the same registry with different credentials. We do not inherit that shortcut.</p>
+<h2 id="the-deploy-pod-gets-a-file-because-it-has-no-other-way"><a class="header" href="#the-deploy-pod-gets-a-file-because-it-has-no-other-way">The deploy pod gets a file, because it has no other way</a></h2>
+<p><code>packager.LoadOptions</code> - what the deploy subcommand calls <code>LoadPackage</code> with - carries <code>types.RemoteOptions</code> and nothing else:</p>
+<pre><code class="language-go">type LoadOptions struct {
+	Shasum, Architecture string
+	VerifyBlobOptions    *signing.VerifyBlobOptions
+	Filter               filters.ComponentFilterStrategy
+	// ...
+	types.RemoteOptions   // PlainHTTP, InsecureSkipTLSVerify
+	layout.VerificationStrategy
+}
+</code></pre>
+<p>No credential function, no transport. The fallback oras takes when no credential function is set is the Docker credential store, and <code>getDockerConfigPath()</code> reads <code>$DOCKER_CONFIG</code> before <code>~/.docker</code>. So the controller writes the credentials into the release’s deploy-spec Secret, the Job mounts it, and the pod’s <code>DOCKER_CONFIG</code> points at the mount. The CA arrives the same way, trusted through <code>SSL_CERT_FILE</code>, which Go’s <code>crypto/x509</code> honours on Linux.</p>
+<p>Two things make the file acceptable here that are worth stating, because “a credential on a disk” is where review attention goes:</p>
+<ul>
+<li><strong>One pod serves exactly one package.</strong> There is no merging, no shared file, and no window where one pull reads another’s credentials - the scoping problem cargoship had to solve with a mutex and a rename does not arise, because the process-wide variable is scoped to a process that exists to perform one pull.</li>
+<li><strong>The pod is already the blast radius.</strong> It mounts the target cluster’s admin kubeconfig. A registry pull credential is strictly less than what it already holds, and the pod runs as <code>65532</code> from an image with no shell.</li>
+</ul>
+<p>It is also reversible: if <code>LoadOptions</code> ever carries a credential function, the pod uses the same per-call hook the controller does and the file goes away. The mount is the concession, not the design.</p>
+<h2 id="fromzarfstate-reads-the-management-cluster-not-the-workload-cluster"><a class="header" href="#fromzarfstate-reads-the-management-cluster-not-the-workload-cluster"><code>fromZarfState</code> reads the management cluster, not the workload cluster</a></h2>
+<p>The field exists because the common air-gapped arrangement is a Zarf registry in the management cluster holding the packages the fleet pulls - and Zarf already generated that registry’s credentials and signed its certificate. Both are in that cluster as <code>zarf-state</code> and <code>zarf-registry-server-tls</code>, so making the operator export them by hand into a Secret whose server string has to match the repository host exactly is asking them to copy data that is already there.</p>
+<p>Which cluster is the part to get right. Every other Zarf-state read in this controller targets a <em>workload</em> cluster, through the CAPI kubeconfig secret - the init gate, probe-and-adopt, removal. This one reads the controller’s own cluster, because that is where the registry being pulled <em>from</em> lives. A workload cluster’s Zarf registry is not a package source: its address in state is node-local, and nothing in the management cluster can route to it.</p>
+<p>The repository is still named in the spec rather than derived from that state, for the reason cargoship found: Zarf records the address a node reaches the registry at, and a controller inside the cluster wants the service address, which the state does not carry.</p>
+<h2 id="no-client-certificate-and-that-is-measured"><a class="header" href="#no-client-certificate-and-that-is-measured">No client certificate, and that is measured</a></h2>
+<p>A Zarf registry reports mTLS in its state for any <code>mtlsStrategy</code> other than <code>none</code>, and the obvious reading - that a client certificate is therefore required - is wrong. Zarf’s registry chart sets <code>clientauth: verify-client-cert-if-given</code>, which verifies a certificate where the client offers one and serves a client that offers none. The certificate Zarf issues belongs to the per-node registry proxy, not to anything a management-cluster controller runs. So the CA out of <code>zarf-registry-server-tls</code> is the whole requirement.</p>
+<p>The case this does not cover is a registry that genuinely requires a client certificate - Harbor or Nexus configured for it, or a Zarf registry whose <code>clientauth</code> an operator overrode. That needs a <code>clientCertSecretRef</code> here and, for the deploy pod, somewhere to put it: the pod’s half runs through <code>LoadOptions</code>, which carries no transport, and <code>SSL_CERT_FILE</code> trusts roots rather than presenting a certificate. So it is an upstream change first. Deferred deliberately, not overlooked.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="the-zarf-package-is-built-from-out-and-pins-its-version-everywhere-it-appears"><a class="header" href="#the-zarf-package-is-built-from-out-and-pins-its-version-everywhere-it-appears">The Zarf package is built from <code>out/</code>, and pins its version everywhere it appears</a></h1>
 <p>This repository ships a Zarf <code>v1beta1</code> package definition, <a href="../zarf.yaml"><code>zarf.yaml</code></a>, for management clusters with no route to <code>ghcr.io</code> - the same environments this provider deploys <em>into</em> are the ones it has to be <em>delivered</em> through. The file mirrors cluster-api-provider-cargoship’s <code>zarf.yaml</code>, and its <code>docs/agent/choice-zarf-package.md</code> is the original of this argument. Two things about it look like oversights and are not.</p>
