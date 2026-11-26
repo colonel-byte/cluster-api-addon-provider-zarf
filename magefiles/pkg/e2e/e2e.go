@@ -156,6 +156,7 @@ func Up() error {
 	}{
 		{"clusterctl binary", ensureClusterctl},
 		{"registry container", ensureRegistry},
+		{"secure registry container", ensureSecureRegistry},
 		{"kind management cluster", ensureMgmtCluster},
 		{"registry wiring on management nodes", configureMgmtRegistry},
 		{"CAPI core + CAPD", clusterctlInit},
@@ -166,6 +167,7 @@ func Up() error {
 		{"spike image in registry", seedSpikeImage},
 		{"fixture signing keypairs", ensureKeypairs},
 		{"fixture packages in registry", seedFixturePackages},
+		{"app fixture in the secure registry", seedSecureRegistry},
 		{"init package mirror", mirrorInitPackage},
 	}
 	for _, step := range steps {
@@ -184,6 +186,7 @@ func Up() error {
 func Down() error {
 	bestEffort("kind", "delete", "cluster", "--name", mgmtCluster)
 	bestEffort("docker", "rm", "-f", registryName)
+	bestEffort("docker", "rm", "-f", secureRegistryName)
 	orphans, err := sh.Output("docker", "ps", "-aq", "--filter", "label=io.x-k8s.kind.cluster="+workloadCluster)
 	if err != nil {
 		return err
@@ -238,12 +241,20 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	secure, err := filepath.Abs(secureRegistryDir())
+	if err != nil {
+		return err
+	}
 	return sh.RunWithV(map[string]string{
 		"E2E_KUBECONFIG":          kubeconfig,
 		"E2E_WORKLOAD_KUBECONFIG": workload,
 		// The fixture keypairs, so a test can name the public half a proxy verifies against
 		// and the unrelated one the bad-signature case needs.
 		"E2E_KEY_DIR": keys,
+		// The secure registry's generated CA, which the registry-credential tests put in the
+		// Secret and ConfigMap a proxy names. Generated per topology, so it cannot be a
+		// constant in the suite the way the hostname and the password are.
+		"E2E_SECURE_REGISTRY_DIR": secure,
 	}, "go", "-C", "test/e2e", "test", "-count=1", "-timeout=40m", "./...")
 }
 
@@ -566,9 +577,12 @@ func installWorkloadCNI() error {
 	// exists" and no init can ever complete. Removing the taint is what kind already does for
 	// its own single-node clusters; the alternative is paying for a worker machine the rest of
 	// the suite has no use for.
+	//
+	// Best-effort: removing a taint that is already gone is an error, which is the ordinary
+	// case on every re-run of Up against a standing topology.
 	if err := workloadKubectl("taint", "node", "--all",
 		"node-role.kubernetes.io/control-plane:NoSchedule-", "--overwrite"); err != nil {
-		return err
+		fmt.Println("the control-plane taint was already removed")
 	}
 
 	// A StorageClass, for the same reason: CAPD ships none, and the init package's registry
