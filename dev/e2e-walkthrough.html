@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c4488d.js";
+            window.path_to_searchindex_js = "../searchindex-26a09373.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-2757b64a.js"></script>
@@ -205,21 +205,26 @@ go run ./magefiles/core e2e:moveDown  # remove only that second cluster
 <tbody>
 <tr><td>1</td><td><code>clusterctl binary</code></td><td>Downloads the pinned <code>clusterctl</code> to <code>dist/e2e/clusterctl</code> if absent</td></tr>
 <tr><td>2</td><td><code>registry container</code></td><td>Starts <code>distribution:3</code> as <code>caapz-e2e-registry</code>, published on <code>127.0.0.1:5001</code></td></tr>
-<tr><td>3</td><td><code>kind management cluster</code></td><td>Creates kind cluster <code>caapz-e2e</code> with the docker socket mounted (CAPD needs it to create sibling containers) and a containerd <code>config_path</code></td></tr>
-<tr><td>4</td><td><code>registry wiring on management nodes</code></td><td>Writes a containerd <code>hosts.toml</code> so the node resolves <code>caapz-e2e-registry:5000</code> over plain HTTP</td></tr>
-<tr><td>5</td><td><code>CAPI core + CAPD</code></td><td><code>clusterctl init --infrastructure docker</code> with <code>CLUSTER_TOPOLOGY=true</code></td></tr>
-<tr><td>6</td><td><code>provider deployments available</code></td><td>Waits for every provider deployment. Sized for a <strong>cold</strong> image pull - see the constant’s comment</td></tr>
-<tr><td>7</td><td><code>workload cluster</code></td><td>Generates a <code>--flavor development</code> cluster manifest, caches it keyed on the Kubernetes version, applies it with retries, waits for <code>ControlPlaneInitialized</code> and the kubeconfig secret</td></tr>
-<tr><td>8</td><td><code>registry wiring on workload nodes</code></td><td>Same <code>hosts.toml</code>, plus a containerd <code>config_path</code> patch and restart, because CAPD machines never saw kind’s config patches</td></tr>
-<tr><td>9</td><td><code>CNI on the workload cluster</code></td><td>Writes <code>dist/e2e/workload.kubeconfig</code>, applies Calico, waits for node <code>Ready</code>, labels the node for the registry’s affinity, removes the control-plane taint, installs local-path as the default StorageClass, and marks its namespace Pod-Security <code>privileged</code></td></tr>
-<tr><td>10</td><td><code>spike image in registry</code></td><td>Stages the busybox the Phase 0 assertions use</td></tr>
-<tr><td>11</td><td><code>fixture signing keypairs</code></td><td>Generates two Cosign keypairs into <code>dist/e2e/keys</code> - the signing pair, and an unrelated one for the bad-signature case</td></tr>
-<tr><td>12</td><td><code>fixture packages in registry</code></td><td>Builds and pushes three signed fixture packages through the vendored Zarf SDK</td></tr>
-<tr><td>13</td><td><code>init package mirror</code></td><td>Copies the v1beta1 init package into the local registry, registry to registry. The one large transfer; skipped when already present</td></tr>
+<tr><td>3</td><td><code>secure registry container</code></td><td>Starts a second <code>distribution:3</code> as <code>caapz-e2e-secure-registry</code> on <code>127.0.0.1:5002</code>, serving HTTPS with a generated private CA and basic auth - what the registry-credential tests resolve against</td></tr>
+<tr><td>4</td><td><code>kind management cluster</code></td><td>Creates kind cluster <code>caapz-e2e</code> with the docker socket mounted (CAPD needs it to create sibling containers) and a containerd <code>config_path</code></td></tr>
+<tr><td>5</td><td><code>registry wiring on management nodes</code></td><td>Writes a containerd <code>hosts.toml</code> so the node resolves <code>caapz-e2e-registry:5000</code> over plain HTTP</td></tr>
+<tr><td>6</td><td><code>CAPI core + CAPD</code></td><td><code>clusterctl init --infrastructure docker</code> with <code>CLUSTER_TOPOLOGY=true</code></td></tr>
+<tr><td>7</td><td><code>provider deployments available</code></td><td>Waits for every provider deployment. Sized for a <strong>cold</strong> image pull - see the constant’s comment</td></tr>
+<tr><td>8</td><td><code>workload cluster</code></td><td>Generates a <code>--flavor development</code> cluster manifest, caches it keyed on the Kubernetes version, applies it with retries, waits for <code>ControlPlaneInitialized</code> and the kubeconfig secret</td></tr>
+<tr><td>9</td><td><code>registry wiring on workload nodes</code></td><td>Same <code>hosts.toml</code>, plus a containerd <code>config_path</code> patch and restart, because CAPD machines never saw kind’s config patches</td></tr>
+<tr><td>10</td><td><code>CNI on the workload cluster</code></td><td>Writes <code>dist/e2e/workload.kubeconfig</code>, applies Calico, waits for node <code>Ready</code>, labels the node for the registry’s affinity, removes the control-plane taint, installs local-path as the default StorageClass, and marks its namespace Pod-Security <code>privileged</code></td></tr>
+<tr><td>11</td><td><code>spike image in registry</code></td><td>Stages the busybox the Phase 0 assertions use</td></tr>
+<tr><td>12</td><td><code>fixture signing keypairs</code></td><td>Generates two Cosign keypairs into <code>dist/e2e/keys</code> - the signing pair, and an unrelated one for the bad-signature case</td></tr>
+<tr><td>13</td><td><code>fixture packages in registry</code></td><td>Builds and pushes three signed fixture packages through the vendored Zarf SDK</td></tr>
+<tr><td>14</td><td><code>app fixture in the secure registry</code></td><td>Copies the app fixture from the plain registry into the secure one with oras - the SDK’s publish takes no credentials</td></tr>
+<tr><td>15</td><td><code>init package mirror</code></td><td>Copies the v1beta1 init package into the local registry, registry to registry. The one large transfer; skipped when already present</td></tr>
+<tr><td>16</td><td><code>zarf in the management cluster</code></td><td>Zarf-initializes the management cluster itself through the SDK, in proxy mode so Zarf issues a registry certificate - what <code>fromZarfState</code> reads. Labels the node for the registry’s affinity, and every existing namespace <code>zarf.dev/agent=ignore</code>, first</td></tr>
+<tr><td>17</td><td><code>app fixture in the management cluster's zarf registry</code></td><td>Copies the app fixture into that registry through a port-forward, with the push credentials and CA out of zarf state</td></tr>
 </tbody>
 </table>
 </div>
-<p>Step 9 is where four CAPD facts live, each of which is invisible until something needs it. A CAPD cluster has no CNI, no StorageClass, a control-plane taint that disqualifies every node from Zarf’s injector, and a <code>baseline</code> Pod Security standard that forbids the storage provisioner’s <code>hostPath</code> helper pod. All four are documented at the code.</p>
+<p>Step 10 is where four CAPD facts live, each of which is invisible until something needs it. A CAPD cluster has no CNI, no StorageClass, a control-plane taint that disqualifies every node from Zarf’s injector, and a <code>baseline</code> Pod Security standard that forbids the storage provisioner’s <code>hostPath</code> helper pod. All four are documented at the code.</p>
+<p>Step 16 is the only step that changes the management cluster rather than adding to it. Zarf’s agent webhook is <code>failurePolicy: Fail</code> over every pod CREATE and rewrites image references, and its namespace selector excludes only kube-system - so CAPI’s, CAPD’s, cert-manager’s, the controller’s and every deploy Job’s images would be rewritten to a registry that does not hold them. Two things prevent it: the init sets <code>MutationPolicyLabeled</code>, so nothing is mutated that has not asked to be, and every existing namespace is labelled <code>zarf.dev/agent=ignore</code>, so the webhook is not even called for them and an unhealthy agent cannot block a pod from starting. Do not remove either without reading <code>zarfstate.go</code>’s comment on why they fail differently.</p>
 <h2 id="what-e2erun-does"><a class="header" href="#what-e2erun-does">What <code>e2e:run</code> does</a></h2>
 <div class="table-wrapper">
 <table>
@@ -243,6 +248,7 @@ go run ./magefiles/core e2e:moveDown  # remove only that second cluster
 <tr><td><code>E2E_KUBECONFIG</code></td><td>The management cluster</td></tr>
 <tr><td><code>E2E_WORKLOAD_KUBECONFIG</code></td><td>The workload cluster, host-reachable variant</td></tr>
 <tr><td><code>E2E_KEY_DIR</code></td><td>The fixture keypairs, so a test can name a public key a proxy verifies against</td></tr>
+<tr><td><code>E2E_SECURE_REGISTRY_DIR</code></td><td>The secure registry’s generated CA, htpasswd, and serving keypair</td></tr>
 </tbody>
 </table>
 </div>
@@ -268,6 +274,7 @@ go run ./magefiles/core e2e:moveDown  # remove only that second cluster
 <tr><td><code>keys/</code></td><td><code>cosign.key</code>/<code>cosign.pub</code> and <code>wrong.key</code>/<code>wrong.pub</code></td></tr>
 <tr><td><code>fixtures/</code></td><td>The generated fixture package definitions</td></tr>
 <tr><td><code>zarf-cache/</code></td><td>The SDK’s cache from building fixtures</td></tr>
+<tr><td><code>secure-registry/</code></td><td>The secure registry’s generated CA, serving keypair, and htpasswd file</td></tr>
 </tbody>
 </table>
 </div>

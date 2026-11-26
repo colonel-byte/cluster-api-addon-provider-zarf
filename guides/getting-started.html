@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c4488d.js";
+            window.path_to_searchindex_js = "../searchindex-26a09373.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-2757b64a.js"></script>
@@ -304,6 +304,44 @@ spec:
 </code></pre>
 <p>Naming a key makes verification a <strong>precondition</strong>: an unsigned package, a bad signature, or one that cannot be checked is refused in the controller before any Job exists, so unverified content never reaches a pod holding a cluster’s kubeconfig. Verification binds to the pinned digest, so a re-pushed tag never inherits an earlier verification.</p>
 <p>Leaving it unset verifies nothing, and the controller says so in its log rather than pretending otherwise. The <code>PackageSignatureVerified</code> condition is <strong>absent</strong> in that case, not <code>True</code>.</p>
+<h2 id="reach-a-registry-that-needs-credentials-or-a-private-ca"><a class="header" href="#reach-a-registry-that-needs-credentials-or-a-private-ca">Reach a registry that needs credentials or a private CA</a></h2>
+<p>An air-gapped registry usually wants both: a pull credential, and a certificate authority nothing public signed. Both are named per package, beside the repository they apply to.</p>
+<pre><code class="language-sh">kubectl create secret docker-registry registry-creds \
+  --docker-server=registry.internal \
+  --docker-username=zarf-pull \
+  --docker-password="$REGISTRY_PASSWORD"
+kubectl create configmap registry-ca --from-file=ca.crt=internal-ca.crt
+</code></pre>
+<pre><code class="language-yaml">spec:
+  package:
+    repository: registry.internal/packages/podinfo
+    version: "1.0.0"
+    pullSecretRef:
+      name: registry-creds
+    caBundleConfigMapRef:
+      name: registry-ca
+</code></pre>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Field</th><th>What it names</th></tr>
+</thead>
+<tbody>
+<tr><td><code>pullSecretRef</code></td><td>A <code>kubernetes.io/dockerconfigjson</code> Secret, exactly what <code>kubectl create secret docker-registry</code> writes. Unset means anonymous</td></tr>
+<tr><td><code>caBundleConfigMapRef</code></td><td>A ConfigMap holding PEM under <code>ca.crt</code>. A CA is not a secret, so this is the usual form</td></tr>
+<tr><td><code>caBundleSecretRef</code></td><td>The same from a Secret, because cert-manager writes its CAs into Secrets. One or the other, not both</td></tr>
+<tr><td><code>fromZarfState</code></td><td>Both, read from this management cluster’s own Zarf deployment, for the common case where the registry is the one Zarf installed</td></tr>
+<tr><td><code>insecureSkipTLSVerify</code></td><td>Skips certificate verification. The escape hatch, and per-package, so one unfixable registry cannot lower the fleet’s bar</td></tr>
+</tbody>
+</table>
+</div>
+<p>Three things are worth knowing before you use them:</p>
+<ul>
+<li><strong>The CA is added to the system roots, not substituted for them.</strong> A mirror sitting in front of a public registry keeps working.</li>
+<li><strong>Every reference resolves in the proxy’s own namespace</strong> unless the operator started the controller with <code>--secret-namespaces</code> naming another. A refused cross-namespace reference says so, with reason <code>CrossNamespaceNotEnabled</code>.</li>
+<li><strong><code>fromZarfState</code> supplies the credentials <em>and</em> the CA</strong>, so naming it alongside <code>pullSecretRef</code> or either CA reference is refused by the API server rather than silently half-applied.</li>
+</ul>
+<p>The same fields exist on <code>spec.init.package</code>, and an init package in a different registry from the one it installs is a normal arrangement - so set them there too rather than assuming the main package’s apply.</p>
 <h2 id="choose-how-it-behaves-over-time"><a class="header" href="#choose-how-it-behaves-over-time">Choose how it behaves over time</a></h2>
 <div class="table-wrapper">
 <table>
