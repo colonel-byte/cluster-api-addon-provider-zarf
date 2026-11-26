@@ -102,8 +102,11 @@ func Options(spec deployspec.Spec, cachePath string) (packager.LoadOptions, pack
 		// shortcut: amd64 mirrors the resolver's default rather than the pod's own arch - the
 		// package platform must match the target cluster, not this pod; widen with §4D's
 		// architecture detection.
-		Architecture:  "amd64",
-		RemoteOptions: types.RemoteOptions{PlainHTTP: spec.PlainHTTP},
+		Architecture: "amd64",
+		RemoteOptions: types.RemoteOptions{
+			PlainHTTP:             spec.PlainHTTP,
+			InsecureSkipTLSVerify: spec.InsecureSkipTLSVerify,
+		},
 	}
 	// Always the deployment filter, even with nothing selected: it is what "empty means the
 	// package's defaults" (the spec.components doc) actually requires. With no filter at all a
@@ -120,9 +123,12 @@ func Options(spec deployspec.Spec, cachePath string) (packager.LoadOptions, pack
 	deployOpts := packager.DeployOptions{
 		// Air-gap is this provider's whole premise; YOLO packages flip themselves to
 		// connected inside Deploy.
-		Connectivity:  state.PackageConnectivityAirGap,
-		SetVariables:  spec.Set,
-		RemoteOptions: types.RemoteOptions{PlainHTTP: spec.PlainHTTP},
+		Connectivity: state.PackageConnectivityAirGap,
+		SetVariables: spec.Set,
+		RemoteOptions: types.RemoteOptions{
+			PlainHTTP:             spec.PlainHTTP,
+			InsecureSkipTLSVerify: spec.InsecureSkipTLSVerify,
+		},
 	}
 	if spec.Values != "" {
 		if err := yaml.Unmarshal([]byte(spec.Values), &deployOpts.Values); err != nil {

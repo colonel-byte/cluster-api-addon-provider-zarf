@@ -55,6 +55,10 @@ func runDeploy(args []string) {
 
 	result := deploy.Result{}
 	spec, err := deploy.Load(*specPath)
+	if err == nil {
+		// Before any pull: the credentials and CA, if the controller mounted them.
+		err = deploy.Reachability(*specPath, *cachePath)
+	}
 	if err != nil {
 		result.Error = err.Error()
 	} else {

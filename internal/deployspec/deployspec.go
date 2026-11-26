@@ -35,6 +35,14 @@ const FileName = "deploy-spec.yaml"
 // deploy-spec Secret - the same document shape, naming the init package (§6 step 5).
 const InitFileName = "init-spec.yaml"
 
+// DockerConfigFileName is the Secret key the registry credentials sit under, beside FileName.
+// Literally config.json, because the mount directory becomes the pod's $DOCKER_CONFIG and that
+// is the only name a Docker config directory holds its config under.
+const DockerConfigFileName = "config.json"
+
+// CAFileName is the Secret key the registry CA bundle sits under, beside FileName.
+const CAFileName = "ca.crt"
+
 // Version is this document's schema version, bumped on incompatible change - the controller
 // and the deploy subcommand ship in one image, but a Job stamped before an upgrade can run
 // after it. Under the project's one identity domain, same as the API group - this is a file
@@ -61,6 +69,10 @@ type Spec struct {
 	// PlainHTTP carries the manager's --registry-plain-http flag to the pod, so the Job pulls
 	// over the same scheme the controller resolved and verified over. Test topologies only.
 	PlainHTTP bool `json:"plainHTTP,omitempty"`
+
+	// InsecureSkipTLSVerify carries the source's field of the same name. The credentials and
+	// the CA travel as mounted files rather than fields - see DockerConfigFileName.
+	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
 }
 
 // Marshal renders the document as the YAML the Secret carries.
