@@ -327,16 +327,41 @@ Two holes B leaves, neither of which argues for a different starting point:
 
 E is where this goes if B's holes start being hit in practice. It is worth preferring over C and D when that day comes, because it removes the question rather than delegating it: a bundle that remembers its own stages on the cluster they ran against does not need to infer anything, and `clusterctl move` stops being a special case for bundles the way it already is not one for Zarf's own records.
 
+## One aggregate condition, and the column that needs it
+
+A fleet-scoped object has no single truth to report: its clusters may disagree, and `kubectl get` has one line to say so in. This is the question the printer columns ran into, and it is worth answering for the existing `ZarfPackageProxy` before a bundle exists - a bundle then reuses the answer rather than inventing a second one.
+
+**The event and column machinery is already in place, which makes this cheap.** Condition events are emitted from the single status-write choke point, so a new aggregate condition emits Events on transition with no extra wiring, and the printer columns are already reading conditions by type. What is missing is the condition itself.
+
+Three shapes, and they are not equally honest:
+
+| Shape                                                                             | What `kubectl get` says                      | Problem                                                                                       |
+| --------------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| **Proxy-local only** - resolution, dependencies, spec sanity                      | `Ready=True` while nothing deployed anywhere | Says the proxy is fine when the fleet is not, which is the blindness the columns exist to fix |
+| **Worst-of-releases** - True when every matched cluster is `Deployed`/`Completed` | `Ready=False`, reason from the worst cluster | Honest, but one broken cluster out of two hundred reads the same as total failure             |
+| **Counts beside the condition**                                                   | `READY 11/12` and the worst reason           | Needs integer status fields, because printer columns cannot take the length of a list         |
+
+**Worst-of-releases for the condition, counts for the columns.** The condition is what Events and `dependsOn`-style gating can key on, and it should mean "the fleet has converged", because that is the question an operator is actually asking. The counts are what stop a single bad cluster reading as a dead fleet. CAPI's own objects do exactly this - `MachineDeployment` carries `readyReplicas` and friends as integers precisely because a column cannot count a list.
+
+The roll-up is nearly free to compute: the reconciler already resolves `status.matchingClusters` and already looks up each cluster's release through `findRelease`, so counting the ones in `Deployed` or `Completed` is a pass over work it has done. The reason to surface on failure is the worst release's `Ready` reason - which is why `WaitingForDependency` or `PackageManagedTwice` ends up on the proxy's own line, naming the actual blocker rather than a generic failure.
+
+Two sub-questions this leaves, both small and both worth settling with it:
+
+- **A proxy matching zero clusters.** `Ready=True` reads as converged when nothing has happened; `Unknown` with a reason naming it is more honest, and is what CAPI uses for "not yet determined".
+- **Which columns earn the default width.** `READY`, a count, and the worst reason are three, on top of `Strategy`, `Version` and `Age`. Something has to move to `-o wide`, and `Strategy` is the least urgent of them.
+
+None of this is blocked on bundles, and bundles are not blocked on it - a `ZarfBundleRelease` reports per-cluster state either way. It is sequenced first only because the answer should be one answer.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
 
-1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move` discarded the per-cluster state? Still open, but the option space is worked out in [Adopting a cluster the bundle has not seen](#adopting-a-cluster-the-bundle-has-not-seen), including which option is cheap enough to start with.
+1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move` discarded the per-cluster state? **Punted deliberately, with the option space recorded** in [Adopting a cluster the bundle has not seen](#adopting-a-cluster-the-bundle-has-not-seen). Nobody has asked for adoption yet; option B is what a first implementation should do, costs nothing, and is not the destructive direction, so this does not need settling before a reconciler exists. The options are written down so that the day somebody does ask, the thinking is not redone.
 2. ~~**May a `Reconcile` stage re-run out of order?**~~ **Decided: changed stages only, always in stage order.** See [Re-running a stage](#re-running-a-stage).
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
 4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
 5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, or reordering? A name per stage (rather than position alone) exists so this is answerable at all.
-6. **Status shape.** A per-cluster release is clear. What a fleet-wide bundle reports in its own status is the same unsolved question as proxy `Ready` aggregation, and should be answered once for both - it is what a `kubectl get` status column needs, which is the surface an operator actually reads. See [Loudly means every object an operator might look at](#loudly-means-every-object-an-operator-might-look-at).
+6. **Status shape**, and it is the next thing worth building rather than a bundle prerequisite. See [One aggregate condition, and the column that needs it](#one-aggregate-condition-and-the-column-that-needs-it).
 7. ~~**Conflict detection with proxies.**~~ **Decided: refuse, on both sides, loudly.** See [Two managers of one package is a hard stop](#two-managers-of-one-package-is-a-hard-stop).
 
 ## Out of scope for a first version
