@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.2.0](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.2...v0.2.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* document the registry credential and CA fields ([#371](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/371))
+* resolve registry credentials and CA bundles for package resolution ([#367](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/367))
+
+### Features
+
+* **api:** add registry credentials, CA bundles and TLS options to the package source ([#365](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/365)) ([ce35510](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/ce35510be9ca4f872b8c4388b8c2e7bf61f66411))
+* mount the registry credentials and CA into deploy pods ([#368](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/368)) ([3730b2c](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/3730b2c89866652d9614990acceb8128d543f1b8))
+* resolve registry credentials and CA bundles for package resolution ([#367](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/367)) ([f064b8c](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f064b8c5907fbf05c63664f420e7d814fe0044c5))
+
+
+### Bug Fixes
+
+* wake releases blocked on another proxy's deploy slot ([#375](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/375)) ([a8e71e1](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a8e71e1470baa9535b02e75a4ead066fa4e917ae))
+
+
+### Documentation
+
+* document the registry credential and CA fields ([#371](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/371)) ([c283132](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/c283132c2e834b1ff419a116f3cf97cd3a25ce0e))
+
+
+### Miscellaneous
+
+* re-render the CRDs for the registry auth and TLS fields ([#366](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/366)) ([1e3c015](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/1e3c0154eadd7976287be9aec5d5212d2d68d022))
+* re-render the manager role for configmap reads ([#369](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/369)) ([fa4fd75](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/fa4fd75b0820eb32886e6d5d02ba65aedee9ab55))
+
 ## [0.1.2](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.1...v0.1.2) (2026-11-25)
 
 
