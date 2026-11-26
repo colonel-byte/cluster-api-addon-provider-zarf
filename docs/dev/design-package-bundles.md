@@ -352,6 +352,36 @@ Two sub-questions this leaves, both small and both worth settling with it:
 
 None of this is blocked on bundles, and bundles are not blocked on it - a `ZarfBundleRelease` reports per-cluster state either way. It is sequenced first only because the answer should be one answer.
 
+## Editing a stage list that clusters have already run
+
+A bundle's stages are an ordered list, and a per-cluster record says which of them ran. Those two can disagree structurally rather than just by digest, and the question is what the controller does about it.
+
+**A stage's identity is its name**, which is why stages are named rather than positional - and that is also the hazard: **a rename reads as a removal plus an insertion.** The new name has never been applied, so it runs. On a `Reconcile` stage that is an idempotent re-deploy. On an `ApplyOnce` seed stage it is the destructive case this design has spent most of its decisions avoiding: re-running `init-seed` reverts the permanent registry. A design that does not say something about renames has a footgun in it.
+
+The five edits, and what each one means on a cluster that has already finished the list:
+
+| Edit                 | The question it raises                                                                                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Append at the end    | None. A new stage has never run, so it runs. The only unambiguous edit                                                                                            |
+| Insert in the middle | Does it run after the stages that were declared after it? If yes the declared order was a lie for this cluster; if no the declaration is a lie about this cluster |
+| Remove               | What it deployed stays - nothing uninstalls. Is the record kept as history or pruned?                                                                             |
+| Reorder              | The applied order is a historical fact and cannot be changed retroactively                                                                                        |
+| Rename               | Indistinguishable from remove-plus-insert unless something says otherwise                                                                                         |
+
+### The options
+
+- **A. Forward-only.** The set of applied stage names is the state; any stage not in it runs, in declared order relative to other unapplied stages. An insert therefore runs late, a reorder affects only what has not run, and a removal leaves its record as history. Simple, never destructive, and the declaration is still exactly right for clusters that join later - the cost is that one document means two things depending on when a cluster arrived.
+- **B. Refuse structural divergence.** The applied stage names must remain a prefix of the declared list, in order. Anything else holds the bundle for that cluster with a condition naming the first divergence, and the operator's path is a new bundle rather than an edited one. Never silently wrong, and rigid enough that an innocent append-for-new-clusters can block a converged fleet.
+- **C. Immutable stages, versioned bundles.** Reject edits other than appends outright, so changing a sequence means a new object. The strongest guarantee and the worst fit for GitOps, where editing in place is the whole workflow.
+- **D. Split the list by strategy.** The `ApplyOnce` stages are history and are immutable once applied - editing or renaming one is refused as in B. The `Reconcile` stages are desired state, where inserting, removing and reordering are free and order matters only among those that need running, as in A.
+
+**D is the one worth building, and it follows from a decision already taken.** The per-stage `strategy` already divides the list into exactly these two halves: `ApplyOnce` marks the stages whose values a later stage supersedes - the bootstrap prefix, which is a record of what happened - and `Reconcile` marks the convergent tail, which is a description of what should be true. Those are different kinds of thing and they want different edit rules. It also closes the rename hazard precisely where it bites: renaming an applied `ApplyOnce` stage is refused, so a seed stage cannot be re-run by a typo, while renaming a `Reconcile` stage costs an idempotent redeploy.
+
+Two sub-questions D leaves, both small:
+
+- **Is a removed stage's record pruned or kept?** Keeping it means status grows without bound on a long-lived bundle; pruning loses the only evidence that the stage ever ran, which is what an `ApplyOnce` decision depends on. Keeping it, marked as no longer declared, is the safer default.
+- **What refuses an `ApplyOnce` edit - the API server or the reconciler?** CEL cannot see the per-cluster record, so this is a reconciler-time hold rather than admission, with the same consequence as every other verdict here: it is level-triggered, and putting the name back clears it.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
@@ -360,7 +390,7 @@ These are the things to settle before writing a reconciler, and each one changes
 2. ~~**May a `Reconcile` stage re-run out of order?**~~ **Decided: changed stages only, always in stage order.** See [Re-running a stage](#re-running-a-stage).
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
 4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
-5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, or reordering? A name per stage (rather than position alone) exists so this is answerable at all.
+5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, reordering, or renaming one? Still open; the options are in [Editing a stage list that clusters have already run](#editing-a-stage-list-that-clusters-have-already-run), along with the one hazard that is sharper than it looks.
 6. **Status shape**, and it is the next thing worth building rather than a bundle prerequisite. See [One aggregate condition, and the column that needs it](#one-aggregate-condition-and-the-column-that-needs-it).
 7. ~~**Conflict detection with proxies.**~~ **Decided: refuse, on both sides, loudly.** See [Two managers of one package is a hard stop](#two-managers-of-one-package-is-a-hard-stop).
 
