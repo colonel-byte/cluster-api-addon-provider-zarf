@@ -256,12 +256,46 @@ Moving a package from a proxy to a bundle (or back) cannot be done by declaring 
 
 This is also where a `takeOwnership` knob would eventually fit - §3's name-discontinuous handoff - and the hard stop is a better default than that knob, because it fails closed while the knob fails open.
 
+## Re-running a stage
+
+A stage re-runs when its **applied identity** no longer matches what the bundle declares. That identity is the resolved digest plus the stage's own `components`, `values` and `set` - content changes move the digest, selection changes move the spec, and either is a reason to deploy again. A stage whose identity is unchanged is not re-run, which is what makes a bundle's packages independently updatable.
+
+Two rules, and they do not conflict the way the open question feared:
+
+- **Only changed stages re-run.** Bumping one package does not re-deploy the others.
+- **Re-runs happen in stage order.** If two stages changed, the earlier one goes first. There is no case where a later stage is applied before an earlier one that also needs applying.
+
+The reason those can both hold is the per-stage `strategy`. The feared case - a changed early stage reverting a later one - is a stage that should have been `ApplyOnce`, and that is a property of the package, not of the ordering algorithm.
+
+### Which stages need `ApplyOnce`, precisely
+
+> A stage must be `ApplyOnce` exactly when re-running it would re-apply values that a later stage supersedes **on the same Helm release**.
+
+Worked through on the reference bundle:
+
+| Stage            | Carries                     | Strategy    | Why                                                                                   |
+| ---------------- | --------------------------- | ----------- | ------------------------------------------------------------------------------------- |
+| `init-seed`      | injector, seed registry     | `ApplyOnce` | Same release as `registry`, with values that stage supersedes - re-running reverts it |
+| `storage-seed`   | images, seed charts, bucket | `Reconcile` | Nothing later touches those releases, so a re-run is an ordinary chart upgrade        |
+| `registry`       | permanent registry, agent   | `Reconcile` | The convergent half of the init package                                               |
+| `storage-images` | images, bucket, no charts   | `Reconcile` | Idempotent re-push                                                                    |
+
+**`storage-seed` being `Reconcile` is load-bearing, and the opposite is a trap worth naming.** It is the stage carrying the storage driver's *charts*; `storage-images` carries only images. Make `storage-seed` `ApplyOnce` and a bump to the storage package pushes new images that nothing uses, while the driver runs the old chart forever, with no error anywhere. Re-running it is safe because the seed charts differ from the plain ones only in templating image repositories to `{{ .State.Registry.Address }}`, and that address does not change across the seed-to-permanent handover - measured in nodeport mode, `127.0.0.1:31999` before and after. The stage also carries its own images, so it is self-contained on a re-run.
+
+A corollary: once `storage-seed` is `Reconcile`, `storage-images` earns its keep on day one and is close to a no-op afterwards. That is fine - it is cheap - but it is worth knowing which stage is actually upgrading the driver.
+
+### The hazard this leaves
+
+A stage can be correct only because of an *earlier* stage's side effect, and the controller cannot see that. `storage-images` exists because the images must live in the registry `registry` stood up; if a re-run of `registry` ever recreated that registry's storage rather than upgrading it in place, the images would be gone and `storage-images` would need to re-run even though its own identity did not change.
+
+Nothing in the stage list expresses "re-run me whenever an earlier stage does", and a first version should not invent it. The operator's lever is to bump both, and the design's obligation is to say so rather than to imply changed-stage-only is always sufficient. A per-stage `rerunAfterEarlierStages` flag is the obvious later addition if real bundles need it; a flag nobody has needed yet is not.
+
 ## Open questions
 
 These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
 
 1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move`? A proposal: if the cluster already has Zarf state the first time the bundle reconciles it, mark every `ApplyOnce` stage satisfied without running it. That is consistent with how `autoInit` keys on observed state, and it is wrong for a cluster that has state but never finished - which is the same ambiguity the init gate already refuses to guess at.
-2. **May a `Reconcile` stage re-run out of order?** If `registry` is bumped, stages after it may or may not need re-running. Strictly-forward re-runs are simple to reason about; re-running only changed stages is what makes independent updates work. The two conflict when a changed early stage would revert a later one.
+2. ~~**May a `Reconcile` stage re-run out of order?**~~ **Decided: changed stages only, always in stage order.** See [Re-running a stage](#re-running-a-stage).
 3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
 4. ~~**Is a bundle allowed to interleave with `dependsOn`?**~~ **Decided: at the object level, yes; at the stage level, never.** See [A bundle is one node in the DAG](#a-bundle-is-one-node-in-the-dag).
 5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, or reordering? A name per stage (rather than position alone) exists so this is answerable at all.
