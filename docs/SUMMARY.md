@@ -21,7 +21,7 @@
 - [README](dev/README.md)
 - [adding-ci](dev/adding-ci.md)
 - [architecture](dev/architecture.md)
-- [design-package-bundles](dev/design-package-bundles.md)
+- [design-package-stages](dev/design-package-stages.md)
 - [e2e-testing](dev/e2e-testing.md)
 - [e2e-walkthrough](dev/e2e-walkthrough.md)
 - [new-repo-checklist](dev/new-repo-checklist.md)
