@@ -104,6 +104,8 @@ Three states worth recognising:
 | `False`   | Something is holding the fleet back - `STATUS` names it, and the counts say how much of the fleet     |
 | `Unknown` | The selector matches no clusters. Not success: usually a label that does not exist on any cluster yet |
 
+One `STATUS` is worth recognising because it reads as healthy and is not quite: `Superseded` on an `ApplyOnce` proxy means every cluster has the package - so `READY` is `True` - but some were seeded with a version the spec no longer declares, and a seed is never re-run. `kubectl get -o wide` adds the count, and the release says which version each cluster actually holds.
+
 `kubectl get -o wide` adds the strategy and the package-resolution condition, which is where to look when `STATUS` names a resolution or signature failure. The controller also records Events on every one of these transitions, so `kubectl describe` is a history rather than a snapshot:
 
 ```sh

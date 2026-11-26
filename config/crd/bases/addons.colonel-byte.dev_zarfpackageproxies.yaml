@@ -35,6 +35,11 @@ spec:
       jsonPath: .status.conditions[?(@.type=="Ready")].reason
       name: Status
       type: string
+    - description: Clusters seeded with a version the spec no longer declares
+      jsonPath: .status.supersededClusterCount
+      name: Superseded
+      priority: 1
+      type: integer
     - description: Declared package version
       jsonPath: .spec.package.version
       name: Version
@@ -3319,6 +3324,15 @@ spec:
                   controller re-resolves only when the spec's reference no longer matches it - an edit to
                   values or components must not silently re-pin a moved tag.
                 type: string
+              supersededClusterCount:
+                description: |-
+                  supersededClusterCount is how many Clusters were seeded with a version the spec no longer
+                  declares. Only ApplyOnce proxies can hold this state, and holding it is the contract
+                  rather than a fault - a seed is never re-run - so it does not make the proxy un-Ready. It
+                  is counted because a fleet reporting converged while every cluster is a version behind is
+                  otherwise indistinguishable from one that is actually up to date.
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

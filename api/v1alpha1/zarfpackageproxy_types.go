@@ -101,6 +101,12 @@ const (
 	// ReasonAwaitingReleases is Ready: False with no release yet stamped to borrow a reason
 	// from - the window between matching a cluster and stamping its release.
 	ReasonAwaitingReleases = "AwaitingReleases"
+
+	// ReasonSuperseded is Ready: True on an ApplyOnce proxy whose clusters are all deployed but
+	// some were seeded with a version the spec no longer declares. True because every cluster
+	// has the package and a seed is never re-run; a reason of its own because "converged" would
+	// otherwise be the only thing an operator sees on a fleet that is a version behind.
+	ReasonSuperseded = "Superseded"
 )
 
 // ConditionPackageResolved is the proxy condition for §6 step 4's digest resolution and
@@ -518,6 +524,14 @@ type ZarfPackageProxyStatus struct {
 	// +optional
 	ReadyClusterCount int32 `json:"readyClusterCount,omitempty"`
 
+	// supersededClusterCount is how many Clusters were seeded with a version the spec no longer
+	// declares. Only ApplyOnce proxies can hold this state, and holding it is the contract
+	// rather than a fault - a seed is never re-run - so it does not make the proxy un-Ready. It
+	// is counted because a fleet reporting converged while every cluster is a version behind is
+	// otherwise indistinguishable from one that is actually up to date.
+	// +optional
+	SupersededClusterCount int32 `json:"supersededClusterCount,omitempty"`
+
 	// resolvedDigest is the package manifest digest the declared tag resolved to, pinned on
 	// first resolution. Every pull, verification, and deploy uses this digest, never the tag,
 	// so a re-pushed tag cannot change what the fleet runs. See docs/dev/architecture.md §3.
@@ -567,6 +581,7 @@ type ZarfPackageProxyStatus struct {
 // +kubebuilder:printcolumn:name="Deployed",type="integer",JSONPath=".status.readyClusterCount",description="Matching clusters with the package deployed"
 // +kubebuilder:printcolumn:name="Clusters",type="integer",JSONPath=".status.clusterCount",description="Clusters the selector matches"
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].reason",description="Why Ready holds its status"
+// +kubebuilder:printcolumn:name="Superseded",type="integer",priority=1,JSONPath=".status.supersededClusterCount",description="Clusters seeded with a version the spec no longer declares"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.package.version",description="Declared package version"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 // +kubebuilder:printcolumn:name="Strategy",type="string",priority=1,JSONPath=".spec.strategy",description="Reconcile or ApplyOnce"

@@ -41,14 +41,39 @@ func release(phase addonsv1alpha1.ReleasePhase, reason, message string) *addonsv
 	return object
 }
 
+// applyOnceAt and reconcileAt build a proxy declaring a version under each strategy, which is
+// what decides whether a lagging release counts as superseded or as mid-rollout.
+func applyOnceAt(version string) *addonsv1alpha1.ZarfPackageProxy {
+	proxy := &addonsv1alpha1.ZarfPackageProxy{}
+	proxy.Spec.Strategy = addonsv1alpha1.StrategyApplyOnce
+	proxy.Spec.Package.Version = version
+	return proxy
+}
+
+func reconcileAt(version string) *addonsv1alpha1.ZarfPackageProxy {
+	proxy := &addonsv1alpha1.ZarfPackageProxy{}
+	proxy.Spec.Strategy = addonsv1alpha1.StrategyReconcile
+	proxy.Spec.Package.Version = version
+	return proxy
+}
+
+// seededAt is a finished release carrying the version it deployed.
+func seededAt(version string) *addonsv1alpha1.ZarfPackageRelease {
+	object := release(addonsv1alpha1.PhaseCompleted, "", "")
+	object.Status.DeployedVersion = version
+	return object
+}
+
 func TestReadyVerdict(t *testing.T) {
 	tests := []struct {
 		name            string
+		proxy           *addonsv1alpha1.ZarfPackageProxy
 		proxyConditions []metav1.Condition
 		releases        []*addonsv1alpha1.ZarfPackageRelease
 		wantStatus      metav1.ConditionStatus
 		wantReason      string
 		wantReady       int
+		wantSuperseded  int
 		wantInMessage   string
 	}{
 		{
@@ -138,6 +163,33 @@ func TestReadyVerdict(t *testing.T) {
 			wantReady:  0,
 		},
 		{
+			// An ApplyOnce fleet left behind by a version bump: every cluster has the package,
+			// so Ready stays True, but "Converged" alone would hide that none of them has what
+			// the spec now declares.
+			name:  "an ApplyOnce fleet seeded at an older version is Ready but superseded",
+			proxy: applyOnceAt("2.0.0"),
+			releases: []*addonsv1alpha1.ZarfPackageRelease{
+				seededAt("1.0.0"),
+				seededAt("2.0.0"),
+			},
+			wantStatus:     metav1.ConditionTrue,
+			wantReason:     addonsv1alpha1.ReasonSuperseded,
+			wantReady:      2,
+			wantSuperseded: 1,
+			wantInMessage:  "1 seeded with a version 2.0.0 no longer declares",
+		},
+		{
+			name:  "a Reconcile release behind the declaration is mid-rollout, not superseded",
+			proxy: reconcileAt("2.0.0"),
+			releases: []*addonsv1alpha1.ZarfPackageRelease{
+				seededAt("1.0.0"),
+			},
+			wantStatus:     metav1.ConditionTrue,
+			wantReason:     addonsv1alpha1.ReasonConverged,
+			wantReady:      1,
+			wantSuperseded: 0,
+		},
+		{
 			name: "a True proxy condition does not short-circuit the roll-up",
 			proxyConditions: []metav1.Condition{
 				{
@@ -157,10 +209,13 @@ func TestReadyVerdict(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			proxy := &addonsv1alpha1.ZarfPackageProxy{}
+			proxy := test.proxy
+			if proxy == nil {
+				proxy = &addonsv1alpha1.ZarfPackageProxy{}
+			}
 			proxy.Status.Conditions = test.proxyConditions
 
-			condition, ready := readyVerdict(proxy, test.releases)
+			condition, counts := readyVerdict(proxy, test.releases)
 			if condition.Type != addonsv1alpha1.ConditionReady {
 				t.Fatalf("want condition type %q, got %q", addonsv1alpha1.ConditionReady, condition.Type)
 			}
@@ -170,8 +225,11 @@ func TestReadyVerdict(t *testing.T) {
 			if condition.Reason != test.wantReason {
 				t.Errorf("want reason %s, got %s", test.wantReason, condition.Reason)
 			}
-			if ready != test.wantReady {
-				t.Errorf("want %d deployed, got %d", test.wantReady, ready)
+			if counts.ready != test.wantReady {
+				t.Errorf("want %d deployed, got %d", test.wantReady, counts.ready)
+			}
+			if counts.superseded != test.wantSuperseded {
+				t.Errorf("want %d superseded, got %d", test.wantSuperseded, counts.superseded)
 			}
 			if test.wantInMessage != "" && !strings.Contains(condition.Message, test.wantInMessage) {
 				t.Errorf("want %q in the message, got %q", test.wantInMessage, condition.Message)

@@ -51,24 +51,45 @@ func (r *ZarfPackageProxyReconciler) aggregateReady(ctx context.Context, proxy *
 		releases = append(releases, release)
 	}
 
-	condition, ready := readyVerdict(proxy, releases)
-	proxy.Status.ClusterCount = int32(len(matched)) //nolint:gosec // a fleet is not 2^31 clusters
-	proxy.Status.ReadyClusterCount = int32(ready)   //nolint:gosec // bounded by len(matched)
+	condition, counts := readyVerdict(proxy, releases)
+	proxy.Status.ClusterCount = int32(len(matched))                //nolint:gosec // a fleet is not 2^31 clusters
+	proxy.Status.ReadyClusterCount = int32(counts.ready)           //nolint:gosec // bounded by len(matched)
+	proxy.Status.SupersededClusterCount = int32(counts.superseded) //nolint:gosec // bounded by len(matched)
 	meta.SetStatusCondition(&proxy.Status.Conditions, condition)
 	return nil
+}
+
+// fleetCounts is what the roll-up measured, which the printer columns read back.
+type fleetCounts struct {
+	// ready is clusters whose release is Deployed or Completed.
+	ready int
+	// superseded is clusters that are ready but were seeded with a version the spec no longer
+	// declares - only reachable on an ApplyOnce proxy.
+	superseded int
+}
+
+// releaseSuperseded reports whether a release holds a version its proxy no longer declares.
+// ApplyOnce only: a Reconcile release behind the declaration is mid-rollout, which its own
+// phase already says, and would read as a permanent fault here.
+func releaseSuperseded(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease) bool {
+	if proxy.Spec.Strategy != addonsv1alpha1.StrategyApplyOnce || release == nil {
+		return false
+	}
+	seeded, declared := release.Status.DeployedVersion, proxy.Spec.Package.Version
+	return seeded != "" && declared != "" && seeded != declared
 }
 
 // readyVerdict decides the Ready condition and the deployed count from the proxy's own
 // conditions and one release per matched cluster, nil where a cluster has none yet. Pure, so
 // the decision is testable without an API server - the fetching is the part that needs one.
-func readyVerdict(proxy *addonsv1alpha1.ZarfPackageProxy, releases []*addonsv1alpha1.ZarfPackageRelease) (metav1.Condition, int) {
+func readyVerdict(proxy *addonsv1alpha1.ZarfPackageProxy, releases []*addonsv1alpha1.ZarfPackageRelease) (metav1.Condition, fleetCounts) {
 	condition := metav1.Condition{
 		Type:               addonsv1alpha1.ConditionReady,
 		ObservedGeneration: proxy.Generation,
 	}
-	set := func(status metav1.ConditionStatus, reason, message string) (metav1.Condition, int) {
+	set := func(status metav1.ConditionStatus, reason, message string) (metav1.Condition, fleetCounts) {
 		condition.Status, condition.Reason, condition.Message = status, reason, message
-		return condition, 0
+		return condition, fleetCounts{}
 	}
 
 	// Proxy-level refusals first, in the order they stop work: a cycle deploys nothing at all,
@@ -90,12 +111,15 @@ func readyVerdict(proxy *addonsv1alpha1.ZarfPackageProxy, releases []*addonsv1al
 			"the cluster selector matches no Clusters")
 	}
 
-	ready := 0
+	counts := fleetCounts{}
 	var holding *addonsv1alpha1.ZarfPackageRelease
 	for _, release := range releases {
 		if release != nil &&
 			(release.Status.Phase == addonsv1alpha1.PhaseDeployed || release.Status.Phase == addonsv1alpha1.PhaseCompleted) {
-			ready++
+			counts.ready++
+			if releaseSuperseded(proxy, release) {
+				counts.superseded++
+			}
 			continue
 		}
 		// The first cluster that is not done decides the reason, in selector order. Not the
@@ -106,11 +130,19 @@ func readyVerdict(proxy *addonsv1alpha1.ZarfPackageProxy, releases []*addonsv1al
 		}
 	}
 
-	if ready == len(releases) {
+	if counts.ready == len(releases) {
 		condition.Status = metav1.ConditionTrue
+		if counts.superseded > 0 {
+			// Still True: every cluster has the package, and an ApplyOnce seed is never re-run.
+			// The reason is what stops a fleet a version behind reading as simply converged.
+			condition.Reason = addonsv1alpha1.ReasonSuperseded
+			condition.Message = fmt.Sprintf("%d of %d clusters deployed, %d seeded with a version %s no longer declares; ApplyOnce never re-executes",
+				counts.ready, len(releases), counts.superseded, proxy.Spec.Package.Version)
+			return condition, counts
+		}
 		condition.Reason = addonsv1alpha1.ReasonConverged
-		condition.Message = fmt.Sprintf("%d of %d clusters deployed", ready, len(releases))
-		return condition, ready
+		condition.Message = fmt.Sprintf("%d of %d clusters deployed", counts.ready, len(releases))
+		return condition, counts
 	}
 
 	reason, detail := addonsv1alpha1.ReasonAwaitingReleases, "no release has been stamped yet"
@@ -121,6 +153,6 @@ func readyVerdict(proxy *addonsv1alpha1.ZarfPackageProxy, releases []*addonsv1al
 	}
 	condition.Status = metav1.ConditionFalse
 	condition.Reason = reason
-	condition.Message = fmt.Sprintf("%d of %d clusters deployed; %s", ready, len(releases), detail)
-	return condition, ready
+	condition.Message = fmt.Sprintf("%d of %d clusters deployed; %s", counts.ready, len(releases), detail)
+	return condition, counts
 }
