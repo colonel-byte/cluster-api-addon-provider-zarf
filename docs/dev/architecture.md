@@ -331,6 +331,28 @@ Directed Acyclic Graph (DAG) validation runs **at reconcile time, not admission*
 7. **Status Update**:
    Update `ZarfPackageRelease.status` and surface condition `Ready: True` on the release and proxy objects.
 
+### Registry Reachability
+
+Verification is about *what* the artifact is. Reachability is the separate question of whether the controller can get to the registry at all, and in an air gap the answer usually involves a credential and a certificate authority nothing public signed.
+
+Four fields on `spec.package` - and on `spec.init.package`, which is the same type - cover it:
+
+| Field                   | What it supplies                                                                                               |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `pullSecretRef`         | A `kubernetes.io/dockerconfigjson` Secret. Empty means anonymous, which was the only option before it          |
+| `caBundleSecretRef`     | PEM certificates under `ca.crt`, trusted *in addition to* the system roots - the cert-manager shape            |
+| `caBundleConfigMapRef`  | The same, from a ConfigMap. A CA is not secret; the Secret form exists because cert-manager writes one         |
+| `fromZarfState`         | Both of the above, read from the management cluster's own Zarf deployment instead of from an operator's Secret |
+| `insecureSkipTLSVerify` | Accepts the certificate unverified. Per-package, so one unfixable registry cannot lower the fleet's bar        |
+
+Every reference resolves through the same `--secret-namespaces` gate as `signatureKeySecretRef` (§2C), so a proxy author can only name material their own namespace holds unless the operator widened it.
+
+**The material reaches two consumers by two routes, and that is deliberate.** The controller resolves and verifies the package itself, and passes credentials and a root pool per call - so two proxies naming two registries with two credentials never see each other's. The deploy pod pulls by digest through an upstream API that carries neither, so there the credentials and the CA arrive as files mounted from the release's deploy-spec Secret, with the pod's environment pointing at them. The pod holds no management-cluster access and could not look a Secret up; one pod also serves exactly one package, so a file scoped to the pod is scoped to the pull. `docs/agent/choice-registry-credentials.md` records why, and what would have to change upstream for the pod to use the same hook the controller does.
+
+**`fromZarfState` reads the management cluster, not the workload cluster**, which is the opposite of every other Zarf-state read in this controller. The init gate, probe-and-adopt, and removal all probe a *workload* cluster through its CAPI kubeconfig; this one reads the controller's own cluster, because that is where the registry being pulled *from* lives. A workload cluster's internal Zarf registry is not a package source - its recorded address is node-local, and nothing in the management cluster can route to it.
+
+No client certificate is presented, measured rather than assumed: Zarf's registry serves clients that offer none, and the certificate it issues belongs to the per-node registry proxy. A registry that genuinely requires one needs an upstream change before this provider can carry it.
+
 ### Signature Trust Model
 
 `signatureKeySecretRef` adopts the sister cargoship repository's semantics verbatim (its `signatureKeySecretRef` field and the reasoning in its doc comment):
