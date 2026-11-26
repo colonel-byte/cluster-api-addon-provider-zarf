@@ -169,6 +169,8 @@ func Up() error {
 		{"fixture packages in registry", seedFixturePackages},
 		{"app fixture in the secure registry", seedSecureRegistry},
 		{"init package mirror", mirrorInitPackage},
+		{"zarf in the management cluster", zarfInitManagement},
+		{"app fixture in the management cluster's zarf registry", seedManagementZarfRegistry},
 	}
 	for _, step := range steps {
 		fmt.Println("==>", step.name)
