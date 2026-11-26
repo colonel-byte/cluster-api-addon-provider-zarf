@@ -104,7 +104,7 @@ func TestResolution(t *testing.T) {
 
 	// An unrelated spec edit must not re-resolve - only the drift check runs.
 	beforeEdit := proxy.DeepCopy()
-	proxy.Spec.DependsOn = []string{"something"}
+	proxy.Spec.DependsOn = proxyRefs("something")
 	if err := c.Patch(t.Context(), proxy, client.MergeFrom(beforeEdit)); err != nil {
 		t.Fatalf("editing the proxy: %v", err)
 	}

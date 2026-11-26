@@ -161,7 +161,7 @@ func TestInitPackageResolution(t *testing.T) {
 	// An unrelated edit must not re-touch the registry for the pinned init package.
 	initCalls := stub.calls["registry.internal/zarf/init"]
 	beforeEdit := proxy.DeepCopy()
-	proxy.Spec.DependsOn = []string{"something"}
+	proxy.Spec.DependsOn = proxyRefs("something")
 	if err := c.Patch(t.Context(), proxy, client.MergeFrom(beforeEdit)); err != nil {
 		t.Fatalf("editing the proxy: %v", err)
 	}

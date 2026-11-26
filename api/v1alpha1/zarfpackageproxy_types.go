@@ -341,6 +341,40 @@ type ComponentSelector struct {
 	Flavor string `json:"flavor,omitempty"`
 }
 
+// DependencyKind names the kind a dependsOn entry points at. A typed reference rather than a
+// bare name because ordered bundles (#379) will be a second kind a package can wait for, and a
+// bare string cannot say which of two kinds a name means - taken while the API is v1alpha1 and
+// the break is cheap.
+type DependencyKind string
+
+const (
+	// DependencyKindPackageProxy is a ZarfPackageProxy. The only kind today, and the default,
+	// so an entry naming nothing else stays a single line.
+	DependencyKindPackageProxy DependencyKind = "ZarfPackageProxy"
+)
+
+// DependencyReference names one object this package waits for. Always in the referring object's
+// own namespace: unlike the secret references, a dependency carries no namespace field, because
+// a dependency graph spanning namespaces is one no single author can read.
+type DependencyReference struct {
+	// kind of the referenced object. Empty means ZarfPackageProxy.
+	// +optional
+	// +kubebuilder:default=ZarfPackageProxy
+	// +kubebuilder:validation:Enum=ZarfPackageProxy
+	Kind DependencyKind `json:"kind,omitempty"`
+
+	// name of the referenced object, in this object's namespace.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+}
+
+// ProxyKind reports whether the entry refers to a ZarfPackageProxy, which an empty kind does.
+func (d DependencyReference) ProxyKind() bool {
+	return d.Kind == "" || d.Kind == DependencyKindPackageProxy
+}
+
 // DeployJobOptions customizes the Kubernetes Job the controller runs each deploy in. Every
 // field is optional; the defaults are a restricted pod security profile and an emptyDir cache
 // volume. Supply a volume named "zarf-cache" to replace the default cache emptyDir - the quirk
@@ -401,10 +435,10 @@ type ZarfPackageProxySpec struct {
 	// +kubebuilder:default=Reconcile
 	Strategy DeploymentStrategy `json:"strategy,omitempty"`
 
-	// dependsOn names other ZarfPackageProxies in the same namespace whose releases must be
-	// Deployed (or Completed, for ApplyOnce) on a cluster before this package deploys there.
+	// dependsOn names other objects in the same namespace whose releases must be Deployed (or
+	// Completed, for ApplyOnce) on a cluster before this package deploys there.
 	// +optional
-	DependsOn []string `json:"dependsOn,omitempty"`
+	DependsOn []DependencyReference `json:"dependsOn,omitempty"`
 
 	// init controls Zarf auto-initialization of uninitialized target clusters.
 	// +optional
