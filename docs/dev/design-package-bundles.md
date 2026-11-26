@@ -1,0 +1,192 @@
+# Design: ordered package bundles
+
+**Status: proposed.** Nothing here is implemented. Tracked in [#379](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/379). This records the problem, the shape that solves it, and the questions worth settling before a reconciler exists.
+
+## The problem
+
+A `ZarfPackageProxy` declares one package and one component selection for every cluster it matches. That is the right unit for almost everything, and it cannot express a bootstrap, because a bootstrap is a *sequence in which the same package is deployed more than once with a different component selection each time*.
+
+The reference case is a cluster with no storage and no registry, which is the case this provider exists for. [`bootstrap-order.md`](../guides/bootstrap-order.md) describes the cycle and the four ways out of it; the one an operator actually runs, when no reachable registry exists and storage is a Zarf package, is a staged sequence. Here is the real one, from `uds-bundles/minimus/init-ceph/uds-bundle.yaml` in the sister repository:
+
+| Stage | Package         | Components                                                             | Why                                                               |
+| ----- | --------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| 1     | `zarf-init`     | `zarf-injector`, `zarf-seed-registry`                                  | Zarf state plus an ephemeral registry, which needs no storage     |
+| 2     | `csi-rook-ceph` | images, `operator-seed-chart`, `cluster-seed-chart`, `registry-bucket` | Storage, pulled from the seed registry, exposing an object bucket |
+| 3     | `zarf-init`     | `zarf-registry`, `zarf-agent`, `git-server`                            | The permanent registry, now that it has somewhere to live         |
+| 4     | `csi-rook-ceph` | images, `registry-bucket`                                              | Re-push the storage images into the permanent registry            |
+
+Both packages appear twice. Stage 4 carries no charts at all - it exists so the cluster stops depending on content that only the ephemeral seed registry held.
+
+## Why the existing API cannot express it
+
+Four separate reasons, each sufficient on its own:
+
+- **`dependsOn` orders proxies, not deploys.** It can hold package B until package A's release reports deployed. It has no way to say "run A again, differently, after B".
+- **A proxy's spec is fleet-wide; stage progress is per-cluster.** Cluster A may be at stage 3 while cluster B is still at stage 1. So this cannot be a controller that edits one proxy's component list, because one list serves every matched cluster.
+- **The init package cannot be split into per-stage packages.** Measured, not argued: the seed and permanent registries are one Helm release lineage, so two packages carrying one revision each fight over it. See [Why the init package cannot be split](../guides/bootstrap-order.md#why-the-init-package-cannot-be-split).
+- **One package name is one deployed-package record.** Two proxies managing one package would both own that record, and there is no `takeOwnership` knob to hand it over. Staging therefore has to be one object's business.
+
+What remains is a human editing a component list between passes, which is what the Ansible collection does imperatively and what this provider asks for in a GitOps commit. That is acceptable for one cluster and wrong for a fleet, because the edit has to land when *every* cluster is ready for it.
+
+## Proposed shape
+
+Two types, mirroring the `ZarfPackageProxy`/`ZarfPackageRelease` split exactly, for the same reason that split exists: the declaration spans a fleet, the state is per cluster.
+
+**`ZarfPackageBundle`** - fleet-scoped. A cluster selector and an ordered list of stages. A stage is everything a proxy's `spec.package` already carries, plus its own lifecycle:
+
+```yaml
+apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageBundle
+metadata:
+  name: rook-ceph-bootstrap
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      storage: rook-ceph
+  stages:
+    - name: init-seed
+      strategy: ApplyOnce
+      package:
+        repository: registry.internal/zarf/init-slim
+        version: v1.0.1
+        api: v1beta1
+        signatureKeySecretRef:
+          name: cosign-pubkey
+      components:
+        - name: zarf-injector
+        - name: zarf-seed-registry
+    - name: storage-seed
+      strategy: ApplyOnce
+      package:
+        repository: registry.internal/zarf/csi-rook-ceph
+        version: v1.21.2
+      components:
+        - name: operator-images
+        - name: cluster-images
+        - name: operator-seed-chart
+        - name: cluster-seed-chart
+        - name: registry-bucket
+    - name: registry
+      strategy: Reconcile
+      package:
+        repository: registry.internal/zarf/init-slim
+        version: v1.0.1
+      components:
+        - name: zarf-registry
+        - name: zarf-agent
+    - name: storage-images
+      strategy: Reconcile
+      package:
+        repository: registry.internal/zarf/csi-rook-ceph
+        version: v1.21.2
+      components:
+        - name: operator-images
+        - name: cluster-images
+        - name: registry-bucket
+```
+
+**`ZarfBundleRelease`** - one per matched cluster, owner-referenced to the `Cluster` so it garbage-collects with it, exactly as a `ZarfPackageRelease` does. Its status carries **per-stage** state rather than a single cursor: the stage name, the digest that was applied, and when.
+
+## Reuse is a constraint, not an aspiration
+
+A bundle should read as an extension of the existing API, not a second dialect beside it. Concretely: **a stage is a `ZarfPackageProxy` spec with the fleet-level fields lifted out**, and every type below is shared verbatim rather than redeclared.
+
+| Existing type                                | Where it appears in a bundle                                                                                        |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `metav1.LabelSelector`                       | `spec.clusterSelector`, the same fleet selection a proxy performs                                                   |
+| `ZarfPackageSource`                          | `spec.stages[].package`, unchanged - repository, version, api, signature key, and every registry reachability field |
+| `ComponentSelector`                          | `spec.stages[].components`                                                                                          |
+| `DeploymentStrategy`                         | `spec.stages[].strategy`, with `ApplyOnce` and `Reconcile` keeping their meanings                                   |
+| `DeletionPolicy`                             | `spec.deletionPolicy`, bundle-wide, defaulting to `Retain` rather than `Delete`                                     |
+| `DeployJobOptions`                           | `spec.deployJob`, bundle-wide - the cache volume and node placement are a property of the cluster, not of a stage   |
+| `apiextensionsv1.JSON` / `map[string]string` | `spec.stages[].values` and `spec.stages[].set`, rendered through the same `{{ .Cluster... }}` templating            |
+| `NamespacedReference`                        | every secret and configmap reference inside a stage, resolving through the same `--secret-namespaces` gate          |
+| `ReleasePhase`, `metav1.Condition`           | `ZarfBundleRelease.status`, with the same phases and condition vocabulary                                           |
+| `corev1.LocalObjectReference`                | `ZarfBundleRelease.spec.clusterRef`, as a `ZarfPackageRelease` already does                                         |
+
+What that leaves genuinely new is small, and worth stating because it is the whole design:
+
+- `spec.stages[]` - an ordered list, where `name` identifies a stage independently of its position
+- `ZarfBundleRelease.status.stages[]` - per-stage applied digest and timestamp, the per-cluster state a cursor cannot carry
+- a `bundleRef` on the release, mirroring `packageProxyRef`
+
+Three fields are deliberately **not** carried onto a stage, and the reason is the same in each case - they are fleet-level, and a bundle already is:
+
+- `dependsOn` - a bundle's order *is* the dependency, so a per-stage `dependsOn` would be two mechanisms describing one thing
+- `init.autoInit` - a bundle expresses the init explicitly as stage 1; probing for state to decide whether to init is exactly what an `ApplyOnce` stage does
+- the follow-tag annotations - a bundle that re-pins itself mid-bootstrap is not a behaviour anybody asked for
+
+## Why per-stage state rather than a cursor
+
+A cursor integer ("this cluster has reached stage 3") cannot answer the question an operator actually has, which is *what happens when I bump one thing*. Recording the applied digest per stage answers it:
+
+| Change                                    | Re-runs                                                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `csi-rook-ceph` version bumped            | the stages naming it - here `storage-images`, and `storage-seed` only if it is not `ApplyOnce` |
+| `init-slim` version bumped                | `registry`; `init-seed` is `ApplyOnce` and stays put                                           |
+| A stage's `components` or `values` edited | that stage                                                                                     |
+| Nothing                                   | nothing - a converged bundle is quiet                                                          |
+
+This is what recovers the property that splitting packages was supposed to buy: **the CSI and the init package keep independent lifecycles even though one object sequences them.** They are independent because their stages are, not because their packages are.
+
+## Why a stage needs its own `strategy`, and why `ApplyOnce` cannot reuse the existing probe
+
+Some stages are true of a cluster exactly once. `init-seed` stands up an ephemeral registry that stage 3 replaces; re-running it after stage 3 would re-apply seed values over the permanent registry - the revert measured in the spike, which with upstream's `seedRegistry.persistence.enabled: false` also strips the registry's storage configuration. `storage-seed` is the same: its seed charts are superseded, and re-applying them later points image references back at a registry that no longer holds them.
+
+So a stage carries `strategy: ApplyOnce | Reconcile`, the same vocabulary a proxy uses, with the same meaning: deploy exactly once per cluster and never re-execute, even when the spec moves.
+
+**The trap is how "once" is decided.** A proxy's `ApplyOnce` probes the workload cluster for Zarf's deployed-package record - `hasDeployedPackage(ctx, workload, proxy.Status.PackageName)` - and adopts when it finds one. That probe is keyed on the **package name**, and in a bundle two stages routinely name the same package. The moment `init-seed` lands, "zarf has a record for `init-slim`" is true, so a name-keyed probe would make the `registry` stage adopt-and-skip and the cluster would never get a permanent registry.
+
+A stage's `ApplyOnce` must therefore be keyed on the bundle release's own per-stage record, which is the only thing that knows a *stage* ran. Zarf's record cannot tell stages of one package apart.
+
+## What it reuses
+
+Nothing about deployment changes, which is most of the value of this shape:
+
+- resolution, digest pinning, signature verification, and the `spec.package.api` check, per stage
+- the registry reachability fields - credentials, CA bundles, `fromZarfState` - per stage, since a bundle may cross registries
+- `{{ .Cluster... }}` rendering of values and set entries against the target cluster
+- the deploy-spec Secret, the deploy Job, and the pod's termination-message result
+- the per-cluster deploy slot, which already serialises one deploy at a time per cluster - so stages are sequential per cluster for free, while different clusters progress independently
+- Zarf's own deployed-package records on the workload cluster, which remain the source of truth for what is installed
+
+## Interactions worth getting right
+
+- **A package should be managed by a bundle or a proxy, never both.** Both would own one deployed-package record, which is the collision the spike measured one layer up. Whether the controller detects and refuses this, or documentation alone, is an open question below.
+- **`clusterctl move`.** A bundle is fleet-scoped and in no cluster's object graph, so it does not move, exactly like a proxy; the `ZarfBundleRelease` is owner-referenced to the `Cluster` and is garbage-collected with it. After a move the bundle is re-applied and per-stage state is gone - which makes the adoption rule for `ApplyOnce` stages load-bearing rather than a nicety.
+- **Deletion.** Bootstrap content is the last thing an operator wants uninstalled because an object was deleted. A bundle should default to retaining, which inverts the proxy's default.
+- **Failure.** A failed stage holds the bundle for that cluster and later stages never start, with the failing Job kept as evidence. This matches how a failed init already behaves and it is deliberate: a half-bootstrapped cluster must not be deployed onto.
+
+## Readiness is the package's job
+
+A stage completes when its deploy Job completes, and the controller makes no attempt to decide whether the workload the stage installed is *working*. This is a decision rather than an omission.
+
+The alternative - a per-stage readiness probe in the bundle spec, naming objects and conditions to wait for - would put a second health model in this provider beside the one Zarf already has, and it would have to be expressed generically enough to cover every driver anybody packages. Zarf can already wait, inside the package, where the author knows what "ready" means for that chart. So the controller observes the Job and nothing else, and a package that reports success before its workload can serve is a bug in the package.
+
+What that obliges of a package author is written up for operators in [`bootstrap-order.md`](../guides/bootstrap-order.md#if-you-package-a-storage-driver-make-it-prove-itself-ready), because it is the difference between a bundle that sequences correctly and one that races.
+
+Two consequences for this design:
+
+- **A stage's timeout is the Job's timeout.** A driver whose own wait exceeds it fails the stage, so the two have to be set with each other in mind.
+- **`maxTotalSeconds` inside the package is the real bound** on how long a stage can take, and it is invisible from the bundle. A stage that appears hung is usually a package waiting on something that will never happen.
+
+## Open questions
+
+These are the things to settle before writing a reconciler, and each one changes the API or the semantics.
+
+1. **How is an `ApplyOnce` stage satisfied on a cluster the bundle has not seen before** - one bootstrapped by hand, by the Ansible collection, or before a `clusterctl move`? A proposal: if the cluster already has Zarf state the first time the bundle reconciles it, mark every `ApplyOnce` stage satisfied without running it. That is consistent with how `autoInit` keys on observed state, and it is wrong for a cluster that has state but never finished - which is the same ambiguity the init gate already refuses to guess at.
+2. **May a `Reconcile` stage re-run out of order?** If `registry` is bumped, stages after it may or may not need re-running. Strictly-forward re-runs are simple to reason about; re-running only changed stages is what makes independent updates work. The two conflict when a changed early stage would revert a later one.
+3. ~~**Does a stage wait for workload health, or only for the deploy Job?**~~ **Decided: only the deploy Job.** See [Readiness is the package's job](#readiness-is-the-packages-job).
+4. **Is a bundle allowed to interleave with `dependsOn`?** Can a proxy depend on a bundle reaching its last stage, and should a bundle be able to depend on a proxy?
+5. **What does editing the stage list mean** - inserting a stage in the middle, removing one, or reordering? A name per stage (rather than position alone) exists so this is answerable at all.
+6. **Status shape.** A per-cluster release is clear. What a fleet-wide bundle reports in its own status is the same unsolved question as proxy `Ready` aggregation, and should probably be answered once for both.
+7. **Conflict detection with proxies.** Refuse, warn, or document?
+
+## Out of scope for a first version
+
+Named here so they are not mistaken for oversights: rollback, parallel stages, retry on a timer (a failed stage holds and an edit re-runs it, matching today), per-stage architecture selection, and any attempt to generate a bundle from a `uds-bundle.yaml` automatically.
+
+## One measurement that makes stage 4 make sense
+
+In nodeport mode the registry's address in Zarf state is the same before and after the handover - the spike observed `127.0.0.1:31999` and a `NodePort:31999` service after the seed stage *and* after the permanent one. That is why stage 2's seed charts, whose image references are templated to `{{ .State.Registry.Address }}`, remain correct after stage 3 replaces the registry behind that address, and why stage 4 only has to re-push images rather than re-install charts.
