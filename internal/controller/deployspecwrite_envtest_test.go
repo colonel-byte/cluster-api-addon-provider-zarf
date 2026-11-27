@@ -166,6 +166,7 @@ func TestStagedDeploySpecDocuments(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "boot", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "staged"}},
+			DeletionPolicy:  addonsv1alpha1.PolicyRetain,
 			Packages: map[string]addonsv1alpha1.ZarfPackageSource{
 				"a": {Repository: "registry.internal/zarf/a", Version: "1.0.0"},
 				"b": {Repository: "registry.internal/zarf/b", Version: "2.0.0"},

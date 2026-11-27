@@ -134,6 +134,7 @@ func TestStagedProxyCEL(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "staged", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
+			DeletionPolicy:  addonsv1alpha1.PolicyRetain,
 			Packages: map[string]addonsv1alpha1.ZarfPackageSource{
 				"zarf-init": {Repository: "registry.internal/zarf/init-slim", Version: "v1.0.1"},
 				"csi":       {Repository: "registry.internal/zarf/csi", Version: "v1.21.2"},
