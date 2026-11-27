@@ -1,0 +1,64 @@
+---
+# The staged-packages worked example - see docs/guides/staged-packages.md for the why of
+# every line. Versions were current when written; check the registry for the tag to pin.
+apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageProxy
+metadata:
+  name: rook-ceph-bootstrap
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      storage: rook-ceph
+  # Required on a staged proxy: deleting this object must never uninstall a bootstrap.
+  deletionPolicy: Retain
+  packages:
+    zarf-init:
+      repository: ghcr.io/colonel-byte/zarf/init-slim
+      version: v1.0.1
+      api: v1beta1
+    csi:
+      repository: ghcr.io/colonel-byte/zarf/csi-rook-ceph
+      version: v1.21.2-upstream
+      api: v1beta1
+  init:
+    # Creates zarf-state when the cluster has none; skipped when someone else already did.
+    autoInit: true
+    packageRef: zarf-init
+    components:
+      - name: zarf-injector
+      - name: zarf-seed-registry
+    registry:
+      # proxy mode is what lets the internal registry serve TLS; nodeport (the default)
+      # forces its mTLS strategy to none. Immutable once set.
+      mode: proxy
+    # Proxy mode requires an image the node already holds - on first init there is no
+    # registry to pull one from. A per-fleet value; a wrong one fails as an image pull.
+    injectorImage: registry.k8s.io/kube-proxy:v1.31.0
+  stages:
+    - name: storage-seed
+      packageRef: csi
+      strategy: ApplyOnce
+      components:
+        - name: operator-images
+        - name: cluster-images
+        - name: operator-seed-chart
+        - name: cluster-seed-chart
+        - name: registry-bucket
+    - name: registry
+      packageRef: zarf-init
+      strategy: Reconcile
+      components:
+        - name: zarf-registry
+        - name: zarf-agent
+    - name: storage-final
+      packageRef: csi
+      strategy: Reconcile
+      components:
+        - name: operator-images
+        - name: cluster-images
+        # The plain charts, not the seed ones - by now the agent is running and rewrites
+        # image references itself, so the templated addresses are no longer needed.
+        - name: operator-chart
+        - name: cluster-chart
+        - name: registry-bucket

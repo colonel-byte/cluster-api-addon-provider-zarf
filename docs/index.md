@@ -41,6 +41,8 @@ spec:
 
 `deletionPolicy: Delete` (the default) uninstalls the package from each cluster when its release is deleted - a proxy deletion or a selector un-match; `deletionPolicy: Retain` orphans it there, left running and operator-owned. ApplyOnce proxies always behave as `Retain` - a seed cannot be un-run. Note the default's reach: deleting a `Delete` proxy uninstalls its package fleet-wide.
 
+A proxy can also declare an ordered multi-stage bootstrap - the same package deployed more than once with a different component selection each pass, interleaved with other packages - through `spec.packages` and `spec.stages`, with zarf-state initialization settings (registry mode, injector image) on `spec.init`. See [the staged packages guide](guides/staged-packages.md) and the runnable sample at [`config/samples/staged-rook-ceph.yaml`](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/config/samples/staged-rook-ceph.yaml).
+
 ## Installation
 
 Each release publishes the provider three ways, all carrying the same component manifest:

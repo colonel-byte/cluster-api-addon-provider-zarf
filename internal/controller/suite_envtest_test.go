@@ -18,7 +18,10 @@ package controller
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+
+	"sigs.k8s.io/yaml"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -194,5 +197,32 @@ func TestStagedProxyCEL(t *testing.T) {
 	})
 	if err := c.Update(t.Context(), appended); err != nil {
 		t.Fatalf("appending a stage must be admitted: %v", err)
+	}
+}
+
+// TestSamplesApply proves every manifest under config/samples/ admits against the real CRDs and
+// their CEL rules - a sample a reader copies must not be the first place it is ever validated.
+func TestSamplesApply(t *testing.T) {
+	c := envtest.Client(t)
+	ns := envtest.Namespace(t, c)
+
+	// Relative to this package; recompute the ../.. depth if either end moves.
+	paths, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no samples found: %v", err)
+	}
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		proxy := &addonsv1alpha1.ZarfPackageProxy{}
+		if err := yaml.UnmarshalStrict(raw, proxy); err != nil {
+			t.Fatalf("decoding %s: %v", path, err)
+		}
+		proxy.Namespace = ns
+		if err := c.Create(t.Context(), proxy); err != nil {
+			t.Fatalf("sample %s was refused at admission: %v", path, err)
+		}
 	}
 }
