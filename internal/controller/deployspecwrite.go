@@ -53,7 +53,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 	// The same credentials and CA the controller resolved with, for the pod to pull the same
 	// bytes - resolved once per proxy rather than per release, since the source is the proxy's.
 	access := resolver.Options{}
-	reason, message, err := r.registryAccess(ctx, proxy.Namespace, &proxy.Spec.Package, &access)
+	reason, message, err := r.registryAccess(ctx, proxy.Namespace, proxy.Spec.Package, &access)
 	if err != nil {
 		return err
 	}

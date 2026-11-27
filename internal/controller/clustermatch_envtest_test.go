@@ -194,7 +194,7 @@ func TestClusterMatching(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "match-test", Namespace: own},
 				Spec: addonsv1alpha1.ZarfPackageProxySpec{
 					ClusterSelector: selector,
-					Package: addonsv1alpha1.ZarfPackageSource{
+					Package: &addonsv1alpha1.ZarfPackageSource{
 						Repository: "registry.internal/zarf/podinfo",
 						Version:    "1.0.0",
 					},

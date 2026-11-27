@@ -110,7 +110,7 @@ func (r *ZarfPackageProxyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", proxy.Spec.Package.Version,
+	log.Info("reconciling", "strategy", proxy.Spec.Strategy, "version", declaredVersion(proxy),
 		"matchingClusters", len(matched))
 
 	// §8B runs regardless of cycles or resolution state: deletion must never block on either.

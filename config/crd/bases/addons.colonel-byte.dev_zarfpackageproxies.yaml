@@ -2985,6 +2985,12 @@ spec:
                         must be unset
                       rule: '!has(self.fromZarfState) || !self.fromZarfState || (!has(self.pullSecretRef)
                         && !has(self.caBundleSecretRef) && !has(self.caBundleConfigMapRef))'
+                  packageRef:
+                    description: |-
+                      packageRef names a key in spec.packages as the init package, instead of declaring one
+                      inline in package - the staged form, where every source is declared once. Mutually
+                      exclusive with package.
+                    type: string
                   registry:
                     description: |-
                       registry shapes the registry half of the zarf-state initialization creates. The settings
@@ -3029,18 +3035,24 @@ spec:
                     x-kubernetes-preserve-unknown-fields: true
                 type: object
                 x-kubernetes-validations:
-                - message: init.autoInit requires init.package
-                  rule: '!(has(self.autoInit) && self.autoInit) || has(self.package)'
+                - message: init.autoInit requires init.package or init.packageRef
+                  rule: '!(has(self.autoInit) && self.autoInit) || has(self.package)
+                    || has(self.packageRef)'
+                - message: set init.package or init.packageRef, not both
+                  rule: '!(has(self.package) && has(self.packageRef))'
                 - message: 'init.set requires init.package.api: v1alpha1; v1beta1
                     init packages take init.values'
-                  rule: '!has(self.set) || (has(self.package) && has(self.package.api)
-                    && self.package.api == ''v1alpha1'')'
+                  rule: '!has(self.set) || has(self.packageRef) || (has(self.package)
+                    && has(self.package.api) && self.package.api == ''v1alpha1'')'
                 - message: 'init.registry.mode: proxy requires init.injectorImage
                     - first init has no registry to pull an injector from'
                   rule: '!has(self.registry) || !has(self.registry.mode) || self.registry.mode
                     != ''proxy'' || has(self.injectorImage)'
               package:
-                description: package is the package source and verification settings.
+                description: |-
+                  package is the package source and verification settings - the single-package form, and
+                  sugar for a one-stage list carrying spec.strategy. Exactly one of package and stages is
+                  declared.
                 properties:
                   api:
                     description: |-
@@ -3212,6 +3224,195 @@ spec:
                     caBundleSecretRef and caBundleConfigMapRef must be unset
                   rule: '!has(self.fromZarfState) || !self.fromZarfState || (!has(self.pullSecretRef)
                     && !has(self.caBundleSecretRef) && !has(self.caBundleConfigMapRef))'
+              packages:
+                additionalProperties:
+                  description: |-
+                    ZarfPackageSource says where a package comes from, how it is reached, and how it is verified.
+
+                    Each rule below guards an optional boolean with has() before reading it. A boolean that was
+                    never set is absent from the stored object rather than false, and reading an absent key is an
+                    evaluation error that rejects the whole resource - so `!self.fromZarfState || ...` would refuse
+                    every proxy that never mentioned the field. The sister repository learned this from an envtest
+                    suite and nothing else would have caught it.
+                  properties:
+                    api:
+                      description: |-
+                        api asserts the package's Zarf schema version. When unset, the controller detects it
+                        from the pulled artifact; when set, a mismatch with the artifact fails the release
+                        before any deploy runs. Declaring v1alpha1 is required to use spec.set.
+                      enum:
+                      - v1alpha1
+                      - v1beta1
+                      type: string
+                    caBundleConfigMapRef:
+                      description: |-
+                        caBundleConfigMapRef is caBundleSecretRef from a ConfigMap instead, same "ca.crt" key.
+                        A certificate authority is not secret, so a ConfigMap is the honest place for one; the
+                        Secret form exists because that is where cert-manager puts the CA it generates. Set one
+                        or the other, never both.
+                      properties:
+                        name:
+                          description: name of the referenced object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            namespace of the referenced object. Empty means the namespace of the object holding this
+                            reference. A namespace other than that one is refused unless the controller was started
+                            with a flag naming it (--secret-namespaces for secret references, --cluster-namespaces
+                            for the proxy references cross-namespace selection creates), surfaced as a condition with
+                            reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
+                          maxLength: 63
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    caBundleSecretRef:
+                      description: |-
+                        caBundleSecretRef names a Secret holding PEM-encoded certificates to trust when reaching
+                        this registry, in its "ca.crt" key. They are trusted *in addition to* the system roots,
+                        so naming a private CA does not stop the controller reaching anything else.
+
+                        This is the field for a registry serving a certificate nothing public signed, and a
+                        Secret is the shape cert-manager already writes one into. Prefer it to
+                        insecureSkipTLSVerify, which verifies nothing at all.
+                      properties:
+                        name:
+                          description: name of the referenced object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            namespace of the referenced object. Empty means the namespace of the object holding this
+                            reference. A namespace other than that one is refused unless the controller was started
+                            with a flag naming it (--secret-namespaces for secret references, --cluster-namespaces
+                            for the proxy references cross-namespace selection creates), surfaced as a condition with
+                            reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
+                          maxLength: 63
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    fromZarfState:
+                      description: |-
+                        fromZarfState reads this registry's credentials and certificate authority out of the Zarf
+                        deployment in the *management* cluster, instead of from pullSecretRef and caBundleSecretRef.
+
+                        This is the air-gapped case with nothing to wire up: where the registry the fleet pulls
+                        packages from is a Zarf registry in the management cluster, Zarf generated its credentials
+                        and signed its certificate itself, and both are already present as the `zarf-state` and
+                        `zarf-registry-server-tls` secrets. The pull-only credentials are preferred over the push
+                        pair. It replaces the manual step of running `zarf tools get-creds`, creating a
+                        docker-registry Secret whose server had to match the repository host exactly, and
+                        extracting the CA by hand.
+
+                        The repository is still named in this spec rather than read from that state, and that is
+                        the part worth knowing: Zarf records the address a *node* reaches the registry at - a
+                        NodePort, or an external host - and a controller inside the cluster wants the service,
+                        which the state does not carry.
+
+                        No client certificate is presented, and that is measured rather than assumed: Zarf's
+                        registry chart sets `verify-client-cert-if-given`, so a client offering none is still
+                        served, and the certificate Zarf issues belongs to the per-node registry proxy rather than
+                        to anything a management-cluster controller runs.
+                      type: boolean
+                    insecureSkipTLSVerify:
+                      description: |-
+                        insecureSkipTLSVerify accepts this registry's certificate without verifying it, rather
+                        than trusting it through caBundleSecretRef. It covers reaching the package registry only,
+                        and neither the management cluster's API nor any workload cluster's.
+
+                        Per-package on purpose rather than a manager flag: one registry nobody can issue a
+                        certificate for must not lower the bar for every other package in the fleet.
+                      type: boolean
+                    pullSecretRef:
+                      description: |-
+                        pullSecretRef names a kubernetes.io/dockerconfigjson Secret holding credentials for the
+                        registry this package is pulled from - what `kubectl create secret docker-registry`
+                        produces. Empty means anonymous access, which is what every registry had to allow before
+                        this field existed.
+
+                        The credentials are needed in two places and reach them differently. The controller
+                        resolves and verifies the package itself, and passes them per-call, so two proxies
+                        pulling from two registries with two different credentials never see each other's. The
+                        deploy pod pulls the package by digest, and there they arrive as a mounted Docker config
+                        file the pod's own environment points at - the pod holds no management-cluster access and
+                        cannot look a Secret up, and one pod serves exactly one package, so a file scoped to the
+                        pod is scoped to the pull. See docs/agent/choice-registry-credentials.md.
+                      properties:
+                        name:
+                          description: name of the referenced object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            namespace of the referenced object. Empty means the namespace of the object holding this
+                            reference. A namespace other than that one is refused unless the controller was started
+                            with a flag naming it (--secret-namespaces for secret references, --cluster-namespaces
+                            for the proxy references cross-namespace selection creates), surfaced as a condition with
+                            reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
+                          maxLength: 63
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    repository:
+                      description: repository is the OCI repository holding the package,
+                        without a tag.
+                      type: string
+                    signatureKeySecretRef:
+                      description: |-
+                        signatureKeySecretRef names a Secret holding the Cosign public key ("cosign.pub" key)
+                        the package signature is verified against before extraction. When unset, signature
+                        verification is skipped. In the proxy's namespace unless its namespace field names one
+                        the controller's --secret-namespaces flag permits.
+
+                        Unlike the authentication fields below, this stands alongside fromZarfState rather than
+                        instead of it: Zarf's own state carries no signing key, so a package pulled from a Zarf
+                        registry is verified through this field like any other.
+                      properties:
+                        name:
+                          description: name of the referenced object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            namespace of the referenced object. Empty means the namespace of the object holding this
+                            reference. A namespace other than that one is refused unless the controller was started
+                            with a flag naming it (--secret-namespaces for secret references, --cluster-namespaces
+                            for the proxy references cross-namespace selection creates), surfaced as a condition with
+                            reason CrossNamespaceNotEnabled. See docs/dev/architecture.md §2C.
+                          maxLength: 63
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    version:
+                      description: version is the package version (OCI tag) to deploy.
+                      type: string
+                  required:
+                  - repository
+                  - version
+                  type: object
+                  x-kubernetes-validations:
+                  - message: set caBundleSecretRef or caBundleConfigMapRef, not both
+                    rule: '!has(self.caBundleSecretRef) || !has(self.caBundleConfigMapRef)'
+                  - message: fromZarfState supplies the credentials and the CA, so
+                      pullSecretRef, caBundleSecretRef and caBundleConfigMapRef must
+                      be unset
+                    rule: '!has(self.fromZarfState) || !self.fromZarfState || (!has(self.pullSecretRef)
+                      && !has(self.caBundleSecretRef) && !has(self.caBundleConfigMapRef))'
+                description: |-
+                  packages are the named sources a staged proxy's stages draw from, keyed by a name the
+                  stages reference. Hoisted out of the stage list so one package appearing in several
+                  stages carries one version - a half-edited pair of inline sources would be two digests
+                  of one Helm release lineage. Declared exactly when stages is.
+                maxProperties: 16
+                type: object
               set:
                 additionalProperties:
                   type: string
@@ -3220,6 +3421,85 @@ spec:
                   requires spec.package.api: v1alpha1, enforced at admission. Values support the same Go
                   templating as values. Deprecated on the same schedule as v1alpha1 package support.
                 type: object
+              stages:
+                description: |-
+                  stages is the ordered deployment sequence over packages, run per cluster in declared
+                  order: the first stage whose rendered spec has not been applied holds the cluster's
+                  deploy slot until its Job settles. Stage names are the per-cluster applied record's
+                  identity (docs/dev/design-package-stages.md).
+                items:
+                  description: |-
+                    PackageStage is one step of a staged proxy: a component selection over one of spec.packages,
+                    deployed in declared order on every matching cluster. The design and its decisions are
+                    docs/dev/design-package-stages.md.
+                  properties:
+                    components:
+                      description: |-
+                        components filters which package components this stage deploys, with spec.components'
+                        semantics: empty means the package's defaults.
+                      items:
+                        description: ComponentSelector names a package component to
+                          deploy, optionally pinning its flavor.
+                        properties:
+                          flavor:
+                            description: flavor selects a component flavor, overriding
+                              auto-detection.
+                            type: string
+                          name:
+                            description: name is the component's name in the package
+                              definition.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    name:
+                      description: |-
+                        name is the stage's identity: Job names, deploy-spec file names, and the per-cluster
+                        applied record are keyed on it, which is why renaming a stage reads as removing one and
+                        adding another. A DNS-label-shaped string because it becomes part of a Job name.
+                      maxLength: 40
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    packageRef:
+                      description: |-
+                        packageRef names a key in spec.packages as this stage's source. A reference rather than
+                        an inline source so one package appearing in several stages is declared - and versioned -
+                        exactly once.
+                      minLength: 1
+                      type: string
+                    set:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        set are this stage's Zarf variables, with spec.set's semantics and v1alpha1-only rule
+                        against the referenced package's declared api.
+                      type: object
+                    strategy:
+                      default: Reconcile
+                      description: |-
+                        strategy is this stage's deployment strategy: Reconcile (the default) re-runs the stage
+                        when its rendered spec changes; ApplyOnce runs it at most once per cluster, for seed
+                        stages whose values a later stage supersedes on the same Helm release. Immutable once
+                        declared - flipping ApplyOnce to Reconcile would re-run a history stage.
+                      enum:
+                      - Reconcile
+                      - ApplyOnce
+                      type: string
+                    values:
+                      description: values is this stage's structured values tree,
+                        with spec.values' semantics and templating.
+                      x-kubernetes-preserve-unknown-fields: true
+                  required:
+                  - name
+                  - packageRef
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               strategy:
                 default: Reconcile
                 description: strategy is Reconcile (continuous lifecycle, the default)
@@ -3236,19 +3516,50 @@ spec:
                 x-kubernetes-preserve-unknown-fields: true
             required:
             - clusterSelector
-            - package
             type: object
             x-kubernetes-validations:
             - message: 'spec.set requires spec.package.api: v1alpha1; v1beta1 packages
                 take spec.values'
-              rule: '!has(self.set) || (has(self.package.api) && self.package.api
-                == ''v1alpha1'')'
+              rule: '!has(self.set) || (has(self.package) && has(self.package.api)
+                && self.package.api == ''v1alpha1'')'
             - message: init.registry.mode is immutable once set, including unsetting
                 it - switching a live cluster's registry mode re-addresses the registry
                 under deployed releases
               rule: '!has(oldSelf.init) || !has(oldSelf.init.registry) || !has(oldSelf.init.registry.mode)
                 || (has(self.init) && has(self.init.registry) && has(self.init.registry.mode)
                 && self.init.registry.mode == oldSelf.init.registry.mode)'
+            - message: declare spec.package or spec.stages, exactly one
+              rule: has(self.package) != has(self.stages)
+            - message: 'spec.stages and spec.packages come together: stages draw their
+                sources from packages'
+              rule: has(self.stages) == has(self.packages)
+            - message: every stage's packageRef must name a key in spec.packages
+              rule: '!has(self.stages) || self.stages.all(s, s.packageRef in self.packages)'
+            - message: spec.strategy is ignored on a staged proxy - stages carry their
+                own; leave it unset
+              rule: '!has(self.stages) || self.strategy == ''Reconcile'''
+            - message: components and set belong to the stages on a staged proxy (values
+                too, but its unstructured schema is invisible to CEL and it is ignored
+                there)
+              rule: '!has(self.stages) || (!has(self.components) && !has(self.set))'
+            - message: 'a stage''s set requires its package''s api: v1alpha1; v1beta1
+                packages take values'
+              rule: '!has(self.stages) || self.stages.all(s, !has(s.set) || (s.packageRef
+                in self.packages && has(self.packages[s.packageRef].api) && self.packages[s.packageRef].api
+                == ''v1alpha1''))'
+            - message: init.packageRef must name a key in spec.packages
+              rule: '!has(self.init) || !has(self.init.packageRef) || (has(self.packages)
+                && self.init.packageRef in self.packages)'
+            - message: 'init.set requires the referenced package''s api: v1alpha1;
+                v1beta1 init packages take init.values'
+              rule: '!has(self.init) || !has(self.init.set) || !has(self.init.packageRef)
+                || (has(self.packages) && self.init.packageRef in self.packages &&
+                has(self.packages[self.init.packageRef].api) && self.packages[self.init.packageRef].api
+                == ''v1alpha1'')'
+            - message: a stage's strategy is immutable once declared - flipping ApplyOnce
+                to Reconcile re-runs a history stage
+              rule: '!has(oldSelf.stages) || !has(self.stages) || self.stages.all(s,
+                oldSelf.stages.all(o, o.name != s.name || o.strategy == s.strategy))'
           status:
             description: status is the observed state of ZarfPackageProxy.
             properties:
@@ -3348,6 +3659,46 @@ spec:
                   deployed-package record on each workload cluster is keyed on (§3), which is what the
                   ApplyOnce probe-and-adopt looks up.
                 type: string
+              packages:
+                description: |-
+                  packages are the per-source resolution verdicts of a staged proxy, one entry per
+                  spec.packages key; a stage reads its resolution through its packageRef. Empty on the
+                  single-package form, which uses the flat fields above.
+                items:
+                  description: |-
+                    PackageResolution is one spec.packages entry's resolution verdict, keyed by its map key.
+                    Resolution is a property of the source, not the stage - one package appears in several
+                    stages, and per-stage entries would have to agree in pairs, which is the two-digests-of-one-
+                    name hazard packageRef exists to make unrepresentable.
+                  properties:
+                    name:
+                      description: name is the spec.packages key this entry resolves.
+                      type: string
+                    packageKind:
+                      description: packageKind is the resolved artifact's kind - ZarfPackageConfig
+                        or ZarfInitConfig.
+                      type: string
+                    packageName:
+                      description: |-
+                        packageName is the resolved package's declared name - the identity zarf's
+                        deployed-package record on each workload cluster is keyed on.
+                      type: string
+                    resolvedDigest:
+                      description: resolvedDigest is the manifest digest the declared
+                        tag pinned to.
+                      type: string
+                    resolvedRef:
+                      description: |-
+                        resolvedRef is the "repository:version" whose resolution resolvedDigest pins, with
+                        status.resolvedRef's re-resolve-only-on-change semantics.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               readyClusterCount:
                 description: |-
                   readyClusterCount is how many of those Clusters carry a release in Deployed or
@@ -3368,6 +3719,13 @@ spec:
                   controller re-resolves only when the spec's reference no longer matches it - an edit to
                   values or components must not silently re-pin a moved tag.
                 type: string
+              stageCount:
+                description: |-
+                  stageCount is how many stages the spec declares - the length of spec.stages, carried as
+                  a number because a printer column cannot take the length of a list. Zero on the
+                  single-package form.
+                format: int32
+                type: integer
               supersededClusterCount:
                 description: |-
                   supersededClusterCount is how many Clusters were seeded with a version the spec no longer
@@ -3377,6 +3735,12 @@ spec:
                   otherwise indistinguishable from one that is actually up to date.
                 format: int32
                 type: integer
+              version:
+                description: |-
+                  version is the declared version an operator most wants in a column: spec.package.version
+                  on the single-package form, the last stage's package version on a staged proxy - the end
+                  state the sequence converges on.
+                type: string
             type: object
         type: object
     served: true

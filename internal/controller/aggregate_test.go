@@ -45,6 +45,7 @@ func release(phase addonsv1alpha1.ReleasePhase, reason, message string) *addonsv
 // what decides whether a lagging release counts as superseded or as mid-rollout.
 func applyOnceAt(version string) *addonsv1alpha1.ZarfPackageProxy {
 	proxy := &addonsv1alpha1.ZarfPackageProxy{}
+	proxy.Spec.Package = &addonsv1alpha1.ZarfPackageSource{}
 	proxy.Spec.Strategy = addonsv1alpha1.StrategyApplyOnce
 	proxy.Spec.Package.Version = version
 	return proxy
@@ -52,6 +53,7 @@ func applyOnceAt(version string) *addonsv1alpha1.ZarfPackageProxy {
 
 func reconcileAt(version string) *addonsv1alpha1.ZarfPackageProxy {
 	proxy := &addonsv1alpha1.ZarfPackageProxy{}
+	proxy.Spec.Package = &addonsv1alpha1.ZarfPackageSource{}
 	proxy.Spec.Strategy = addonsv1alpha1.StrategyReconcile
 	proxy.Spec.Package.Version = version
 	return proxy
@@ -241,7 +243,7 @@ func TestReadyVerdict(t *testing.T) {
 func TestApplyOnceSupersededMessage(t *testing.T) {
 	proxyAt := func(version string) *addonsv1alpha1.ZarfPackageProxy {
 		proxy := &addonsv1alpha1.ZarfPackageProxy{}
-		proxy.Spec.Package.Version = version
+		proxy.Spec.Package = &addonsv1alpha1.ZarfPackageSource{Version: version}
 		return proxy
 	}
 	releaseAt := func(version string) *addonsv1alpha1.ZarfPackageRelease {

@@ -46,7 +46,7 @@ func testProxy(opts *addonsv1alpha1.DeployJobOptions) *addonsv1alpha1.ZarfPackag
 			Namespace: "fleet-default",
 		},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: "registry.local/packages/security-baseline",
 				Version:    "1.4.2",
 			},

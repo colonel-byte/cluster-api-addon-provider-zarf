@@ -141,7 +141,7 @@ func secureProxy(name string, source addonsv1alpha1.ZarfPackageSource) *addonsv1
 			ClusterSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{"caapz.e2e/registry-auth": "no-cluster"},
 			},
-			Package: source,
+			Package: &source,
 		},
 	}
 }
@@ -292,7 +292,7 @@ func TestRegistryAuthDeploy(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "secure-deploy", Namespace: "default"},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository:        secureAppRepository,
 				Version:           appPackageVersion,
 				PullSecretRef:     &addonsv1alpha1.NamespacedReference{Name: "secure-registry-creds-deploy"},

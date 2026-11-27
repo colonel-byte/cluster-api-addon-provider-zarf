@@ -75,7 +75,7 @@ func releaseSuperseded(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1
 	if proxy.Spec.Strategy != addonsv1alpha1.StrategyApplyOnce || release == nil {
 		return false
 	}
-	seeded, declared := release.Status.DeployedVersion, proxy.Spec.Package.Version
+	seeded, declared := release.Status.DeployedVersion, declaredVersion(proxy)
 	return seeded != "" && declared != "" && seeded != declared
 }
 
@@ -137,7 +137,7 @@ func readyVerdict(proxy *addonsv1alpha1.ZarfPackageProxy, releases []*addonsv1al
 			// The reason is what stops a fleet a version behind reading as simply converged.
 			condition.Reason = addonsv1alpha1.ReasonSuperseded
 			condition.Message = fmt.Sprintf("%d of %d clusters deployed, %d seeded with a version %s no longer declares; ApplyOnce never re-executes",
-				counts.ready, len(releases), counts.superseded, proxy.Spec.Package.Version)
+				counts.ready, len(releases), counts.superseded, declaredVersion(proxy))
 			return condition, counts
 		}
 		condition.Reason = addonsv1alpha1.ReasonConverged

@@ -55,7 +55,7 @@ func deployProxy(t *testing.T, c client.Client, name string, policy addonsv1alph
 			ClusterSelector: metav1.LabelSelector{},
 			DeletionPolicy:  policy,
 			Strategy:        strategy,
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: appPackageRepository,
 				Version:    appPackageVersion,
 				API:        addonsv1alpha1.PackageAPIV1Beta1,
