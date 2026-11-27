@@ -62,6 +62,15 @@ spec:
     # Proxy mode requires an image the node already holds - on first init there is no
     # registry to pull one from. A per-fleet value; a wrong one fails as an image pull.
     injectorImage: registry.k8s.io/kube-proxy:v1.31.0
+    values:
+      registry:
+        extraEnvVars:
+          # The seed phase disables persistence (no StorageClass exists yet), which also
+          # drops the chart's filesystem storage driver - without this env the seed
+          # registry crashloops with "no storage configuration provided". Measured live;
+          # see "Measured on a live cluster" below.
+          - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+            value: /var/lib/registry
   stages:
     - name: storage-seed
       packageRef: csi
@@ -92,6 +101,16 @@ spec:
 ```
 
 Why the final stage installs the plain charts rather than merely re-pushing images, and why the seed charts exist at all, is measured and explained in [`bootstrap-order.md`](bootstrap-order.md#why-the-init-package-cannot-be-split) - the short version is that seed charts hard-code the registry address and the agent re-evaluates it, so leaving seed values in place is leaving scaffolding up.
+
+## Measured on a live cluster
+
+The worked example was run end to end against a CAPD workload cluster with no storage, no registry, and no zarf-state. Three things bit that nothing in the manifest predicts, each with the fix the example above now carries or the step you must take beside it:
+
+- **Proxy mode's host ports are forbidden under the `baseline` Pod Security standard.** The injector (hostPort 5001) and the per-node registry proxy (hostPort 5000) sat at `FailedCreate` until the `zarf` namespace carried `pod-security.kubernetes.io/enforce: privileged`. The init deploy creates that namespace, so either create it with the label before the proxy matches the cluster, or set the label cluster-side policy-wise; without it the seed registry waits forever for an injector that will never schedule.
+- **The seed registry needs its storage driver named when the seed stage runs alone.** The seed phase disables persistence - correct, no StorageClass exists yet - but that also drops `REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY` from the chart's env, and distribution refuses to start with no storage driver: a crashloop logging `no storage configuration provided`. The `init.values` entry in the example maps it back through the package's `.registry.extraEnvVars`. The all-components-at-once init path does not hit this, because the permanent registry's values immediately supersede the seed's on the same Helm release.
+- **Leftovers from a previous non-Zarf install are an ownership conflict, not a merge.** A storage provisioner installed by hand earlier leaves cluster-scoped RBAC behind even after its namespace is deleted, and Helm refuses to adopt resources it does not own: the stage fails with `invalid ownership metadata`. Delete the leftovers (or wait for a `takeOwnership` knob); the stage retries once its Job is deleted or its spec edited.
+
+Also observed, and worth knowing is normal: zarf writes zarf-state *early* in the init deploy, so a seed that fails after that point leaves a cluster whose `kubectl get zarfpackagereleases -o wide` already shows the declared mode in the `Registry` column while the release holds on the failure - the state is real, the registry behind it is not yet.
 
 ## How the controller runs it
 

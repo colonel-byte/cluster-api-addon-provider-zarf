@@ -35,6 +35,15 @@ spec:
     # Proxy mode requires an image the node already holds - on first init there is no
     # registry to pull one from. A per-fleet value; a wrong one fails as an image pull.
     injectorImage: registry.k8s.io/kube-proxy:v1.31.0
+    values:
+      registry:
+        extraEnvVars:
+          # The seed phase disables persistence (no StorageClass exists yet), which also
+          # drops the chart's filesystem storage driver - without this env the seed
+          # registry crashloops with "no storage configuration provided". Measured live;
+          # see "Measured on a live cluster" below.
+          - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+            value: /var/lib/registry
   stages:
     - name: storage-seed
       packageRef: csi
