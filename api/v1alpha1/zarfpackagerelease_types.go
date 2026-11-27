@@ -172,10 +172,51 @@ type ZarfPackageReleaseStatus struct {
 	// +optional
 	Applied bool `json:"applied,omitempty"`
 
+	// stages are the per-stage applied records of a staged proxy's release, one entry per
+	// stage that has run on this cluster, in applied order. The identity each record carries
+	// is the controller's own hash of the stage's rendered spec - never the pod-reported
+	// digest, which a lost termination message leaves empty (docs/dev/design-package-stages.md,
+	// "Per-stage state, not a cursor").
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Stages []StageState `json:"stages,omitempty"`
+
 	// conditions detail the release's state: Ready, PackageSignatureVerified,
 	// DependenciesSatisfied.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// StageState is one stage's applied record on one cluster: what ran, identified by the spec
+// hash it ran from, and when.
+type StageState struct {
+	// name is the declared stage name this record belongs to.
+	// +required
+	Name string `json:"name"`
+
+	// specHash is the controller's hash of the rendered stage document the applied run was
+	// stamped from - the identity a changed stage is detected by.
+	// +optional
+	SpecHash string `json:"specHash,omitempty"`
+
+	// appliedAt is when the stage's deploy Job completed.
+	// +optional
+	AppliedAt metav1.Time `json:"appliedAt,omitempty"`
+
+	// deployedDigest is the digest the stage's pod reported, for display; possibly empty when
+	// the termination message was lost, which is why it is never the applied identity.
+	// +optional
+	DeployedDigest string `json:"deployedDigest,omitempty"`
+
+	// deployedVersion is the package version the stage's pod reported.
+	// +optional
+	DeployedVersion string `json:"deployedVersion,omitempty"`
+
+	// undeclared is true when the spec no longer declares a stage of this name. The record is
+	// kept rather than pruned - it is the evidence an ApplyOnce decision rests on.
+	// +optional
+	Undeclared bool `json:"undeclared,omitempty"`
 }
 
 // +kubebuilder:object:root=true

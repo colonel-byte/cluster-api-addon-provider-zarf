@@ -42,18 +42,23 @@ import (
 // digest-pinned by construction. Rendering runs here, in the controller, because the pod cannot
 // and must not read Cluster metadata (docs/agent/choice-deploy-job.md).
 func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy, matched []clusterv1.Cluster) error {
-	if !meta.IsStatusConditionTrue(proxy.Status.Conditions, addonsv1alpha1.ConditionPackageResolved) ||
-		proxy.Status.ResolvedDigest == "" {
+	if !meta.IsStatusConditionTrue(proxy.Status.Conditions, addonsv1alpha1.ConditionPackageResolved) {
+		return nil
+	}
+	stages := effectiveStages(proxy)
+	if len(stages) == 0 {
 		return nil
 	}
 	log := ctrl.LoggerFrom(ctx)
 
-	packageRef := pinnedRef(proxy.Status.ResolvedRef, proxy.Status.ResolvedDigest)
-
 	// The same credentials and CA the controller resolved with, for the pod to pull the same
-	// bytes - resolved once per proxy rather than per release, since the source is the proxy's.
+	// bytes - resolved once per proxy rather than per release, since the sources are the
+	// proxy's.
+	// shortcut: one config.json and ca.crt per release, read from the first stage's source -
+	// staged packages sharing a release must share registry access; merge per-source configs
+	// when a fleet needs two differently-credentialed registries in one sequence.
 	access := resolver.Options{}
-	reason, message, err := r.registryAccess(ctx, proxy.Namespace, proxy.Spec.Package, &access)
+	reason, message, err := r.registryAccess(ctx, proxy.Namespace, stages[0].source, &access)
 	if err != nil {
 		return err
 	}
@@ -67,7 +72,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 	// The init spec renders only from a resolved init package; until then the main spec is
 	// written alone and the init Job has nothing to start from (§6 step 5).
 	initPackageRef := ""
-	if proxy.Spec.Init != nil && proxy.Spec.Init.Package != nil &&
+	if initSource(proxy) != nil &&
 		meta.IsStatusConditionTrue(proxy.Status.Conditions, addonsv1alpha1.ConditionInitPackageResolved) {
 		initPackageRef = pinnedRef(proxy.Status.InitResolvedRef, proxy.Status.InitResolvedDigest)
 	}
@@ -82,7 +87,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 			continue
 		}
 
-		files, renderErr := r.renderSpecs(proxy, cluster, packageRef, initPackageRef, access)
+		files, renderErr := r.renderSpecs(proxy, cluster, initPackageRef, access)
 		releaseBefore := release.DeepCopy()
 		if renderErr != nil {
 			meta.SetStatusCondition(&release.Status.Conditions, metav1.Condition{
@@ -107,7 +112,7 @@ func (r *ZarfPackageProxyReconciler) writeDeploySpecs(ctx context.Context, proxy
 			Type:    addonsv1alpha1.ConditionDeploySpecReady,
 			Status:  metav1.ConditionTrue,
 			Reason:  addonsv1alpha1.ReasonDeploySpecWritten,
-			Message: fmt.Sprintf("deploy spec rendered for %s", packageRef),
+			Message: fmt.Sprintf("%d deploy document(s) rendered", len(files)),
 		})
 		// The release mirrors the proxy's verification verdict: the digest it deploys is the
 		// digest that was verified (§2B's example shows the condition here).
@@ -139,37 +144,48 @@ func pinnedRef(ref, digest string) string {
 }
 
 // renderSpecs builds one cluster's deploy-spec files, substituting {{ .Cluster... }} in values
-// and set entries against the target cluster's object content: the main spec under
-// deployspec.FileName, and - when initPackageRef names a resolved init package - the auto-init
-// spec under deployspec.InitFileName (§6 step 5).
-func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, packageRef, initPackageRef string, access resolver.Options) (map[string][]byte, error) {
+// and set entries against the target cluster's object content: one document per normalized
+// stage under its stage's file name - deployspec.FileName itself for the single-package form -
+// and, when initPackageRef names a resolved init package, the auto-init spec under
+// deployspec.InitFileName (§6 step 5). A stage whose package has not resolved renders no
+// document yet; its Job is held on the missing file, not on a half-built one.
+func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, initPackageRef string, access resolver.Options) (map[string][]byte, error) {
 	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
 	if err != nil {
 		return nil, err
 	}
 
-	spec, err := buildSpec(packageRef, proxy.Spec.Package.API, proxy.Spec.Values, proxy.Spec.Set, r.RegistryPlainHTTP, proxy.Spec.Package.InsecureSkipTLSVerify, content)
-	if err != nil {
-		return nil, err
+	files := map[string][]byte{}
+	for _, st := range effectiveStages(proxy) {
+		resolution := packageResolution(proxy, st)
+		if resolution == nil {
+			continue
+		}
+		spec, err := buildSpec(pinnedRef(resolution.ResolvedRef, resolution.ResolvedDigest),
+			st.source.API, st.values, st.set, r.RegistryPlainHTTP, st.source.InsecureSkipTLSVerify, content)
+		if err != nil {
+			return nil, err
+		}
+		for _, component := range st.components {
+			spec.Components = append(spec.Components, deployspec.Component{
+				Name:   component.Name,
+				Flavor: component.Flavor,
+			})
+		}
+		// The init settings ride every ZarfInitConfig deploy, not just the auto-init document -
+		// the seed-then-manage pattern inits through spec.package, and a staged proxy's
+		// permanent registry stage re-deploys the init package - so neither would otherwise
+		// have a way to re-assert the registry mode (docs/dev/design-package-stages.md, "Init
+		// stays outside the stage list").
+		if resolution.PackageKind == "ZarfInitConfig" {
+			applyInitSettings(&spec, proxy.Spec.Init)
+		}
+		raw, err := spec.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		files[st.specFileName] = raw
 	}
-	for _, component := range proxy.Spec.Components {
-		spec.Components = append(spec.Components, deployspec.Component{
-			Name:   component.Name,
-			Flavor: component.Flavor,
-		})
-	}
-	// The init settings ride every ZarfInitConfig deploy, not just the auto-init document -
-	// the seed-then-manage pattern inits through spec.package and would otherwise have no way
-	// to declare a registry mode (docs/dev/design-package-stages.md, "Init stays outside the
-	// stage list").
-	if proxy.Status.PackageKind == "ZarfInitConfig" {
-		applyInitSettings(&spec, proxy.Spec.Init)
-	}
-	raw, err := spec.Marshal()
-	if err != nil {
-		return nil, err
-	}
-	files := map[string][]byte{deployspec.FileName: raw}
 	if len(access.DockerConfigJSON) > 0 {
 		files[deployspec.DockerConfigFileName] = access.DockerConfigJSON
 	}
@@ -179,7 +195,8 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 
 	if initPackageRef != "" {
 		initOpts := proxy.Spec.Init
-		initSpec, err := buildSpec(initPackageRef, initOpts.Package.API, initOpts.Values, initOpts.Set, r.RegistryPlainHTTP, initOpts.Package.InsecureSkipTLSVerify, content)
+		source := initSource(proxy)
+		initSpec, err := buildSpec(initPackageRef, source.API, initOpts.Values, initOpts.Set, r.RegistryPlainHTTP, source.InsecureSkipTLSVerify, content)
 		if err != nil {
 			return nil, err
 		}

@@ -195,6 +195,52 @@ spec:
                 - Failed
                 - Removing
                 type: string
+              stages:
+                description: |-
+                  stages are the per-stage applied records of a staged proxy's release, one entry per
+                  stage that has run on this cluster, in applied order. The identity each record carries
+                  is the controller's own hash of the stage's rendered spec - never the pod-reported
+                  digest, which a lost termination message leaves empty (docs/dev/design-package-stages.md,
+                  "Per-stage state, not a cursor").
+                items:
+                  description: |-
+                    StageState is one stage's applied record on one cluster: what ran, identified by the spec
+                    hash it ran from, and when.
+                  properties:
+                    appliedAt:
+                      description: appliedAt is when the stage's deploy Job completed.
+                      format: date-time
+                      type: string
+                    deployedDigest:
+                      description: |-
+                        deployedDigest is the digest the stage's pod reported, for display; possibly empty when
+                        the termination message was lost, which is why it is never the applied identity.
+                      type: string
+                    deployedVersion:
+                      description: deployedVersion is the package version the stage's
+                        pod reported.
+                      type: string
+                    name:
+                      description: name is the declared stage name this record belongs
+                        to.
+                      type: string
+                    specHash:
+                      description: |-
+                        specHash is the controller's hash of the rendered stage document the applied run was
+                        stamped from - the identity a changed stage is detected by.
+                      type: string
+                    undeclared:
+                      description: |-
+                        undeclared is true when the spec no longer declares a stage of this name. The record is
+                        kept rather than pruned - it is the evidence an ApplyOnce decision rests on.
+                      type: boolean
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true
