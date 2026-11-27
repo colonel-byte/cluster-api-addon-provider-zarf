@@ -104,6 +104,9 @@ const (
 	// declared version is deployed" and "the declared version will never deploy here" is
 	// comparing two fields by eye.
 	ReasonAlreadySeeded = "AlreadySeeded"
+	// ReasonWaitingForStageSpec holds a staged release while a stage's document is not yet
+	// rendered - its package has not resolved; the proxy's PackageResolved condition says why.
+	ReasonWaitingForStageSpec = "WaitingForStageSpec"
 	// ReasonDeployed is Ready: True - the declared digest deployed successfully.
 	ReasonDeployed = "Deployed"
 	// ReasonCompleted is Ready: True for an ApplyOnce release whose one deploy ran.

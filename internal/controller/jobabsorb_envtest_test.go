@@ -248,3 +248,161 @@ func TestJobAbsorption(t *testing.T) {
 		t.Fatalf("Ready = %+v, want DeployFailed with the pod's error", ready)
 	}
 }
+
+// TestStagedOrderingWalk drives a two-stage proxy through the walk against a real API server:
+// stages run one at a time in declared order, each completion writes the applied record, a
+// converged release reports Deployed, and editing one stage's values re-runs that stage alone.
+func TestStagedOrderingWalk(t *testing.T) {
+	c := envtest.Client(t)
+	ns := envtest.Namespace(t, c)
+	ctx := t.Context()
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "staged-2", Namespace: ns, Labels: map[string]string{"tier": "walk"}},
+		Spec:       clusterv1.ClusterSpec{Paused: ptr.To(false)},
+	}
+	if err := c.Create(ctx, cluster); err != nil {
+		t.Fatalf("creating the Cluster: %v", err)
+	}
+	clusterBefore := cluster.DeepCopy()
+	cluster.Status.Initialization = clusterv1.ClusterInitializationStatus{ControlPlaneInitialized: ptr.To(true)}
+	if err := c.Status().Patch(ctx, cluster, client.MergeFrom(clusterBefore)); err != nil {
+		t.Fatalf("marking the control plane initialized: %v", err)
+	}
+	kubeconfig := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "staged-2-kubeconfig", Namespace: ns},
+		Data:       map[string][]byte{kubeconfigSecretKey: envtest.Kubeconfig(t)},
+	}
+	if err := c.Create(ctx, kubeconfig); err != nil {
+		t.Fatalf("creating the kubeconfig secret: %v", err)
+	}
+	zarfNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: zarfstate.ZarfNamespaceName}}
+	if err := c.Create(ctx, zarfNS); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating the zarf namespace: %v", err)
+	}
+	stateSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: zarfstate.ZarfStateSecretName, Namespace: zarfstate.ZarfNamespaceName},
+	}
+	if err := c.Create(ctx, stateSecret); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating the zarf-state secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = c.Delete(context.Background(), stateSecret) //nolint:errcheck // best-effort cleanup
+	})
+
+	proxy := &addonsv1alpha1.ZarfPackageProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "walk", Namespace: ns},
+		Spec: addonsv1alpha1.ZarfPackageProxySpec{
+			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "walk"}},
+			Packages: map[string]addonsv1alpha1.ZarfPackageSource{
+				"a": {Repository: "registry.internal/zarf/a", Version: "1.0.0"},
+				"b": {Repository: "registry.internal/zarf/b", Version: "2.0.0"},
+			},
+			Stages: []addonsv1alpha1.PackageStage{
+				{Name: "alpha", PackageRef: "a"},
+				{Name: "beta", PackageRef: "b"},
+			},
+		},
+	}
+	if err := c.Create(ctx, proxy); err != nil {
+		t.Fatalf("creating the staged proxy: %v", err)
+	}
+	r := &ZarfPackageProxyReconciler{
+		Client:      c,
+		Resolver:    &stubResolver{result: resolver.Result{Digest: "sha256:aaaa", Name: "pkg", APIVersion: "v1beta1"}, tagDigest: "sha256:aaaa"},
+		DeployImage: "registry.internal/caapz:test",
+		CachePath:   "/var/lib/caapz/cache",
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "walk"}}
+	reconcile := func(times int) {
+		t.Helper()
+		for range times {
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+		}
+	}
+	reconcile(3)
+
+	alphaKey := types.NamespacedName{Namespace: ns, Name: "walk-staged-2-alpha-deploy"}
+	betaKey := types.NamespacedName{Namespace: ns, Name: "walk-staged-2-beta-deploy"}
+	alphaJob := &batchv1.Job{}
+	if err := c.Get(ctx, alphaKey, alphaJob); err != nil {
+		t.Fatalf("stage alpha's Job was not stamped: %v", err)
+	}
+	if alphaJob.Labels[stageLabel] != "alpha" {
+		t.Errorf("stage label = %q", alphaJob.Labels[stageLabel])
+	}
+	if err := c.Get(ctx, betaKey, &batchv1.Job{}); err == nil {
+		t.Fatal("stage beta's Job exists before alpha settled - the walk is not ordered")
+	}
+
+	finishJob(t, c, alphaJob, deploy.Result{
+		Succeeded: true,
+		Package:   "registry.internal/zarf/a@sha256:aaaa",
+		Name:      "a",
+		Version:   "1.0.0",
+	}, batchv1.JobComplete)
+	reconcile(2)
+
+	betaJob := &batchv1.Job{}
+	if err := c.Get(ctx, betaKey, betaJob); err != nil {
+		t.Fatalf("stage beta's Job was not stamped after alpha settled: %v", err)
+	}
+	firstBetaUID := betaJob.UID
+	finishJob(t, c, betaJob, deploy.Result{
+		Succeeded: true,
+		Package:   "registry.internal/zarf/b@sha256:aaaa",
+		Name:      "b",
+		Version:   "2.0.0",
+	}, batchv1.JobComplete)
+	reconcile(2)
+
+	release := &addonsv1alpha1.ZarfPackageRelease{}
+	releaseKey := types.NamespacedName{Namespace: ns, Name: "walk-staged-2"}
+	if err := c.Get(ctx, releaseKey, release); err != nil {
+		t.Fatalf("reading the release: %v", err)
+	}
+	if release.Status.Phase != addonsv1alpha1.PhaseDeployed {
+		t.Fatalf("phase = %q, want Deployed; conditions: %+v", release.Status.Phase, release.Status.Conditions)
+	}
+	if len(release.Status.Stages) != 2 || release.Status.Stages[0].Name != "alpha" || release.Status.Stages[1].Name != "beta" {
+		t.Fatalf("applied records = %+v", release.Status.Stages)
+	}
+	if release.Status.Stages[0].SpecHash == "" || release.Status.Stages[0].DeployedVersion != "1.0.0" {
+		t.Fatalf("alpha's record is incomplete: %+v", release.Status.Stages[0])
+	}
+	alphaHash := release.Status.Stages[0].SpecHash
+
+	// Edit stage beta's values: beta alone re-runs.
+	fresh := &addonsv1alpha1.ZarfPackageProxy{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "walk"}, fresh); err != nil {
+		t.Fatalf("re-reading the proxy: %v", err)
+	}
+	fresh.Spec.Stages[1].Values = &apiextensionsv1.JSON{Raw: []byte(`{"marker":"edited"}`)}
+	if err := c.Update(ctx, fresh); err != nil {
+		t.Fatalf("editing stage beta: %v", err)
+	}
+	reconcile(3)
+
+	rerun := &batchv1.Job{}
+	if err := c.Get(ctx, betaKey, rerun); err != nil {
+		t.Fatalf("stage beta's Job was not re-stamped after the edit: %v", err)
+	}
+	if rerun.UID == firstBetaUID {
+		t.Fatal("stage beta's Job was not replaced after the edit")
+	}
+	stillAlpha := &batchv1.Job{}
+	if err := c.Get(ctx, alphaKey, stillAlpha); err != nil {
+		t.Fatalf("stage alpha's Job disappeared on another stage's edit: %v", err)
+	}
+	if stillAlpha.UID != alphaJob.UID {
+		t.Fatal("stage alpha re-ran on another stage's edit")
+	}
+	if err := c.Get(ctx, releaseKey, release); err != nil {
+		t.Fatalf("re-reading the release: %v", err)
+	}
+	if got := findStageState(release, "alpha"); got == nil || got.SpecHash != alphaHash {
+		t.Fatalf("alpha's applied record changed on another stage's edit: %+v", got)
+	}
+}
