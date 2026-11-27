@@ -16,6 +16,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -55,20 +57,45 @@ const (
 	// clusterLabel on a deploy Job names its target cluster - what the §6 step 6
 	// one-Job-per-cluster rule lists by.
 	clusterLabel = "addons.colonel-byte.dev/cluster"
+
+	// stageLabel on a deploy Job names the stage it realizes, empty-omitted on the
+	// single-package form. Job creation is the commit point: a controller restart between
+	// creating a Job and writing status recovers the in-flight stage from this label rather
+	// than guessing, and for an ApplyOnce seed stage guessing wrong is the destructive
+	// direction (docs/dev/design-package-stages.md).
+	stageLabel = "addons.colonel-byte.dev/stage"
 )
 
-// BuildDeployJob renders the Job that deploys proxy's package for release. defaultImage and
-// cachePath come from the manager's --deploy-image and --cache-path flags; the proxy's deployJob
-// knobs override pod-level details.
-func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, defaultImage, cachePath string) *batchv1.Job {
+// jobName fits base+suffix into the 63-character object-name budget: kept verbatim when it
+// fits, else base is cut and a short hash of the full name keeps truncated siblings distinct.
+// The suffix survives whole so `kubectl get jobs` still reads.
+func jobName(base, suffix string) string {
+	name := base + suffix
+	if len(name) <= 63 {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	digest := hex.EncodeToString(sum[:])[:8]
+	return base[:63-len(suffix)-9] + "-" + digest + suffix
+}
+
+// BuildDeployJob renders the Job that deploys one stage of proxy's declaration for release -
+// the single-package form being the one-stage case, whose suffix and spec file keep their
+// pre-stages names. defaultImage and cachePath come from the manager's --deploy-image and
+// --cache-path flags; the proxy's deployJob knobs override pod-level details.
+func BuildDeployJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, defaultImage, cachePath string, st stage) *batchv1.Job {
 	// The subcommand reads everything from the mounted spec file - never the management
 	// cluster - and reports through the pod termination message.
 	args := []string{
 		"deploy",
-		"--spec", specMountPath + "/" + deployspec.FileName,
+		"--spec", specMountPath + "/" + st.specFileName,
 		"--cache-path", cachePath,
 	}
-	return buildJob(proxy, release, defaultImage, cachePath, "-deploy", args, true)
+	job := buildJob(proxy, release, defaultImage, cachePath, st.jobSuffix, args, true)
+	if st.name != "" {
+		job.Labels[stageLabel] = st.name
+	}
+	return job
 }
 
 // BuildInitJob renders the Job that deploys spec.init.package for release - §6 step 5's
@@ -174,11 +201,9 @@ func buildJob(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.Za
 	}
 	mounts = append(mounts, opts.VolumeMounts...)
 
-	// shortcut: the Job name is release.Name + suffix with no truncation; releases named
-	// past 56 characters break it. Hash-truncate when real cluster names arrive.
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      release.Name + suffix,
+			Name:      jobName(release.Name, suffix),
 			Namespace: release.Namespace,
 			Labels: map[string]string{
 				releaseLabel: release.Name,

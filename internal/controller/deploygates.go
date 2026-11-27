@@ -93,6 +93,18 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		})
 	}
 
+	stages := effectiveStages(proxy)
+	if len(stages) == 0 {
+		return nil, nil
+	}
+	if proxy.Spec.Package == nil {
+		// The staged ordering walk lands in the next layer; until then a staged release
+		// renders its documents and holds here without a Job.
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		return nil, nil
+	}
+	st := stages[0]
+
 	// §3's first tier: an applied ApplyOnce release never round-trips anywhere again.
 	//
 	// It speaks up only when the proxy has been bumped since the seed, which is the state an
@@ -124,7 +136,7 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	// absorbed into status - and a stale finished Job is deleted there, so the next pass
 	// stamps the redeploy.
 	existing := &batchv1.Job{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-deploy"}, existing)
+	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: jobName(release.Name, "-deploy")}, existing)
 	switch {
 	case err == nil:
 		if DeployJobPhase(existing, proxy.Spec.Strategy) == addonsv1alpha1.PhaseDeploying {
@@ -205,9 +217,9 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 
 	release.Status.Phase = addonsv1alpha1.PhaseDeploying
 	setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeploying, "the deploy Job is starting")
-	job := BuildDeployJob(proxy, release, r.DeployImage, r.CachePath)
+	job := BuildDeployJob(proxy, release, r.DeployImage, r.CachePath, st)
 	// The spec hash is what later marks this Job stale once an edit re-renders the spec.
-	if hash := r.specHash(ctx, release, deployspec.FileName); hash != "" {
+	if hash := r.specHash(ctx, release, st.specFileName); hash != "" {
 		job.Annotations = map[string]string{specHashAnnotation: hash}
 	}
 	return job, nil
@@ -232,7 +244,7 @@ func (r *ZarfPackageProxyReconciler) convergeInit(ctx context.Context, proxy *ad
 	}
 
 	existing := &batchv1.Job{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-init"}, existing)
+	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: jobName(release.Name, "-init")}, existing)
 	switch {
 	case err == nil:
 		if DeployJobPhase(existing, addonsv1alpha1.StrategyReconcile) == addonsv1alpha1.PhaseDeploying {
@@ -279,7 +291,7 @@ func (r *ZarfPackageProxyReconciler) convergeInit(ctx context.Context, proxy *ad
 // deploy that reads as success. A running Job holds the §6 step 6 slot until it finishes.
 func (r *ZarfPackageProxyReconciler) settleInitJob(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, setReady func(metav1.ConditionStatus, string, string)) (bool, error) {
 	job := &batchv1.Job{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-init"}, job)
+	err := r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: jobName(release.Name, "-init")}, job)
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}

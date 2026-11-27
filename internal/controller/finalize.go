@@ -190,7 +190,7 @@ func (r *ZarfPackageProxyReconciler) finalizeRelease(ctx context.Context, proxy 
 	}
 
 	job := &batchv1.Job{}
-	err = r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: release.Name + "-remove"}, job)
+	err = r.Get(ctx, client.ObjectKey{Namespace: release.Namespace, Name: jobName(release.Name, "-remove")}, job)
 	switch {
 	case err == nil:
 		switch DeployJobPhase(job, addonsv1alpha1.StrategyReconcile) {
