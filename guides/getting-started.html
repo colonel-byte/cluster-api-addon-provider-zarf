@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-04958ddf.js";
+            window.path_to_searchindex_js = "../searchindex-f5420fe4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-41f4cb6d.js"></script>
@@ -239,8 +239,29 @@ spec:
 </code></pre>
 <p>Only <code>Cluster</code> objects in the proxy’s own namespace match, unless the controller was started with <code>--cluster-namespaces</code> naming others. That default is deliberate: a label on a cluster in another team’s namespace cannot pull your package onto it.</p>
 <h2 id="watch-what-happens"><a class="header" href="#watch-what-happens">Watch what happens</a></h2>
-<p>The proxy reports what it resolved; each release reports what happened on its own cluster.</p>
+<p>The proxy reports the fleet; each release reports what happened on its own cluster.</p>
 <pre><code class="language-sh">kubectl get zarfpackageproxy,zarfpackagerelease
+</code></pre>
+<pre><code>NAME       READY   DEPLOYED   CLUSTERS   STATUS                 VERSION   AGE
+podinfo    False   11         12         WaitingForDependency   1.0.0     4d
+</code></pre>
+<p><code>READY</code> is the whole fleet: true only when every matching cluster has the package deployed. <code>DEPLOYED</code> and <code>CLUSTERS</code> are what tell one stuck cluster from a fleet that deployed nowhere - both read <code>READY: False</code>, and only the counts say which. <code>STATUS</code> is why, taken from the first cluster that has not finished, so the blocker is named on the proxy’s own line rather than found by opening releases one at a time.</p>
+<p>Three states worth recognising:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>READY</code></th><th>Means</th></tr>
+</thead>
+<tbody>
+<tr><td><code>True</code></td><td>Every matching cluster is <code>Deployed</code>, or <code>Completed</code> for <code>ApplyOnce</code></td></tr>
+<tr><td><code>False</code></td><td>Something is holding the fleet back - <code>STATUS</code> names it, and the counts say how much of the fleet</td></tr>
+<tr><td><code>Unknown</code></td><td>The selector matches no clusters. Not success: usually a label that does not exist on any cluster yet</td></tr>
+</tbody>
+</table>
+</div>
+<p>One <code>STATUS</code> is worth recognising because it reads as healthy and is not quite: <code>Superseded</code> on an <code>ApplyOnce</code> proxy means every cluster has the package - so <code>READY</code> is <code>True</code> - but some were seeded with a version the spec no longer declares, and a seed is never re-run. <code>kubectl get -o wide</code> adds the count, and the release says which version each cluster actually holds.</p>
+<p><code>kubectl get -o wide</code> adds the strategy and the package-resolution condition, which is where to look when <code>STATUS</code> names a resolution or signature failure. The controller also records Events on every one of these transitions, so <code>kubectl describe</code> is a history rather than a snapshot:</p>
+<pre><code class="language-sh">kubectl describe zarfpackageproxy podinfo
 </code></pre>
 <pre><code class="language-sh">kubectl get zarfpackageproxy podinfo -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}'
 </code></pre>
@@ -366,6 +387,13 @@ kubectl create configmap registry-ca --from-file=ca.crt=internal-ca.crt
 </table>
 </div>
 <p><code>Retain</code> is the honest choice for large or foundational packages, where an orphaned-but-working package beats a half-removed one. An <code>ApplyOnce</code> package always behaves as <code>Retain</code> - a seed cannot be un-run.</p>
+<p><strong>Bumping <code>spec.package.version</code> on an <code>ApplyOnce</code> proxy does not redeploy anything</strong>, which is the contract rather than a bug - and the release says so instead of leaving you to compare fields:</p>
+<pre><code class="language-sh">kubectl get zarfpackagerelease seed-my-cluster -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}: {.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+</code></pre>
+<pre><code>AlreadySeeded: this cluster was seeded with 1.0.0 and ApplyOnce never re-executes, so the declared 2.0.0 will not deploy here - switch the strategy to Reconcile, or re-seed deliberately
+</code></pre>
+<p>The release says this only while the two disagree. An <code>ApplyOnce</code> release whose declared version is the one it was seeded with keeps whatever reason recorded how it completed - <code>AdoptedExistingRecord</code>, for a cluster whose package Zarf had already deployed before the proxy existed.</p>
+<p>The proxy still re-resolves and re-pins the new version, so <code>status.resolvedDigest</code> moves while the clusters keep what they were seeded with. If you want the new version on those clusters, either switch the proxy to <code>Reconcile</code> or remove zarf’s deployed-package record on the cluster deliberately.</p>
 <p>Deleting a workload <code>Cluster</code> never waits on any of this. A cluster being torn down is infrastructure going away, so the controller drops its removal work rather than blocking the teardown on a cluster that can no longer answer.</p>
 <h2 id="updating-a-package"><a class="header" href="#updating-a-package">Updating a package</a></h2>
 <p>Edit <code>spec.package.version</code>. The controller re-resolves, re-verifies, and redeploys, and <code>status.resolvedDigest</code> moves to the new digest.</p>
