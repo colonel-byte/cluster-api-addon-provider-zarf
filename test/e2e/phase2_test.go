@@ -190,7 +190,7 @@ func TestAutoInitAndDeploy(t *testing.T) {
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
 			DeletionPolicy:  addonsv1alpha1.PolicyRetain,
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository:            appPackageRepository,
 				Version:               appPackageVersion,
 				API:                   addonsv1alpha1.PackageAPIV1Beta1,

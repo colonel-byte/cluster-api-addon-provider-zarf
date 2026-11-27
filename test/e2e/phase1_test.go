@@ -75,7 +75,7 @@ func testProxy(name, namespace string) *addonsv1alpha1.ZarfPackageProxy {
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
 			DeletionPolicy:  addonsv1alpha1.PolicyRetain,
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: registryHost + "/packages/" + name,
 				Version:    "0.0.1",
 			},

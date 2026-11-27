@@ -51,7 +51,7 @@ func TestEnvtestHarness(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "podinfo", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: "registry.internal/zarf/podinfo",
 				Version:    "6.5.0",
 			},
@@ -81,7 +81,7 @@ func TestInitRegistryModeCEL(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "init-knobs", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: "registry.internal/zarf/init-slim",
 				Version:    "v1.0.1",
 			},
@@ -120,5 +120,78 @@ func TestInitRegistryModeCEL(t *testing.T) {
 	same.Spec.Init.InjectorImage = "registry.internal/injector:v2"
 	if err := c.Update(t.Context(), same); err != nil {
 		t.Fatalf("an update keeping the mode must be admitted: %v", err)
+	}
+}
+
+// TestStagedProxyCEL proves the staged form's admission rules: the shape is accepted, both
+// forms at once are refused, a dangling packageRef is refused, and a declared stage's strategy
+// is immutable.
+func TestStagedProxyCEL(t *testing.T) {
+	c := envtest.Client(t)
+	ns := envtest.Namespace(t, c)
+
+	staged := &addonsv1alpha1.ZarfPackageProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "staged", Namespace: ns},
+		Spec: addonsv1alpha1.ZarfPackageProxySpec{
+			ClusterSelector: metav1.LabelSelector{},
+			Packages: map[string]addonsv1alpha1.ZarfPackageSource{
+				"zarf-init": {Repository: "registry.internal/zarf/init-slim", Version: "v1.0.1"},
+				"csi":       {Repository: "registry.internal/zarf/csi", Version: "v1.21.2"},
+			},
+			Stages: []addonsv1alpha1.PackageStage{
+				{
+					Name:       "storage-seed",
+					PackageRef: "csi",
+					Strategy:   addonsv1alpha1.StrategyApplyOnce,
+				},
+				{
+					Name:       "registry",
+					PackageRef: "zarf-init",
+				},
+			},
+			Init: &addonsv1alpha1.InitOptions{
+				AutoInit:   true,
+				PackageRef: "zarf-init",
+			},
+		},
+	}
+	if err := c.Create(t.Context(), staged); err != nil {
+		t.Fatalf("a well-formed staged proxy must be admitted: %v", err)
+	}
+
+	both := staged.DeepCopy()
+	both.ObjectMeta = metav1.ObjectMeta{Name: "staged-both", Namespace: ns}
+	both.Spec.Package = &addonsv1alpha1.ZarfPackageSource{Repository: "r", Version: "v"}
+	if err := c.Create(t.Context(), both); err == nil {
+		t.Fatal("expected declaring both package and stages to be rejected")
+	}
+
+	dangling := staged.DeepCopy()
+	dangling.ObjectMeta = metav1.ObjectMeta{Name: "staged-dangling", Namespace: ns}
+	dangling.Spec.Stages[1].PackageRef = "missing"
+	if err := c.Create(t.Context(), dangling); err == nil {
+		t.Fatal("expected a dangling packageRef to be rejected")
+	}
+
+	danglingInit := staged.DeepCopy()
+	danglingInit.ObjectMeta = metav1.ObjectMeta{Name: "staged-dangling-init", Namespace: ns}
+	danglingInit.Spec.Init.PackageRef = "missing"
+	if err := c.Create(t.Context(), danglingInit); err == nil {
+		t.Fatal("expected a dangling init.packageRef to be rejected")
+	}
+
+	flipped := staged.DeepCopy()
+	flipped.Spec.Stages[0].Strategy = addonsv1alpha1.StrategyReconcile
+	if err := c.Update(t.Context(), flipped); err == nil {
+		t.Fatal("expected flipping a declared stage's strategy to be rejected")
+	}
+
+	appended := staged.DeepCopy()
+	appended.Spec.Stages = append(appended.Spec.Stages, addonsv1alpha1.PackageStage{
+		Name:       "storage-final",
+		PackageRef: "csi",
+	})
+	if err := c.Update(t.Context(), appended); err != nil {
+		t.Fatalf("appending a stage must be admitted: %v", err)
 	}
 }

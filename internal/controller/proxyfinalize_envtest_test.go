@@ -77,7 +77,7 @@ func TestProxyFinalizer(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Spec: addonsv1alpha1.ZarfPackageProxySpec{
 				ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "edge"}},
-				Package: addonsv1alpha1.ZarfPackageSource{
+				Package: &addonsv1alpha1.ZarfPackageSource{
 					Repository: "registry.internal/zarf/" + name,
 					Version:    "1.0.0",
 				},

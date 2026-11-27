@@ -73,7 +73,7 @@ func (r *ZarfPackageProxyReconciler) convergeDeploys(ctx context.Context, proxy 
 // nothing to report and the release's existing reason is the better record.
 func applyOnceSupersededMessage(proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease) (string, bool) {
 	seeded := release.Status.DeployedVersion
-	declared := proxy.Spec.Package.Version
+	declared := declaredVersion(proxy)
 	if seeded == "" || declared == "" || declared == seeded {
 		return "", false
 	}

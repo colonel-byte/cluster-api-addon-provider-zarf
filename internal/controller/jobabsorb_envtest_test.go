@@ -147,7 +147,7 @@ func TestJobAbsorption(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "web-app", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "edge"}},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: "registry.internal/zarf/web-app",
 				Version:    "2.0.0",
 			},

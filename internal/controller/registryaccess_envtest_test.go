@@ -120,7 +120,7 @@ func TestRegistryAccessValidation(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "registry-access-" + itoa(i), Namespace: ns},
 				Spec: addonsv1alpha1.ZarfPackageProxySpec{
 					ClusterSelector: metav1.LabelSelector{},
-					Package:         test.source,
+					Package:         &test.source,
 					Init:            &addonsv1alpha1.InitOptions{Package: test.source.DeepCopy()},
 				},
 			}

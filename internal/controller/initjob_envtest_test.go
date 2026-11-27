@@ -76,7 +76,7 @@ func TestAutoInitJob(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "auto-app", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "edge"}},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: "registry.internal/zarf/auto-app",
 				Version:    "1.0.0",
 			},
@@ -275,7 +275,7 @@ func TestAutoInitFailureSurvivesState(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "half-init", Namespace: ns},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "edge"}},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: "registry.internal/zarf/half-init",
 				Version:    "1.0.0",
 			},

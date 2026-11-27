@@ -169,7 +169,7 @@ func TestResolutionSignatureKey(t *testing.T) {
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "edge"}},
 			Strategy:        addonsv1alpha1.StrategyApplyOnce,
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository:            "registry.internal/zarf/signed",
 				Version:               "1.0.0",
 				SignatureKeySecretRef: &addonsv1alpha1.NamespacedReference{Name: "signing-key"},

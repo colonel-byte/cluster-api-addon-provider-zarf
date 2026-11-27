@@ -76,7 +76,7 @@ func TestFromZarfStateResolution(t *testing.T) {
 			ClusterSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{"caapz.e2e/registry-auth": "no-cluster"},
 			},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: mgmtZarfAppRepository,
 				Version:    appPackageVersion,
 				// The whole test: no pullSecretRef, no caBundleSecretRef. Both come from the
@@ -142,7 +142,7 @@ func TestFromZarfStateDeploy(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "zarf-state-deploy", Namespace: "default"},
 		Spec: addonsv1alpha1.ZarfPackageProxySpec{
 			ClusterSelector: metav1.LabelSelector{},
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository:    mgmtZarfAppRepository,
 				Version:       appPackageVersion,
 				FromZarfState: true,

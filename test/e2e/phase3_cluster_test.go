@@ -191,7 +191,7 @@ func TestClusterDeletionIsNotBlocked(t *testing.T) {
 				MatchLabels: map[string]string{disposableRoleLabel: "disposable"},
 			},
 			DeletionPolicy: addonsv1alpha1.PolicyDelete,
-			Package: addonsv1alpha1.ZarfPackageSource{
+			Package: &addonsv1alpha1.ZarfPackageSource{
 				Repository: appPackageRepository,
 				Version:    appPackageVersion,
 				API:        addonsv1alpha1.PackageAPIV1Beta1,

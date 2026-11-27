@@ -357,8 +357,9 @@ type InitRegistryOptions struct {
 
 // InitOptions controls Zarf initialization of a target cluster that has no Zarf state yet -
 // §6 step 5's auto-init deploy path (docs/dev/architecture.md).
-// +kubebuilder:validation:XValidation:rule="!(has(self.autoInit) && self.autoInit) || has(self.package)",message="init.autoInit requires init.package"
-// +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package) && has(self.package.api) && self.package.api == 'v1alpha1')",message="init.set requires init.package.api: v1alpha1; v1beta1 init packages take init.values"
+// +kubebuilder:validation:XValidation:rule="!(has(self.autoInit) && self.autoInit) || has(self.package) || has(self.packageRef)",message="init.autoInit requires init.package or init.packageRef"
+// +kubebuilder:validation:XValidation:rule="!(has(self.package) && has(self.packageRef))",message="set init.package or init.packageRef, not both"
+// +kubebuilder:validation:XValidation:rule="!has(self.set) || has(self.packageRef) || (has(self.package) && has(self.package.api) && self.package.api == 'v1alpha1')",message="init.set requires init.package.api: v1alpha1; v1beta1 init packages take init.values"
 // +kubebuilder:validation:XValidation:rule="!has(self.registry) || !has(self.registry.mode) || self.registry.mode != 'proxy' || has(self.injectorImage)",message="init.registry.mode: proxy requires init.injectorImage - first init has no registry to pull an injector from"
 type InitOptions struct {
 	// autoInit deploys init.package first when the target cluster has no zarf-state secret in
@@ -395,6 +396,12 @@ type InitOptions struct {
 	// +optional
 	Set map[string]string `json:"set,omitempty"`
 
+	// packageRef names a key in spec.packages as the init package, instead of declaring one
+	// inline in package - the staged form, where every source is declared once. Mutually
+	// exclusive with package.
+	// +optional
+	PackageRef string `json:"packageRef,omitempty"`
+
 	// registry shapes the registry half of the zarf-state initialization creates. The settings
 	// apply to every ZarfInitConfig this proxy deploys - the auto-init package here, or a
 	// spec.package that itself resolves to one - so an init block carrying only settings, with
@@ -408,6 +415,50 @@ type InitOptions struct {
 	// image ships. A wrong value fails at init with an image-pull symptom, not a config error.
 	// +optional
 	InjectorImage string `json:"injectorImage,omitempty"`
+}
+
+// PackageStage is one step of a staged proxy: a component selection over one of spec.packages,
+// deployed in declared order on every matching cluster. The design and its decisions are
+// docs/dev/design-package-stages.md.
+type PackageStage struct {
+	// name is the stage's identity: Job names, deploy-spec file names, and the per-cluster
+	// applied record are keyed on it, which is why renaming a stage reads as removing one and
+	// adding another. A DNS-label-shaped string because it becomes part of a Job name.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=40
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// packageRef names a key in spec.packages as this stage's source. A reference rather than
+	// an inline source so one package appearing in several stages is declared - and versioned -
+	// exactly once.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	PackageRef string `json:"packageRef"`
+
+	// strategy is this stage's deployment strategy: Reconcile (the default) re-runs the stage
+	// when its rendered spec changes; ApplyOnce runs it at most once per cluster, for seed
+	// stages whose values a later stage supersedes on the same Helm release. Immutable once
+	// declared - flipping ApplyOnce to Reconcile would re-run a history stage.
+	// +optional
+	// +kubebuilder:default=Reconcile
+	Strategy DeploymentStrategy `json:"strategy,omitempty"`
+
+	// components filters which package components this stage deploys, with spec.components'
+	// semantics: empty means the package's defaults.
+	// +optional
+	Components []ComponentSelector `json:"components,omitempty"`
+
+	// values is this stage's structured values tree, with spec.values' semantics and templating.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Values *apiextensionsv1.JSON `json:"values,omitempty"`
+
+	// set are this stage's Zarf variables, with spec.set's semantics and v1alpha1-only rule
+	// against the referenced package's declared api.
+	// +optional
+	Set map[string]string `json:"set,omitempty"`
 }
 
 // ComponentSelector names a package component to deploy, optionally pinning its flavor.
@@ -503,8 +554,17 @@ type DeployJobOptions struct {
 // it also refuses *clearing*: dropping spec.init (or its registry block) in one edit and
 // re-adding it with a different mode in the next would bypass a rule that can only see the
 // struct it sits on.
-// +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package.api) && self.package.api == 'v1alpha1')",message="spec.set requires spec.package.api: v1alpha1; v1beta1 packages take spec.values"
+// +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package) && has(self.package.api) && self.package.api == 'v1alpha1')",message="spec.set requires spec.package.api: v1alpha1; v1beta1 packages take spec.values"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.init) || !has(oldSelf.init.registry) || !has(oldSelf.init.registry.mode) || (has(self.init) && has(self.init.registry) && has(self.init.registry.mode) && self.init.registry.mode == oldSelf.init.registry.mode)",message="init.registry.mode is immutable once set, including unsetting it - switching a live cluster's registry mode re-addresses the registry under deployed releases"
+// +kubebuilder:validation:XValidation:rule="has(self.package) != has(self.stages)",message="declare spec.package or spec.stages, exactly one"
+// +kubebuilder:validation:XValidation:rule="has(self.stages) == has(self.packages)",message="spec.stages and spec.packages come together: stages draw their sources from packages"
+// +kubebuilder:validation:XValidation:rule="!has(self.stages) || self.stages.all(s, s.packageRef in self.packages)",message="every stage's packageRef must name a key in spec.packages"
+// +kubebuilder:validation:XValidation:rule="!has(self.stages) || self.strategy == 'Reconcile'",message="spec.strategy is ignored on a staged proxy - stages carry their own; leave it unset"
+// +kubebuilder:validation:XValidation:rule="!has(self.stages) || (!has(self.components) && !has(self.set))",message="components and set belong to the stages on a staged proxy (values too, but its unstructured schema is invisible to CEL and it is ignored there)"
+// +kubebuilder:validation:XValidation:rule="!has(self.stages) || self.stages.all(s, !has(s.set) || (s.packageRef in self.packages && has(self.packages[s.packageRef].api) && self.packages[s.packageRef].api == 'v1alpha1'))",message="a stage's set requires its package's api: v1alpha1; v1beta1 packages take values"
+// +kubebuilder:validation:XValidation:rule="!has(self.init) || !has(self.init.packageRef) || (has(self.packages) && self.init.packageRef in self.packages)",message="init.packageRef must name a key in spec.packages"
+// +kubebuilder:validation:XValidation:rule="!has(self.init) || !has(self.init.set) || !has(self.init.packageRef) || (has(self.packages) && self.init.packageRef in self.packages && has(self.packages[self.init.packageRef].api) && self.packages[self.init.packageRef].api == 'v1alpha1')",message="init.set requires the referenced package's api: v1alpha1; v1beta1 init packages take init.values"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.stages) || !has(self.stages) || self.stages.all(s, oldSelf.stages.all(o, o.name != s.name || o.strategy == s.strategy))",message="a stage's strategy is immutable once declared - flipping ApplyOnce to Reconcile re-runs a history stage"
 type ZarfPackageProxySpec struct {
 	// clusterSelector selects the CAPI Clusters this package deploys to, by label. Only
 	// Clusters in the proxy's own namespace match unless the controller was started with
@@ -512,9 +572,29 @@ type ZarfPackageProxySpec struct {
 	// +required
 	ClusterSelector metav1.LabelSelector `json:"clusterSelector"`
 
-	// package is the package source and verification settings.
-	// +required
-	Package ZarfPackageSource `json:"package"`
+	// package is the package source and verification settings - the single-package form, and
+	// sugar for a one-stage list carrying spec.strategy. Exactly one of package and stages is
+	// declared.
+	// +optional
+	Package *ZarfPackageSource `json:"package,omitempty"`
+
+	// packages are the named sources a staged proxy's stages draw from, keyed by a name the
+	// stages reference. Hoisted out of the stage list so one package appearing in several
+	// stages carries one version - a half-edited pair of inline sources would be two digests
+	// of one Helm release lineage. Declared exactly when stages is.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=16
+	Packages map[string]ZarfPackageSource `json:"packages,omitempty"`
+
+	// stages is the ordered deployment sequence over packages, run per cluster in declared
+	// order: the first stage whose rendered spec has not been applied holds the cluster's
+	// deploy slot until its Job settles. Stage names are the per-cluster applied record's
+	// identity (docs/dev/design-package-stages.md).
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=map
+	// +listMapKey=name
+	Stages []PackageStage `json:"stages,omitempty"`
 
 	// strategy is Reconcile (continuous lifecycle, the default) or ApplyOnce (seed packages).
 	// +optional
@@ -559,6 +639,34 @@ type ZarfPackageProxySpec struct {
 	// +optional
 	// +kubebuilder:default=Delete
 	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+}
+
+// PackageResolution is one spec.packages entry's resolution verdict, keyed by its map key.
+// Resolution is a property of the source, not the stage - one package appears in several
+// stages, and per-stage entries would have to agree in pairs, which is the two-digests-of-one-
+// name hazard packageRef exists to make unrepresentable.
+type PackageResolution struct {
+	// name is the spec.packages key this entry resolves.
+	// +required
+	Name string `json:"name"`
+
+	// resolvedRef is the "repository:version" whose resolution resolvedDigest pins, with
+	// status.resolvedRef's re-resolve-only-on-change semantics.
+	// +optional
+	ResolvedRef string `json:"resolvedRef,omitempty"`
+
+	// resolvedDigest is the manifest digest the declared tag pinned to.
+	// +optional
+	ResolvedDigest string `json:"resolvedDigest,omitempty"`
+
+	// packageName is the resolved package's declared name - the identity zarf's
+	// deployed-package record on each workload cluster is keyed on.
+	// +optional
+	PackageName string `json:"packageName,omitempty"`
+
+	// packageKind is the resolved artifact's kind - ZarfPackageConfig or ZarfInitConfig.
+	// +optional
+	PackageKind string `json:"packageKind,omitempty"`
 }
 
 // ZarfPackageProxyStatus is the observed state across matching clusters.
@@ -624,6 +732,26 @@ type ZarfPackageProxyStatus struct {
 	// ApplyOnce probe-and-adopt looks up.
 	// +optional
 	PackageName string `json:"packageName,omitempty"`
+
+	// packages are the per-source resolution verdicts of a staged proxy, one entry per
+	// spec.packages key; a stage reads its resolution through its packageRef. Empty on the
+	// single-package form, which uses the flat fields above.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Packages []PackageResolution `json:"packages,omitempty"`
+
+	// stageCount is how many stages the spec declares - the length of spec.stages, carried as
+	// a number because a printer column cannot take the length of a list. Zero on the
+	// single-package form.
+	// +optional
+	StageCount int32 `json:"stageCount,omitempty"`
+
+	// version is the declared version an operator most wants in a column: spec.package.version
+	// on the single-package form, the last stage's package version on a staged proxy - the end
+	// state the sequence converges on.
+	// +optional
+	Version string `json:"version,omitempty"`
 
 	// observedGeneration is the generation the status reflects.
 	// +optional

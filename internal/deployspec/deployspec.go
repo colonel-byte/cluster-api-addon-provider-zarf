@@ -35,6 +35,16 @@ const FileName = "deploy-spec.yaml"
 // deploy-spec Secret - the same document shape, naming the init package (§6 step 5).
 const InitFileName = "init-spec.yaml"
 
+// StageFileName is the Secret key a named stage's document sits under, beside FileName in the
+// same Secret. The empty name is the single-package form's document, FileName itself, so the
+// normalized one-stage case needs no special caller.
+func StageFileName(stage string) string {
+	if stage == "" {
+		return FileName
+	}
+	return "stage-" + stage + ".yaml"
+}
+
 // DockerConfigFileName is the Secret key the registry credentials sit under, beside FileName.
 // Literally config.json, because the mount directory becomes the pod's $DOCKER_CONFIG and that
 // is the only name a Docker config directory holds its config under.

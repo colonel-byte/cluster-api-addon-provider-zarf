@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,12 @@ func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *
 	// Nil in tests that exercise matching or stamping alone; main always wires one.
 	if r.Resolver == nil {
 		return 0, nil
+	}
+
+	proxy.Status.StageCount = int32(len(proxy.Spec.Stages))
+	proxy.Status.Version = declaredVersion(proxy)
+	if proxy.Spec.Package == nil {
+		return 0, r.resolveStagedPackages(ctx, proxy)
 	}
 
 	setResolved := func(status metav1.ConditionStatus, reason, message string) {
@@ -72,7 +79,7 @@ func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *
 		return 0, nil
 	}
 	opts.CosignPublicKey = publicKey
-	reason, message, err = r.registryAccess(ctx, proxy.Namespace, &proxy.Spec.Package, &opts)
+	reason, message, err = r.registryAccess(ctx, proxy.Namespace, proxy.Spec.Package, &opts)
 	if err != nil {
 		return 0, err
 	}
@@ -188,6 +195,11 @@ func (r *ZarfPackageProxyReconciler) resolveInitPackage(ctx context.Context, pro
 		return nil
 	}
 	initOpts := proxy.Spec.Init
+	if initOpts != nil && initOpts.PackageRef != "" {
+		// The staged form: the init package resolves as a spec.packages entry, and
+		// resolveStagedPackages mirrors its verdict onto the init status fields.
+		return nil
+	}
 	if initOpts == nil || initOpts.Package == nil {
 		// Auto-init was un-declared; a stale pin must not keep stamping init Jobs.
 		proxy.Status.InitResolvedDigest = ""
@@ -256,6 +268,141 @@ func (r *ZarfPackageProxyReconciler) resolveInitPackage(ctx context.Context, pro
 	setResolved(metav1.ConditionTrue, addonsv1alpha1.ReasonResolved,
 		fmt.Sprintf("%s pinned to %s", ref, result.Digest))
 	return nil
+}
+
+// resolveStagedPackages pins every spec.packages entry onto status.packages[], pin-once per
+// entry with re-resolve on a changed ref, through resolvePackage's exact chain per source. The
+// PackageResolved condition is the fleet verdict: True when every entry pinned, False with the
+// first failing entry's reason. No follow-tag and no drift re-check on staged sources: bumping
+// a package's version is the update path. When init.packageRef names an entry, its verdict is
+// mirrored onto the init status fields so the existing init machinery runs unchanged.
+func (r *ZarfPackageProxyReconciler) resolveStagedPackages(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) error {
+	setResolved := func(status metav1.ConditionStatus, reason, message string) {
+		meta.SetStatusCondition(&proxy.Status.Conditions, metav1.Condition{
+			Type:               addonsv1alpha1.ConditionPackageResolved,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: proxy.Generation,
+		})
+	}
+
+	previous := map[string]addonsv1alpha1.PackageResolution{}
+	for _, entry := range proxy.Status.Packages {
+		previous[entry.Name] = entry
+	}
+
+	keys := make([]string, 0, len(proxy.Spec.Packages))
+	for key := range proxy.Spec.Packages {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	entries := make([]addonsv1alpha1.PackageResolution, 0, len(keys))
+	failReason, failMessage := "", ""
+	for _, key := range keys {
+		pkg := proxy.Spec.Packages[key]
+		ref := pkg.Repository + ":" + pkg.Version
+		if prev, ok := previous[key]; ok && prev.ResolvedDigest != "" && prev.ResolvedRef == ref {
+			entries = append(entries, prev)
+			continue
+		}
+
+		fail := func(reason, message string) {
+			if failReason == "" {
+				failReason, failMessage = reason, fmt.Sprintf("packages[%s]: %s", key, message)
+			}
+			if prev, ok := previous[key]; ok {
+				entries = append(entries, prev)
+			}
+		}
+
+		opts := resolver.Options{PlainHTTP: r.RegistryPlainHTTP}
+		publicKey, reason, message, err := r.cosignKey(ctx, proxy.Namespace, pkg.SignatureKeySecretRef)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			fail(reason, message)
+			continue
+		}
+		opts.CosignPublicKey = publicKey
+		reason, message, err = r.registryAccess(ctx, proxy.Namespace, &pkg, &opts)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			fail(reason, message)
+			continue
+		}
+
+		result, err := r.Resolver.Resolve(ctx, pkg.Repository, pkg.Version, opts)
+		if err != nil {
+			reason := addonsv1alpha1.ReasonResolutionFailed
+			if len(opts.CosignPublicKey) > 0 {
+				reason = addonsv1alpha1.ReasonSignatureVerificationFailed
+			}
+			fail(reason, err.Error())
+			continue
+		}
+		if declared := pkg.API; declared != "" && string(declared) != result.APIVersion {
+			fail(addonsv1alpha1.ReasonPackageAPIMismatch,
+				fmt.Sprintf("api declares %s but the artifact is %s", declared, result.APIVersion))
+			continue
+		}
+
+		entries = append(entries, addonsv1alpha1.PackageResolution{
+			Name:           key,
+			ResolvedRef:    ref,
+			ResolvedDigest: result.Digest,
+			PackageName:    result.Name,
+			PackageKind:    packageKind(result),
+		})
+	}
+	proxy.Status.Packages = entries
+
+	if failReason != "" {
+		setResolved(metav1.ConditionFalse, failReason, failMessage)
+	} else {
+		setResolved(metav1.ConditionTrue, addonsv1alpha1.ReasonResolved,
+			fmt.Sprintf("%d packages pinned", len(entries)))
+	}
+
+	if proxy.Spec.Init != nil && proxy.Spec.Init.PackageRef != "" {
+		r.mirrorInitResolution(proxy, proxy.Spec.Init.PackageRef)
+	}
+	return nil
+}
+
+// mirrorInitResolution writes init.packageRef's status.packages verdict onto the init status
+// fields and the InitPackageResolved condition - the shim that lets convergeInit and
+// settleInitJob run unchanged on the staged form.
+func (r *ZarfPackageProxyReconciler) mirrorInitResolution(proxy *addonsv1alpha1.ZarfPackageProxy, key string) {
+	setResolved := func(status metav1.ConditionStatus, reason, message string) {
+		meta.SetStatusCondition(&proxy.Status.Conditions, metav1.Condition{
+			Type:               addonsv1alpha1.ConditionInitPackageResolved,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: proxy.Generation,
+		})
+	}
+	for _, entry := range proxy.Status.Packages {
+		if entry.Name != key || entry.ResolvedDigest == "" {
+			continue
+		}
+		if entry.PackageKind != "ZarfInitConfig" {
+			setResolved(metav1.ConditionFalse, addonsv1alpha1.ReasonNotAnInitPackage,
+				fmt.Sprintf("init.packageRef %s resolved to a %s, not the ZarfInitConfig auto-init needs", key, entry.PackageKind))
+			return
+		}
+		proxy.Status.InitResolvedDigest = entry.ResolvedDigest
+		proxy.Status.InitResolvedRef = entry.ResolvedRef
+		setResolved(metav1.ConditionTrue, addonsv1alpha1.ReasonResolved,
+			fmt.Sprintf("%s pinned to %s", entry.ResolvedRef, entry.ResolvedDigest))
+		return
+	}
+	// Unresolved: PackageResolved already carries the why; the init condition just waits.
 }
 
 // followTag reads the §3 tag-following annotations: enabled, and at what interval.
