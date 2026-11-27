@@ -175,6 +175,17 @@ type ZarfPackageReleaseStatus struct {
 	// +optional
 	Applied bool `json:"applied,omitempty"`
 
+	// stageCount is how many stages the proxy declared, stamped onto the release so it stays
+	// self-describing after a clusterctl move separates it from its proxy. Zero on the
+	// single-package form.
+	// +optional
+	StageCount int32 `json:"stageCount,omitempty"`
+
+	// appliedStageCount is how many declared stages have settled on this cluster - carried as
+	// a number because a printer column cannot take the length of a list.
+	// +optional
+	AppliedStageCount int32 `json:"appliedStageCount,omitempty"`
+
 	// stages are the per-stage applied records of a staged proxy's release, one entry per
 	// stage that has run on this cluster, in applied order. The identity each record carries
 	// is the controller's own hash of the stage's rendered spec - never the pod-reported
@@ -231,6 +242,8 @@ type StageState struct {
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.deployedVersion",description="Deployed package version"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 // +kubebuilder:printcolumn:name="Reason",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"Ready\")].reason",description="Why Ready holds its status"
+// +kubebuilder:printcolumn:name="Applied",type="integer",priority=1,JSONPath=".status.appliedStageCount",description="Declared stages settled on this cluster"
+// +kubebuilder:printcolumn:name="Stages",type="integer",priority=1,JSONPath=".status.stageCount",description="Stages the proxy declares"
 
 // ZarfPackageRelease records one cluster's deployment of one ZarfPackageProxy. The controller
 // creates it with an ownerReference to the CAPI Cluster, so deleting the Cluster garbage-collects

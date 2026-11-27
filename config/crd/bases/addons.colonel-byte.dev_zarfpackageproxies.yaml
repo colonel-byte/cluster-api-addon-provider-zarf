@@ -40,10 +40,16 @@ spec:
       name: Superseded
       priority: 1
       type: integer
-    - description: Declared package version
-      jsonPath: .spec.package.version
+    - description: Declared version - the single package's, or a staged proxy's last
+        stage's
+      jsonPath: .status.version
       name: Version
       type: string
+    - description: Stages the spec declares; zero on the single-package form
+      jsonPath: .status.stageCount
+      name: Stages
+      priority: 1
+      type: integer
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age
