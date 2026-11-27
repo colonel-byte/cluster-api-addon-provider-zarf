@@ -134,6 +134,25 @@ A stage completes when its deploy Job completes - the controller does not judge 
 
 Clusters that arrive already bootstrapped - by hand, by the Ansible collection, or re-created after a `clusterctl move` - are adopted rather than re-seeded: an `ApplyOnce` stage is satisfied by the cluster's own zarf deployed-package record, so the destructive re-run of seed values over a converged cluster does not happen.
 
+## Packages with `cmd` actions need a custom deploy image
+
+Deploy, init, and removal Jobs run the controller's own image: one static binary on a shell-less base (`cgr.dev/chainguard/static`), with the Zarf SDK compiled in. That decides which package `actions` work when a package is deployed through a proxy:
+
+- **`wait:` actions work.** The SDK runs them natively in-process - a cluster wait watches a kind/name/namespace/condition on the target cluster, a network wait probes tcp/http/https - so expressing readiness as waits (which [`bootstrap-order.md`](bootstrap-order.md#if-you-package-a-storage-driver-make-it-prove-itself-ready) asks of package authors anyway) needs nothing from the image.
+- **`cmd:` actions fail.** They execute through a shell (`sh` on Linux, or the action's `shellPref`), and the default image carries no shell, no coreutils, nothing - every `onDeploy`/`onRemove`/`onFailure` `cmd` fails at exec with "file not found", whatever the command is. `setVariables` fed by command output fails with them. `onCreate` actions are unaffected; they run at package build time, never in these pods.
+
+For a package that genuinely needs `cmd` actions, override the pod image per proxy:
+
+```yaml
+spec:
+  deployJob:
+    image: registry.internal/tools/deploy-runner:v1   # staged into your internal registry
+```
+
+Three things the override does not change, so the commands must tolerate them: the container still runs as non-root with a read-only root filesystem (the cache volume at `--cache-path` is the writable path, or add your own under `deployJob.volumes`); the image must be reachable from the management cluster's registry like any other air-gapped artifact; and the image must carry this provider's `manager` binary semantics only if you replace the entrypoint - the controller passes `deploy`/`remove` subcommand args, so the natural custom image is the released controller image rebuilt onto a shell-carrying base, not an unrelated toolbox image.
+
+`deployJob.image` is per proxy, so one sequence's packages can run on a shell-carrying image while the rest of the fleet keeps the hardened default.
+
 ## Editing the list once clusters have run it
 
 `Reconcile` stages are desired state: insert, remove, and reorder them freely. `ApplyOnce` stages are history: once applied on any cluster, renaming one, removing it, or inserting a new `ApplyOnce` stage before it holds that cluster's release with reason `StageListDiverged` and a message naming the first divergence - because a rename reads as a removal plus an insertion, and the insertion would run. Appending at the end is always the unambiguous edit.
