@@ -315,10 +315,51 @@ type ZarfPackageSource struct {
 	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
 }
 
+// InitRegistryMode is how workload pods reach the registry zarf-state names - upstream's
+// state.RegistryMode. Upstream also knows "external", which needs the address and credential
+// fields a later change adds, so it is not accepted here yet.
+// +kubebuilder:validation:Enum=nodeport;proxy
+type InitRegistryMode string
+
+const (
+	// RegistryModeNodePort serves the in-cluster registry through a NodePort Service. Zarf's
+	// default. Forces the registry's mTLS strategy to none upstream, so the internal registry
+	// cannot serve TLS in this mode.
+	RegistryModeNodePort InitRegistryMode = "nodeport"
+
+	// RegistryModeProxy serves the in-cluster registry through a per-node DaemonSet proxy on a
+	// host port, with zarf-managed mTLS - the mode where the internal registry serves TLS.
+	// Requires init.injectorImage: an image the node already holds, because on first init
+	// nothing can pull one.
+	RegistryModeProxy InitRegistryMode = "proxy"
+)
+
+// InitRegistryOptions shapes the registry half of the zarf-state that initialization creates,
+// mirroring upstream's RegistryInfo. These settings ride to every ZarfInitConfig deploy this
+// proxy performs, and re-deploys re-assert them - upstream only applies a mode that is
+// explicitly set, so a cluster can never silently regress to upstream defaults.
+type InitRegistryOptions struct {
+	// mode is how the registry is served: nodeport (Zarf's default) or proxy. Immutable once
+	// set, including unsetting it - switching a live cluster's mode re-addresses the registry
+	// under every release that templated the old address, so this provider refuses to drive
+	// one. A cluster whose existing zarf-state disagrees holds with condition
+	// InitSettingsSuperseded instead of being converged onto the declared mode.
+	// +optional
+	Mode InitRegistryMode `json:"mode,omitempty"`
+
+	// port is the registry's port: a Kubernetes NodePort in nodeport mode, a host port in
+	// proxy mode. Zero takes upstream's per-mode default.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+}
+
 // InitOptions controls Zarf initialization of a target cluster that has no Zarf state yet -
 // §6 step 5's auto-init deploy path (docs/dev/architecture.md).
 // +kubebuilder:validation:XValidation:rule="!(has(self.autoInit) && self.autoInit) || has(self.package)",message="init.autoInit requires init.package"
 // +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package) && has(self.package.api) && self.package.api == 'v1alpha1')",message="init.set requires init.package.api: v1alpha1; v1beta1 init packages take init.values"
+// +kubebuilder:validation:XValidation:rule="!has(self.registry) || !has(self.registry.mode) || self.registry.mode != 'proxy' || has(self.injectorImage)",message="init.registry.mode: proxy requires init.injectorImage - first init has no registry to pull an injector from"
 type InitOptions struct {
 	// autoInit deploys init.package first when the target cluster has no zarf-state secret in
 	// the zarf namespace. Keyed on observed cluster state, never a name, so it commutes with a
@@ -353,6 +394,20 @@ type InitOptions struct {
 	// REGISTRY_STORAGE_CLASS variable.
 	// +optional
 	Set map[string]string `json:"set,omitempty"`
+
+	// registry shapes the registry half of the zarf-state initialization creates. The settings
+	// apply to every ZarfInitConfig this proxy deploys - the auto-init package here, or a
+	// spec.package that itself resolves to one - so an init block carrying only settings, with
+	// no package or autoInit, is valid for proxies that init through spec.package.
+	// +optional
+	Registry *InitRegistryOptions `json:"registry,omitempty"`
+
+	// injectorImage is the container image Zarf's injector runs as during initialization.
+	// Proxy mode requires it on first init, when no registry exists to pull from, so it must
+	// be an image the node already holds - a per-fleet value, typically something the node
+	// image ships. A wrong value fails at init with an image-pull symptom, not a config error.
+	// +optional
+	InjectorImage string `json:"injectorImage,omitempty"`
 }
 
 // ComponentSelector names a package component to deploy, optionally pinning its flavor.
@@ -443,7 +498,13 @@ type DeployJobOptions struct {
 }
 
 // ZarfPackageProxySpec declares a package's desired state across every matching cluster.
+//
+// The registry-mode transition rule lives at spec level rather than on the registry struct so
+// it also refuses *clearing*: dropping spec.init (or its registry block) in one edit and
+// re-adding it with a different mode in the next would bypass a rule that can only see the
+// struct it sits on.
 // +kubebuilder:validation:XValidation:rule="!has(self.set) || (has(self.package.api) && self.package.api == 'v1alpha1')",message="spec.set requires spec.package.api: v1alpha1; v1beta1 packages take spec.values"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.init) || !has(oldSelf.init.registry) || !has(oldSelf.init.registry.mode) || (has(self.init) && has(self.init.registry) && has(self.init.registry.mode) && self.init.registry.mode == oldSelf.init.registry.mode)",message="init.registry.mode is immutable once set, including unsetting it - switching a live cluster's registry mode re-addresses the registry under deployed releases"
 type ZarfPackageProxySpec struct {
 	// clusterSelector selects the CAPI Clusters this package deploys to, by label. Only
 	// Clusters in the proxy's own namespace match unless the controller was started with

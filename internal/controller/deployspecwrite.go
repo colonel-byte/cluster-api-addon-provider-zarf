@@ -158,6 +158,13 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 			Flavor: component.Flavor,
 		})
 	}
+	// The init settings ride every ZarfInitConfig deploy, not just the auto-init document -
+	// the seed-then-manage pattern inits through spec.package and would otherwise have no way
+	// to declare a registry mode (docs/dev/design-package-stages.md, "Init stays outside the
+	// stage list").
+	if proxy.Status.PackageKind == "ZarfInitConfig" {
+		applyInitSettings(&spec, proxy.Spec.Init)
+	}
 	raw, err := spec.Marshal()
 	if err != nil {
 		return nil, err
@@ -182,6 +189,7 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 				Flavor: component.Flavor,
 			})
 		}
+		applyInitSettings(&initSpec, initOpts)
 		initRaw, err := initSpec.Marshal()
 		if err != nil {
 			return nil, err
@@ -189,6 +197,19 @@ func (r *ZarfPackageProxyReconciler) renderSpecs(proxy *addonsv1alpha1.ZarfPacka
 		files[deployspec.InitFileName] = initRaw
 	}
 	return files, nil
+}
+
+// applyInitSettings copies spec.init's state-shaping knobs onto a document that deploys a
+// ZarfInitConfig. Nil-safe, so callers need no guard when a proxy declares no init block.
+func applyInitSettings(spec *deployspec.Spec, init *addonsv1alpha1.InitOptions) {
+	if init == nil {
+		return
+	}
+	if init.Registry != nil {
+		spec.RegistryMode = string(init.Registry.Mode)
+		spec.RegistryPort = init.Registry.Port
+	}
+	spec.InjectorImage = init.InjectorImage
 }
 
 // buildSpec assembles one deploy-spec document from a source's fields, rendering its values and

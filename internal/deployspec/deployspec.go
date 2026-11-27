@@ -73,6 +73,14 @@ type Spec struct {
 	// InsecureSkipTLSVerify carries the source's field of the same name. The credentials and
 	// the CA travel as mounted files rather than fields - see DockerConfigFileName.
 	InsecureSkipTLSVerify bool `json:"insecureSkipTLSVerify,omitempty"`
+
+	// RegistryMode, RegistryPort and InjectorImage shape the zarf-state this deploy creates.
+	// The controller sets them only on documents whose package is a ZarfInitConfig; upstream
+	// applies a mode only when it is non-empty, so re-deploys carrying these re-assert the
+	// declared mode and an empty mode preserves whatever the cluster already has.
+	RegistryMode  string `json:"registryMode,omitempty"`
+	RegistryPort  int32  `json:"registryPort,omitempty"`
+	InjectorImage string `json:"injectorImage,omitempty"`
 }
 
 // Marshal renders the document as the YAML the Secret carries.

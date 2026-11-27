@@ -69,3 +69,56 @@ func TestEnvtestHarness(t *testing.T) {
 		t.Fatal("expected the spec.set CEL rule to reject a proxy without spec.package.api: v1alpha1")
 	}
 }
+
+// TestInitRegistryModeCEL proves the init registry rules at admission: proxy mode requires an
+// injector image, and a declared mode is immutable - including against being cleared, the
+// two-edit bypass the spec-level transition rule exists to close.
+func TestInitRegistryModeCEL(t *testing.T) {
+	c := envtest.Client(t)
+	ns := envtest.Namespace(t, c)
+
+	proxy := &addonsv1alpha1.ZarfPackageProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "init-knobs", Namespace: ns},
+		Spec: addonsv1alpha1.ZarfPackageProxySpec{
+			ClusterSelector: metav1.LabelSelector{},
+			Package: addonsv1alpha1.ZarfPackageSource{
+				Repository: "registry.internal/zarf/init-slim",
+				Version:    "v1.0.1",
+			},
+			Init: &addonsv1alpha1.InitOptions{
+				Registry: &addonsv1alpha1.InitRegistryOptions{
+					Mode: addonsv1alpha1.RegistryModeProxy,
+				},
+				InjectorImage: "registry.internal/injector:v1",
+			},
+		},
+	}
+	if err := c.Create(t.Context(), proxy); err != nil {
+		t.Fatalf("a proxy-mode init block with an injector image must be admitted: %v", err)
+	}
+
+	noImage := proxy.DeepCopy()
+	noImage.ObjectMeta = metav1.ObjectMeta{Name: "init-knobs-no-image", Namespace: ns}
+	noImage.Spec.Init.InjectorImage = ""
+	if err := c.Create(t.Context(), noImage); err == nil {
+		t.Fatal("expected proxy mode without init.injectorImage to be rejected")
+	}
+
+	swapped := proxy.DeepCopy()
+	swapped.Spec.Init.Registry.Mode = addonsv1alpha1.RegistryModeNodePort
+	if err := c.Update(t.Context(), swapped); err == nil {
+		t.Fatal("expected changing init.registry.mode to be rejected")
+	}
+
+	cleared := proxy.DeepCopy()
+	cleared.Spec.Init = nil
+	if err := c.Update(t.Context(), cleared); err == nil {
+		t.Fatal("expected clearing spec.init while registry.mode is set to be rejected")
+	}
+
+	same := proxy.DeepCopy()
+	same.Spec.Init.InjectorImage = "registry.internal/injector:v2"
+	if err := c.Update(t.Context(), same); err != nil {
+		t.Fatalf("an update keeping the mode must be admitted: %v", err)
+	}
+}
