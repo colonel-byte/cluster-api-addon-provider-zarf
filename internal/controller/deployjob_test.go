@@ -24,6 +24,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
+	"github.com/colonel-byte/cluster-api-addon-provider-zarf/internal/deployspec"
 )
 
 func testRelease() *addonsv1alpha1.ZarfPackageRelease {
@@ -56,7 +57,7 @@ func testProxy(opts *addonsv1alpha1.DeployJobOptions) *addonsv1alpha1.ZarfPackag
 }
 
 func TestBuildDeployJobDefaults(t *testing.T) {
-	job := BuildDeployJob(testProxy(nil), testRelease(), "controller:dev", "/var/lib/caapz/cache")
+	job := BuildDeployJob(testProxy(nil), testRelease(), "controller:dev", "/var/lib/caapz/cache", legacyStage())
 
 	if job.Name != "example-security-baseline-deploy" || job.Namespace != "fleet-default" {
 		t.Errorf("unexpected name/namespace: %s/%s", job.Namespace, job.Name)
@@ -115,7 +116,7 @@ func TestBuildDeployJobKnobs(t *testing.T) {
 			},
 		},
 		NodeSelector: map[string]string{"disk": "large"},
-	}), testRelease(), "controller:dev", "/var/lib/caapz/cache")
+	}), testRelease(), "controller:dev", "/var/lib/caapz/cache", legacyStage())
 
 	pod := job.Spec.Template.Spec
 	if pod.Containers[0].Image != "custom:1" {
@@ -197,5 +198,68 @@ func TestDeployJobPhase(t *testing.T) {
 				t.Errorf("DeployJobPhase() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// legacyStage is the single-package form's normalized stage, with the pre-stages names.
+func legacyStage() stage {
+	return stage{jobSuffix: "-deploy", specFileName: deployspec.FileName}
+}
+
+// TestBuildDeployJobStage is the stage-shaped Job contract: the suffix, the stage label, and
+// the spec file the pod reads all come from the normalized stage, and the single-package form
+// keeps its pre-stages name with no stage label - an upgrade renames nothing.
+func TestBuildDeployJobStage(t *testing.T) {
+	st := stage{
+		name:         "storage-seed",
+		jobSuffix:    "-storage-seed-deploy",
+		specFileName: "stage-storage-seed.yaml",
+	}
+	job := BuildDeployJob(testProxy(nil), testRelease(), "controller:dev", "/cache", st)
+	if want := testRelease().Name + "-storage-seed-deploy"; job.Name != want {
+		t.Errorf("job name = %q, want %q", job.Name, want)
+	}
+	if job.Labels[stageLabel] != "storage-seed" {
+		t.Errorf("stage label = %q, want storage-seed", job.Labels[stageLabel])
+	}
+	args := job.Spec.Template.Spec.Containers[0].Args
+	found := false
+	for _, arg := range args {
+		if strings.HasSuffix(arg, "/stage-storage-seed.yaml") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the pod does not read the stage's document: %v", args)
+	}
+
+	legacy := BuildDeployJob(testProxy(nil), testRelease(), "controller:dev", "/cache", legacyStage())
+	if _, ok := legacy.Labels[stageLabel]; ok {
+		t.Error("the single-package form must carry no stage label")
+	}
+	if want := testRelease().Name + "-deploy"; legacy.Name != want {
+		t.Errorf("legacy job name = %q, want %q", legacy.Name, want)
+	}
+}
+
+// TestJobNameTruncation pins the 63-character budget: names that fit pass through verbatim,
+// long ones keep their whole suffix and stay distinct from truncated siblings.
+func TestJobNameTruncation(t *testing.T) {
+	if got := jobName("short", "-deploy"); got != "short-deploy" {
+		t.Errorf("short name mangled: %q", got)
+	}
+	long := strings.Repeat("c", 70)
+	a := jobName(long+"-a", "-storage-seed-deploy")
+	b := jobName(long+"-b", "-storage-seed-deploy")
+	for _, name := range []string{a, b} {
+		if len(name) > 63 {
+			t.Errorf("name over budget: %q (%d)", name, len(name))
+		}
+		if !strings.HasSuffix(name, "-storage-seed-deploy") {
+			t.Errorf("suffix did not survive: %q", name)
+		}
+	}
+	if a == b {
+		t.Errorf("truncated siblings collide: %q", a)
 	}
 }
