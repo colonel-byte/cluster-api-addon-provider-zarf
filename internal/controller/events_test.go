@@ -86,6 +86,40 @@ func TestEmitConditionEvents(t *testing.T) {
 			after:  []metav1.Condition{resolved},
 			want:   []string{"Normal Resolved PackageResolved: pinned to sha256:aaaa"},
 		},
+		{
+			// The fleet-level Ready condition borrows its blocker's reason so `kubectl get`
+			// names the real cause, which makes one failure change two conditions carrying one
+			// reason. The second must not emit a second Warning saying the same word.
+			name:   "two conditions changing with one reason emit once",
+			before: []metav1.Condition{resolved},
+			after: []metav1.Condition{
+				failed,
+				{
+					Type:    addonsv1alpha1.ConditionReady,
+					Status:  metav1.ConditionFalse,
+					Reason:  addonsv1alpha1.ReasonResolutionFailed,
+					Message: "0 of 2 clusters deployed; registry refused",
+				},
+			},
+			want: []string{"Warning ResolutionFailed PackageResolved: registry refused"},
+		},
+		{
+			name:   "two conditions changing with different reasons both emit",
+			before: nil,
+			after: []metav1.Condition{
+				resolved,
+				{
+					Type:    addonsv1alpha1.ConditionReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  addonsv1alpha1.ReasonConverged,
+					Message: "2 of 2 clusters deployed",
+				},
+			},
+			want: []string{
+				"Normal Resolved PackageResolved: pinned to sha256:aaaa",
+				"Normal Converged Ready: 2 of 2 clusters deployed",
+			},
+		},
 	}
 
 	for _, test := range tests {

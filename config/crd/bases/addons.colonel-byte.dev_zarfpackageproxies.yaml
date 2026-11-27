@@ -19,25 +19,48 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Reconcile or ApplyOnce
-      jsonPath: .spec.strategy
-      name: Strategy
+    - description: Every matching cluster is deployed
+      jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
       type: string
+    - description: Matching clusters with the package deployed
+      jsonPath: .status.readyClusterCount
+      name: Deployed
+      type: integer
+    - description: Clusters the selector matches
+      jsonPath: .status.clusterCount
+      name: Clusters
+      type: integer
+    - description: Why Ready holds its status
+      jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Status
+      type: string
+    - description: Clusters seeded with a version the spec no longer declares
+      jsonPath: .status.supersededClusterCount
+      name: Superseded
+      priority: 1
+      type: integer
     - description: Declared package version
       jsonPath: .spec.package.version
       name: Version
-      type: string
-    - description: Package digest resolved and verified
-      jsonPath: .status.conditions[?(@.type=="PackageResolved")].status
-      name: Resolved
       type: string
     - description: Time since creation
       jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - description: Reconcile or ApplyOnce
+      jsonPath: .spec.strategy
+      name: Strategy
+      priority: 1
+      type: string
+    - description: Package digest resolved and verified
+      jsonPath: .status.conditions[?(@.type=="PackageResolved")].status
+      name: Resolved
+      priority: 1
+      type: string
     - description: Why PackageResolved holds its status
       jsonPath: .status.conditions[?(@.type=="PackageResolved")].reason
-      name: Reason
+      name: Resolution
       priority: 1
       type: string
     name: v1alpha1
@@ -3185,6 +3208,13 @@ spec:
           status:
             description: status is the observed state of ZarfPackageProxy.
             properties:
+              clusterCount:
+                description: |-
+                  clusterCount is how many Clusters the selector matches - the length of
+                  matchingClusters, carried as a number because a printer column cannot take the length
+                  of a list and `kubectl get` is where an operator looks first.
+                format: int32
+                type: integer
               conditions:
                 description: |-
                   conditions summarize the proxy's state. Ready is true when every matching cluster's
@@ -3274,6 +3304,14 @@ spec:
                   deployed-package record on each workload cluster is keyed on (§3), which is what the
                   ApplyOnce probe-and-adopt looks up.
                 type: string
+              readyClusterCount:
+                description: |-
+                  readyClusterCount is how many of those Clusters carry a release in Deployed or
+                  Completed. Beside Ready rather than instead of it: one stuck cluster out of two hundred
+                  and a fleet that deployed nowhere are both Ready: False, and only the counts tell them
+                  apart.
+                format: int32
+                type: integer
               resolvedDigest:
                 description: |-
                   resolvedDigest is the package manifest digest the declared tag resolved to, pinned on
@@ -3286,6 +3324,15 @@ spec:
                   controller re-resolves only when the spec's reference no longer matches it - an edit to
                   values or components must not silently re-pin a moved tag.
                 type: string
+              supersededClusterCount:
+                description: |-
+                  supersededClusterCount is how many Clusters were seeded with a version the spec no longer
+                  declares. Only ApplyOnce proxies can hold this state, and holding it is the contract
+                  rather than a fault - a seed is never re-run - so it does not make the proxy un-Ready. It
+                  is counted because a fleet reporting converged while every cluster is a version behind is
+                  otherwise indistinguishable from one that is actually up to date.
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

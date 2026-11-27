@@ -83,10 +83,33 @@ Only `Cluster` objects in the proxy's own namespace match, unless the controller
 
 ## Watch what happens
 
-The proxy reports what it resolved; each release reports what happened on its own cluster.
+The proxy reports the fleet; each release reports what happened on its own cluster.
 
 ```sh
 kubectl get zarfpackageproxy,zarfpackagerelease
+```
+
+```
+NAME       READY   DEPLOYED   CLUSTERS   STATUS                 VERSION   AGE
+podinfo    False   11         12         WaitingForDependency   1.0.0     4d
+```
+
+`READY` is the whole fleet: true only when every matching cluster has the package deployed. `DEPLOYED` and `CLUSTERS` are what tell one stuck cluster from a fleet that deployed nowhere - both read `READY: False`, and only the counts say which. `STATUS` is why, taken from the first cluster that has not finished, so the blocker is named on the proxy's own line rather than found by opening releases one at a time.
+
+Three states worth recognising:
+
+| `READY`   | Means                                                                                                 |
+| --------- | ----------------------------------------------------------------------------------------------------- |
+| `True`    | Every matching cluster is `Deployed`, or `Completed` for `ApplyOnce`                                  |
+| `False`   | Something is holding the fleet back - `STATUS` names it, and the counts say how much of the fleet     |
+| `Unknown` | The selector matches no clusters. Not success: usually a label that does not exist on any cluster yet |
+
+One `STATUS` is worth recognising because it reads as healthy and is not quite: `Superseded` on an `ApplyOnce` proxy means every cluster has the package - so `READY` is `True` - but some were seeded with a version the spec no longer declares, and a seed is never re-run. `kubectl get -o wide` adds the count, and the release says which version each cluster actually holds.
+
+`kubectl get -o wide` adds the strategy and the package-resolution condition, which is where to look when `STATUS` names a resolution or signature failure. The controller also records Events on every one of these transitions, so `kubectl describe` is a history rather than a snapshot:
+
+```sh
+kubectl describe zarfpackageproxy podinfo
 ```
 
 ```sh
@@ -203,6 +226,20 @@ The same fields exist on `spec.init.package`, and an init package in a different
 | `Retain`              | The release goes away immediately and the deployed package keeps running, owned by nobody |
 
 `Retain` is the honest choice for large or foundational packages, where an orphaned-but-working package beats a half-removed one. An `ApplyOnce` package always behaves as `Retain` - a seed cannot be un-run.
+
+**Bumping `spec.package.version` on an `ApplyOnce` proxy does not redeploy anything**, which is the contract rather than a bug - and the release says so instead of leaving you to compare fields:
+
+```sh
+kubectl get zarfpackagerelease seed-my-cluster -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}: {.status.conditions[?(@.type=="Ready")].message}{"\n"}'
+```
+
+```
+AlreadySeeded: this cluster was seeded with 1.0.0 and ApplyOnce never re-executes, so the declared 2.0.0 will not deploy here - switch the strategy to Reconcile, or re-seed deliberately
+```
+
+The release says this only while the two disagree. An `ApplyOnce` release whose declared version is the one it was seeded with keeps whatever reason recorded how it completed - `AdoptedExistingRecord`, for a cluster whose package Zarf had already deployed before the proxy existed.
+
+The proxy still re-resolves and re-pins the new version, so `status.resolvedDigest` moves while the clusters keep what they were seeded with. If you want the new version on those clusters, either switch the proxy to `Reconcile` or remove zarf's deployed-package record on the cluster deliberately.
 
 Deleting a workload `Cluster` never waits on any of this. A cluster being torn down is infrastructure going away, so the controller drops its removal work rather than blocking the teardown on a cluster that can no longer answer.
 

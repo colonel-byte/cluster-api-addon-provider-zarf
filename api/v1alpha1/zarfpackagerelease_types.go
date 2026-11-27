@@ -97,6 +97,13 @@ const (
 	// ReasonAdoptedExistingRecord means an ApplyOnce release found the package's
 	// deployed-package record already on the cluster and completed without deploying (§3).
 	ReasonAdoptedExistingRecord = "AdoptedExistingRecord"
+
+	// ReasonAlreadySeeded is Ready: True on an ApplyOnce release that has already run here and
+	// will not run again. It exists so that a proxy bumped after seeding says so: the release
+	// reports Completed either way, and without this the only visible difference between "the
+	// declared version is deployed" and "the declared version will never deploy here" is
+	// comparing two fields by eye.
+	ReasonAlreadySeeded = "AlreadySeeded"
 	// ReasonDeployed is Ready: True - the declared digest deployed successfully.
 	ReasonDeployed = "Deployed"
 	// ReasonCompleted is Ready: True for an ApplyOnce release whose one deploy ran.
