@@ -104,6 +104,13 @@ const (
 	// declared version is deployed" and "the declared version will never deploy here" is
 	// comparing two fields by eye.
 	ReasonAlreadySeeded = "AlreadySeeded"
+	// ReasonRegistryModeMismatch is Ready: False on a release that would deploy a
+	// ZarfInitConfig carrying a registry mode the cluster's own zarf-state contradicts.
+	// Upstream enacts any non-empty mode it is handed, so deploying would swap the cluster's
+	// registry mode out from under every release that templated the old address - the hold is
+	// what makes two proxies disagreeing about one cluster a visible condition on the loser
+	// instead of a silent last-writer-wins.
+	ReasonRegistryModeMismatch = "RegistryModeMismatch"
 	// ReasonStageListDiverged is Ready: False - the declared stage list structurally diverges
 	// from this cluster's applied ApplyOnce history (a rename, a removal, or an insertion
 	// before an applied seed), and running it could re-apply superseded seed values. The
@@ -133,6 +140,14 @@ const ConditionRemovalFailed = "RemovalFailed"
 
 // ReasonRemovalJobFailed is RemovalFailed: True.
 const ReasonRemovalJobFailed = "RemovalJobFailed"
+
+// ConditionInitSettingsSuperseded is the abnormal-true warning (TagDrift's shape) on a release
+// whose cluster's zarf-state records a registry mode the proxy's init.registry.mode
+// contradicts - an adopted cluster initialized under another mode, or another proxy that won
+// the first init. The declared mode is never applied over it: registry mode is immutable per
+// cluster, and the message names both modes. Absent while the declaration and the cluster
+// agree, or while the cluster has no state to disagree with.
+const ConditionInitSettingsSuperseded = "InitSettingsSuperseded"
 
 // ConditionSeedRecorded is set False on an ApplyOnce release whose completed deploy left no
 // deployed-package record on the cluster - a pure-actions package silently degrades the §3
@@ -179,6 +194,14 @@ type ZarfPackageReleaseStatus struct {
 	// applied is true once an ApplyOnce release has executed; it is never reset.
 	// +optional
 	Applied bool `json:"applied,omitempty"`
+
+	// observedRegistryMode is the registry mode the cluster's own zarf-state records, read on
+	// each deploy-gating pass - what `kubectl get zarfpackagereleases -o wide` shows beside
+	// the declaration, so a fleet whose clusters disagree about their mode is legible without
+	// opening a single cluster. Empty when the cluster has no state, or its state predates
+	// modes.
+	// +optional
+	ObservedRegistryMode string `json:"observedRegistryMode,omitempty"`
 
 	// stageCount is how many stages the proxy declared, stamped onto the release so it stays
 	// self-describing after a clusterctl move separates it from its proxy. Zero on the
@@ -253,6 +276,7 @@ type StageState struct {
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.deployedVersion",description="Deployed package version"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since creation"
 // +kubebuilder:printcolumn:name="Reason",type="string",priority=1,JSONPath=".status.conditions[?(@.type==\"Ready\")].reason",description="Why Ready holds its status"
+// +kubebuilder:printcolumn:name="Registry",type="string",priority=1,JSONPath=".status.observedRegistryMode",description="Registry mode the cluster's zarf-state records"
 // +kubebuilder:printcolumn:name="Applied",type="integer",priority=1,JSONPath=".status.appliedStageCount",description="Declared stages settled on this cluster"
 // +kubebuilder:printcolumn:name="Stages",type="integer",priority=1,JSONPath=".status.stageCount",description="Stages the proxy declares"
 

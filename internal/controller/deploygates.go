@@ -154,6 +154,17 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		return nil, err
 	}
 
+	// The init-settings guard: record the cluster's own registry mode for kubectl, and refuse
+	// to deploy a ZarfInitConfig whose declared mode the cluster's state contradicts.
+	hold, err := r.guardInitSettings(ctx, workload, proxy, release,
+		proxy.Status.PackageKind == "ZarfInitConfig", setReady)
+	if err != nil {
+		return nil, err
+	}
+	if hold {
+		return nil, nil
+	}
+
 	// §3's second tier, before any deploy would fire: adopt an existing deployed-package
 	// record instead of re-executing the seed.
 	if proxy.Spec.Strategy == addonsv1alpha1.StrategyApplyOnce {
@@ -222,6 +233,43 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		job.Annotations = map[string]string{specHashAnnotation: hash}
 	}
 	return job, nil
+}
+
+// guardInitSettings compares the declared init registry mode against the one the cluster's own
+// zarf-state records, writes the observed mode onto the release so `kubectl get
+// zarfpackagereleases -o wide` shows it, and raises the InitSettingsSuperseded condition on a
+// disagreement. The returned hold is true only when modePassing - this release is about to
+// deploy a ZarfInitConfig that would carry the conflicting mode, which upstream would enact.
+// A release that merely declares a superseded mode keeps deploying; the condition is its record.
+func (r *ZarfPackageProxyReconciler) guardInitSettings(ctx context.Context, workload client.Client, proxy *addonsv1alpha1.ZarfPackageProxy, release *addonsv1alpha1.ZarfPackageRelease, modePassing bool, setReady func(metav1.ConditionStatus, string, string)) (bool, error) {
+	observed, err := clusterRegistryMode(ctx, workload)
+	if err != nil {
+		return false, err
+	}
+	release.Status.ObservedRegistryMode = observed
+
+	declared := ""
+	if proxy.Spec.Init != nil && proxy.Spec.Init.Registry != nil {
+		declared = string(proxy.Spec.Init.Registry.Mode)
+	}
+	if declared == "" || observed == "" || declared == observed {
+		meta.RemoveStatusCondition(&release.Status.Conditions, addonsv1alpha1.ConditionInitSettingsSuperseded)
+		return false, nil
+	}
+
+	message := fmt.Sprintf("the cluster's zarf-state records registry mode %q and this proxy declares %q; registry mode is immutable per cluster, so the declared mode will not be applied here - another proxy or an earlier init owns it", observed, declared)
+	meta.SetStatusCondition(&release.Status.Conditions, metav1.Condition{
+		Type:    addonsv1alpha1.ConditionInitSettingsSuperseded,
+		Status:  metav1.ConditionTrue,
+		Reason:  addonsv1alpha1.ReasonRegistryModeMismatch,
+		Message: message,
+	})
+	if !modePassing {
+		return false, nil
+	}
+	release.Status.Phase = addonsv1alpha1.PhasePending
+	setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonRegistryModeMismatch, message)
+	return true, nil
 }
 
 // convergeStages is the staged form's ordering walk (docs/dev/design-package-stages.md): each
@@ -358,6 +406,23 @@ func (r *ZarfPackageProxyReconciler) convergeStages(ctx context.Context, proxy *
 				})
 				applied++
 				continue
+			}
+		}
+
+		// The init-settings guard, before an init-capable stage may carry its mode to the
+		// cluster - and the observed-mode record for kubectl either way.
+		{
+			w, err := workloadFor()
+			if err != nil {
+				return nil, err
+			}
+			hold, err := r.guardInitSettings(ctx, w, proxy, release,
+				resolution != nil && resolution.PackageKind == "ZarfInitConfig", setReady)
+			if err != nil {
+				return nil, err
+			}
+			if hold {
+				return nil, nil
 			}
 		}
 
