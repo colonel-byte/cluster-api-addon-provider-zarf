@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-8d0f7399.js";
+            window.path_to_searchindex_js = "../searchindex-04958ddf.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-2757b64a.js"></script>
+        <script src="../toc-41f4cb6d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -190,8 +190,21 @@
 <pre><code>zarf init ──needs──&gt; a StorageClass ──provided by──&gt; a storage package ──needs──&gt; a registry ──provided by──&gt; zarf init
 </code></pre>
 <p>Nothing reports this as an error. <code>zarf init</code> stands up its injector and a temporary seed registry, then the permanent registry’s <code>PersistentVolumeClaim</code> goes <code>Pending</code> and stays there, because nothing in the cluster provisions volumes yet. Meanwhile every other package you declared sits in <code>Pending</code> with reason <code>WaitingForZarfState</code>, because the init-first gate holds non-init packages until the cluster has Zarf state. The cluster looks busy and is stuck.</p>
-<p>You break the cycle in one of four ways. They are listed cheapest-first, and the first one is the right answer far more often than it looks.</p>
-<h2 id="option-1-provide-storage-outside-the-package-system"><a class="header" href="#option-1-provide-storage-outside-the-package-system">Option 1: provide storage outside the package system</a></h2>
+<p><strong>Check whether you actually have the cycle before solving it.</strong> It assumes two things: that the registry is backed by a <code>PersistentVolumeClaim</code>, and that your storage provider needs storage to start. Two designs break it without any sequencing:</p>
+<ul>
+<li><strong>Storage that consumes raw devices.</strong> Rook-Ceph with <code>useAllNodes: true</code> / <code>useAllDevices: true</code> needs no <code>StorageClass</code> to come up - it is the thing that provides one.</li>
+<li><strong>A registry that is not volume-backed.</strong> Point the registry at object storage - a Ceph <code>ObjectBucketClaim</code>, or any S3 the cluster can reach - and it never wants a PVC.</li>
+</ul>
+<p>With both, what is left is an ordering problem rather than a cycle, and ordering between packages is what <code>dependsOn</code> is for. You still cannot order it entirely inside the init package, for a reason that is measured rather than argued: see <a href="#why-the-init-package-cannot-be-split">Why the init package cannot be split</a>.</p>
+<p>You break the cycle in one of five ways. They are listed cheapest-first, and the first one is the right answer far more often than it looks.</p>
+<h2 id="option-1-give-the-cluster-a-registry-it-does-not-have-to-build"><a class="header" href="#option-1-give-the-cluster-a-registry-it-does-not-have-to-build">Option 1: give the cluster a registry it does not have to build</a></h2>
+<p>A registry the cluster does not have to build is the end of the whole problem: <code>zarf init</code> needs no storage, there is no seed-to-permanent handover to sequence, and your storage driver becomes an ordinary day-two package with no special position in the order.</p>
+<pre><code class="language-sh">zarf init --registry-url=registry.internal --registry-push-username=... --registry-push-password=...
+</code></pre>
+<p>Through this provider, that is the init package’s own values rather than a flag, and the registry address Zarf records in state is what every package’s image references are rewritten to - so a package built to pull from <code>{{ .State.Registry.Address }}</code> works unchanged in this mode.</p>
+<p>Two things it needs, and they are both about the workload cluster rather than the management cluster. <strong>Every node must be able to reach that registry</strong>, because the node is what pulls; and Zarf writes a pull secret into each namespace it deploys into, which is where those credentials come from. If the registry is behind credentials or a private CA, the controller side of that is <code>pullSecretRef</code>, <code>caBundleConfigMapRef</code> and friends on the package source - see <a href="getting-started.html#reach-a-registry-that-needs-credentials-or-a-private-ca">Getting started</a>.</p>
+<p>This is the right answer whenever a registry the workload cluster can reach already exists. Do not assume one does: an air gap is a topology, not a single pattern, and a management cluster holding the packages does not imply the workload clusters may pull from it - the segment may be routed, firewalled, or physically separate. Where that is the case this option is simply unavailable, and options 2 through 5 are the whole menu.</p>
+<h2 id="option-2-provide-storage-outside-the-package-system"><a class="header" href="#option-2-provide-storage-outside-the-package-system">Option 2: provide storage outside the package system</a></h2>
 <p>If a <code>StorageClass</code> already exists when <code>zarf init</code> runs, there is no cycle and no ordering problem. Nothing to sequence, nothing to stage, one proxy.</p>
 <p>This is the right answer whenever the storage is something your cluster images or your infrastructure provider can carry: <code>local-path</code> on a single-node or lab cluster, a CSI driver your node image already ships, a cloud provider’s default class, or a Cluster API <code>ClusterResourceSet</code> that applies the provisioner as the cluster comes up.</p>
 <p><code>local-path</code> as a <code>ClusterResourceSet</code>, applied by Cluster API itself at cluster creation:</p>
@@ -252,9 +265,6 @@ spec:
 <li><strong><code>autoInit</code> is keyed on observed cluster state, never on a name.</strong> The controller probes for Zarf state and only initializes a cluster that has none, so this commutes with a fleet that manages init through its own proxy. Whoever gets there first wins, and the other no-ops.</li>
 </ul>
 <p><strong>Two things <code>local-path</code> will want on a real cluster</strong>, both learned by running it rather than reading about it. Its volume-provisioning helper pod mounts a <code>hostPath</code>, which the <code>baseline</code> Pod Security standard forbids - so its namespace needs <code>pod-security.kubernetes.io/enforce: privileged</code>. And a single-node cluster whose only node carries a control-plane <code>NoSchedule</code> taint has nowhere to put the registry: Zarf’s injector treats any <code>NoSchedule</code> or <code>NoExecute</code> taint as disqualifying and reports <code>no suitable injector image or node exists</code>.</p>
-<h2 id="option-2-put-the-storage-inside-a-custom-init-package"><a class="header" href="#option-2-put-the-storage-inside-a-custom-init-package">Option 2: put the storage inside a custom init package</a></h2>
-<p>Zarf’s component <code>import</code> mechanism composes a <code>ZarfInitConfig</code> that carries your storage provider’s components alongside the registry’s. One package, one proxy, no ordering - the cycle is resolved inside the package instead of between packages.</p>
-<p>This is the documented escape hatch for exactly this constraint, and the cost is that each fleet segment needing different storage carries its own init package. Worth it when storage genuinely cannot exist before init; not worth it otherwise, because you have taken on building and maintaining an init package.</p>
 <h2 id="option-3-let-the-whole-thing-wait-on-a-seeded-registry"><a class="header" href="#option-3-let-the-whole-thing-wait-on-a-seeded-registry">Option 3: let the whole thing wait on a seeded registry</a></h2>
 <p>If your storage provider can run from an ephemeral registry, you can order the pieces with <code>dependsOn</code> and let the controller sequence them. The seed registry that <code>zarf init</code> stands up before the permanent one is enough to pull from:</p>
 <pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
@@ -288,14 +298,14 @@ spec:
     matchLabels:
       zarf: enabled
   dependsOn:
-    - zarf-init
+    - name: zarf-init
   package:
     repository: registry.internal/packages/local-path
     version: "0.0.37"
     api: v1beta1
 </code></pre>
 <p>The init package is declared as a package in its own right here, not through <code>init.autoInit</code>. It resolves as <code>ZarfInitConfig</code>, which makes it init-capable, so the gate lets it take the cluster’s deploy slot while everything else waits. <code>dependsOn</code> then holds <code>storage</code> until that release reports deployed, and <code>Retain</code> keeps a later deletion of the proxy from uninstalling the thing the cluster is built on.</p>
-<p>Whether this works depends on your storage provider tolerating a registry that is about to be replaced. If it does not, you are in option 1 or 2.</p>
+<p>Whether this works depends on your storage provider tolerating a registry that is about to be replaced. If it does not, you are in option 2 or option 5.</p>
 <h2 id="option-4-stage-it-in-two-passes-like-the-ansible-playbook"><a class="header" href="#option-4-stage-it-in-two-passes-like-the-ansible-playbook">Option 4: stage it in two passes, like the Ansible playbook</a></h2>
 <p>The Ansible flow deploys the init package <strong>twice</strong>: once with seed components only, then the storage package, then init again with the full component set - because the permanent registry cannot come up until storage exists, and storage cannot be pulled until the seed registry does.</p>
 <p>You can do the same here, with one proxy and two commits. Declare it with the seed components:</p>
@@ -313,7 +323,77 @@ spec:
     - name: zarf-agent
 </code></pre>
 <p>Editing the component list re-renders the deploy and the package redeploys with the wider selection, which is Zarf doing an in-place upgrade of a package it already has a record for.</p>
-<p><strong>What you cannot do today is split those two passes across two proxies.</strong> Both would manage the same package name, so both would own the same deployed-package record on the cluster, and this provider has no <code>takeOwnership</code> knob to hand one to the other. So the staging is a sequence of edits - a GitOps commit each - rather than something the DAG performs for you. If your bootstrap genuinely needs two passes without a human between them, option 2 is the one that gets you there.</p>
+<p><strong>What you cannot do is split those two passes across two packages, one per proxy.</strong> The reason is not this provider’s missing <code>takeOwnership</code> knob, which is what it looks like; it is that the seed registry and the permanent registry are <em>the same Helm release</em>, so two packages that each carry one of them fight over it - measured in <a href="#why-the-init-package-cannot-be-split">Why the init package cannot be split</a>. So the staging is a sequence of edits - a GitOps commit each - rather than something the DAG performs for you. If your bootstrap genuinely needs two passes with nobody in between, option 1 removes the need and option 5 is the one that performs it.</p>
+<h2 id="option-5-put-the-storage-inside-a-custom-init-package"><a class="header" href="#option-5-put-the-storage-inside-a-custom-init-package">Option 5: put the storage inside a custom init package</a></h2>
+<p>Zarf’s component <code>import</code> mechanism composes a <code>ZarfInitConfig</code> that carries your storage provider’s components alongside the registry’s. One package, one proxy, no ordering - the cycle is resolved inside the package instead of between packages.</p>
+<p>This is the documented escape hatch for exactly this constraint, and it is the only option that performs the whole bootstrap with nobody in between. It is listed last because its cost is higher than it looks, and part of that cost is measurable.</p>
+<p>Each fleet segment needing different storage carries its own init package - that is the obvious half. The half worth knowing is that <strong>you then cannot also manage that storage driver with a proxy of its own on the same cluster.</strong> The bundled init and the standalone driver package would install the same Helm releases, which is the shared-release collision below: whichever ran last owns the resources, removing either uninstalls them, and re-running the other reverts their values. So bundling genuinely forfeits independent storage updates rather than merely being untidy.</p>
+<p>Worth it when storage cannot exist before init and no reachable registry exists. Otherwise prefer options 1 through 4.</p>
+<h2 id="why-the-init-package-cannot-be-split"><a class="header" href="#why-the-init-package-cannot-be-split">Why the init package cannot be split</a></h2>
+<p>It is tempting to cut the init package in two - <code>zarf-injector</code> + <code>zarf-seed-registry</code> in one package, <code>zarf-registry</code> + <code>zarf-agent</code> in another - and let <code>dependsOn</code> sequence storage between them. It looks like the clean answer: three packages, three proxies, no commit in the middle, and each piece versioned on its own.</p>
+<p>It does not work, and the way it fails is quiet. Two <code>ZarfInitConfig</code>s composed from one upstream set, deployed in order onto a bare cluster:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Step</th><th>What happens</th></tr>
+</thead>
+<tbody>
+<tr><td>Deploy the seed half</td><td>Succeeds. Helm release <code>zarf-docker-registry</code> at revision 1, its objects labelled <code>zarf.dev/package: &lt;seed package&gt;</code></td></tr>
+<tr><td>Deploy the registry half</td><td>Succeeds, with no warning - Zarf logs <code>performing Helm upgrade</code> and exits 0</td></tr>
+<tr><td>…but the ownership label</td><td>silently flips to <code>zarf.dev/package: &lt;registry package&gt;</code>, and <strong>both</strong> deployed-package records now claim that chart</td></tr>
+<tr><td>Remove the seed half</td><td><strong>Destroys the live registry.</strong> The deployment and the release secrets go, and the other record is left claiming a dead chart</td></tr>
+<tr><td>Re-run the seed half, as a version bump</td><td><strong>Reverts the shared release.</strong> <code>helm get values</code> shows the permanent settings replaced by the seed’s</td></tr>
+</tbody>
+</table>
+</div>
+<p>The cause is that <code>zarf-seed-registry</code> and <code>zarf-registry</code> are not two deployments of two things. They are one Helm release lineage - the seed is revision 1 of <code>zarf-docker-registry</code> and the permanent registry is revision 2. Zarf never objects, because the release name matches and it simply re-labels what it finds. Two packages each carrying one revision therefore both believe they own the registry, and the last writer wins at every event.</p>
+<p>The last row is the one that matters, because independent versioning is the whole reason to split: bumping the seed half downgrades the permanent registry to seed configuration. With upstream’s <code>seedRegistry.persistence.enabled: false</code>, that revert strips the registry’s storage configuration, not merely its autoscaling.</p>
+<p><strong>The general rule, which reaches further than init:</strong> two Zarf packages that install the same Helm release cannot both be managed on one cluster. Nothing refuses the second deploy, so the collision shows up later - as a removal that takes a live component with it, or a redeploy that reverts another package’s configuration. When you split a package, cut between Helm releases, never through one. <code>zarf-agent</code> and <code>git-server</code> are safely separable for exactly this reason: separate charts, separate releases, no shared lineage.</p>
+<p>If you do end up with two packages over one release, <code>deletionPolicy: Retain</code> on both is not optional - the default <code>Delete</code> runs precisely the removal that destroyed the registry above.</p>
+<h2 id="if-you-package-a-storage-driver-make-it-prove-itself-ready"><a class="header" href="#if-you-package-a-storage-driver-make-it-prove-itself-ready">If you package a storage driver, make it prove itself ready</a></h2>
+<p>Whatever comes next in the order starts when your package’s deploy Job exits zero, and that Job exits when <strong>Zarf</strong> says the deploy succeeded. The controller does not inspect your driver. So if your package reports success while its controller pods are still starting, the next thing in the order runs against a <code>StorageClass</code> that cannot yet provision - and the failure surfaces somewhere else entirely, as a <code>PersistentVolumeClaim</code> stuck <code>Pending</code> in a package that is not at fault.</p>
+<p>Zarf installs charts with a readiness wait of its own, so the common case is handled: a chart whose Deployment never becomes available fails the deploy. That is not the same as the driver <em>working</em>, which is what the next stage depends on. Add a wait that only a functioning provisioner can satisfy.</p>
+<p>In a <code>zarf.dev/v1beta1</code> package that is a component action. <code>healthChecks</code> is <strong>not</strong> available - it is a <code>v1alpha1</code> field, and v1beta1 rejects it - so use <code>actions.onDeploy.onSuccess</code> with a <code>wait.cluster</code>:</p>
+<pre><code class="language-yaml">components:
+  - name: registry-bucket
+    manifests:
+      - name: registry-bucket
+        namespace: zarf
+        files:
+          - manifests/obc-registry-bucket.yaml
+    actions:
+      onDeploy:
+        onSuccess:
+          - wait:
+              cluster:
+                kind: ObjectBucketClaim
+                name: registry-bucket
+                namespace: zarf
+                condition: "'{.status.phase}'=Bound"
+            maxTotalSeconds: 2700
+            description: Waiting for ceph bucket to be created and bound
+</code></pre>
+<p>That is Rook-Ceph’s, and it is the right shape because a <code>Bound</code> <code>ObjectBucketClaim</code> cannot exist unless the operator, the Ceph cluster, the object store and the provisioner are all genuinely working. Pick the equivalent for your driver:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Driver</th><th>A wait that proves the chart is installed</th><th>A wait that proves the driver works</th></tr>
+</thead>
+<tbody>
+<tr><td>Rook-Ceph</td><td>the operator Deployment is available</td><td>an <code>ObjectBucketClaim</code>, or a <code>CephCluster</code> whose <code>.status.phase</code> is <code>Ready</code></td></tr>
+<tr><td>Longhorn</td><td>the <code>longhorn-manager</code> DaemonSet rolled out</td><td>a <code>PersistentVolumeClaim</code> against its <code>StorageClass</code> reaching <code>Bound</code></td></tr>
+<tr><td>vSphere CSI</td><td>the controller Deployment is available</td><td>a <code>CSINode</code> per node, which only appears once the node plugin registers</td></tr>
+<tr><td>AWS EBS CSI</td><td>the <code>ebs-csi-controller</code> Deployment is available</td><td>a <code>Bound</code> claim - it is the only thing that proves the credentials work too</td></tr>
+<tr><td>local-path</td><td>the provisioner Deployment is available</td><td>a <code>Bound</code> claim, which also proves the helper pod’s <code>hostPath</code> is permitted</td></tr>
+</tbody>
+</table>
+</div>
+<p>The second column is the one that matters, and for most drivers the honest answer is a claim that actually binds, because that exercises the credentials, the node plugin and the backing storage in one go. A small <code>PersistentVolumeClaim</code> plus a wait for <code>Bound</code>, deleted again by a later action, costs seconds and removes a whole class of ordering bug.</p>
+<p>Two things to get right:</p>
+<ul>
+<li><strong><code>maxTotalSeconds</code> is the real bound on how long your package can take</strong>, and it is invisible to whoever declares the order. Ceph forming quorum on slow disks is minutes, not seconds; the 2700 above is not paranoia.</li>
+<li><strong>Keep it under the deploy Job’s timeout.</strong> A package that waits longer than the Job is allowed to run fails the stage, and the pod log is the only place that says why.</li>
+</ul>
 <h2 id="day-two"><a class="header" href="#day-two">Day two</a></h2>
 <p>Once a cluster has Zarf state, none of the above applies to it again. The gate is open, <code>autoInit</code> no-ops because it probes and finds state, and packages deploy in whatever order <code>dependsOn</code> describes.</p>
 <p>The Ansible playbook distinguishes bootstrap from convergence by inspecting what is installed and branching. Here that distinction does not exist, because the controller re-derives it on every pass: a release that is already on the declared digest is left alone, a release whose proxy moved to a new version redeploys, and <code>ApplyOnce</code> packages adopt zarf’s existing record rather than re-running. You declare the end state once and the same declaration is correct on day one and day two.</p>

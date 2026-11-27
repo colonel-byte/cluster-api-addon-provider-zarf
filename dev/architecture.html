@@ -37,10 +37,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-8d0f7399.js";
+            window.path_to_searchindex_js = "../searchindex-04958ddf.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-2757b64a.js"></script>
+        <script src="../toc-41f4cb6d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -247,8 +247,8 @@ spec:
 
   # Explicit dependency ordering across ZarfPackageProxies
   dependsOn:
-    - zarf-init
-    - csi-ceph
+    - name: zarf-init
+    - name: csi-ceph
 
   # Zarf initialization parameters if target cluster is not initialized
   init:
@@ -430,7 +430,7 @@ status:
 <pre><code>[ zarf-init ] ──► [ csi-ceph (CSI Driver) ] ──► [ logging / monitoring ]
 </code></pre>
 <h3 id="a-declarative-ordering-via-specdependson"><a class="header" href="#a-declarative-ordering-via-specdependson">A. Declarative Ordering via <code>spec.dependsOn</code></a></h3>
-<p>A <code>ZarfPackageProxy</code> can declare dependencies on other <code>ZarfPackageProxy</code> resources:</p>
+<p>A <code>ZarfPackageProxy</code> can declare dependencies on other objects in its namespace:</p>
 <pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
 kind: ZarfPackageProxy
 metadata:
@@ -438,9 +438,11 @@ metadata:
   namespace: fleet-default
 spec:
   dependsOn:
-    - zarf-init
-    - csi-ceph
+    - name: zarf-init
+    - kind: ZarfPackageProxy
+      name: csi-ceph
 </code></pre>
+<p>Each entry is a <code>{kind, name}</code> reference rather than a bare name. <code>kind</code> defaults to <code>ZarfPackageProxy</code>, which is the only kind the enum admits today, so the short form above is the ordinary one. It is typed because ordered bundles will be a second kind a package can wait for, and a bare string cannot say which of two kinds a name means; taking the break while the API is <code>v1alpha1</code> is cheaper than a second field later. A dependency carries no namespace - the graph resolves in the referring object’s own namespace, because one that spans namespaces is one no single author can read.</p>
 <h3 id="b-dependency-resolution--reconcile-gating"><a class="header" href="#b-dependency-resolution--reconcile-gating">B. Dependency Resolution &amp; Reconcile Gating</a></h3>
 <p>For each workload cluster, every entry in <code>dependsOn</code> is resolved to a verdict. The rule that prevents deadlock: <strong>a dependency that cannot be satisfied on this cluster is a named error condition, never a silent wait.</strong> Waiting is reserved for the one case where progress is actually coming.</p>
 <div class="table-wrapper">
@@ -597,7 +599,7 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../dev/e2e-testing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../dev/design-package-stages.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -611,7 +613,7 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../dev/e2e-testing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../dev/design-package-stages.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

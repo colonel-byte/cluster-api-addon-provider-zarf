@@ -38,10 +38,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8d0f7399.js";
+            window.path_to_searchindex_js = "searchindex-04958ddf.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-2757b64a.js"></script>
+        <script src="toc-41f4cb6d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -294,8 +294,21 @@ go run ./magefiles/core generate:document   # regenerate the mdBook pages
 <pre><code>zarf init ──needs──&gt; a StorageClass ──provided by──&gt; a storage package ──needs──&gt; a registry ──provided by──&gt; zarf init
 </code></pre>
 <p>Nothing reports this as an error. <code>zarf init</code> stands up its injector and a temporary seed registry, then the permanent registry’s <code>PersistentVolumeClaim</code> goes <code>Pending</code> and stays there, because nothing in the cluster provisions volumes yet. Meanwhile every other package you declared sits in <code>Pending</code> with reason <code>WaitingForZarfState</code>, because the init-first gate holds non-init packages until the cluster has Zarf state. The cluster looks busy and is stuck.</p>
-<p>You break the cycle in one of four ways. They are listed cheapest-first, and the first one is the right answer far more often than it looks.</p>
-<h2 id="option-1-provide-storage-outside-the-package-system"><a class="header" href="#option-1-provide-storage-outside-the-package-system">Option 1: provide storage outside the package system</a></h2>
+<p><strong>Check whether you actually have the cycle before solving it.</strong> It assumes two things: that the registry is backed by a <code>PersistentVolumeClaim</code>, and that your storage provider needs storage to start. Two designs break it without any sequencing:</p>
+<ul>
+<li><strong>Storage that consumes raw devices.</strong> Rook-Ceph with <code>useAllNodes: true</code> / <code>useAllDevices: true</code> needs no <code>StorageClass</code> to come up - it is the thing that provides one.</li>
+<li><strong>A registry that is not volume-backed.</strong> Point the registry at object storage - a Ceph <code>ObjectBucketClaim</code>, or any S3 the cluster can reach - and it never wants a PVC.</li>
+</ul>
+<p>With both, what is left is an ordering problem rather than a cycle, and ordering between packages is what <code>dependsOn</code> is for. You still cannot order it entirely inside the init package, for a reason that is measured rather than argued: see <a href="#why-the-init-package-cannot-be-split">Why the init package cannot be split</a>.</p>
+<p>You break the cycle in one of five ways. They are listed cheapest-first, and the first one is the right answer far more often than it looks.</p>
+<h2 id="option-1-give-the-cluster-a-registry-it-does-not-have-to-build"><a class="header" href="#option-1-give-the-cluster-a-registry-it-does-not-have-to-build">Option 1: give the cluster a registry it does not have to build</a></h2>
+<p>A registry the cluster does not have to build is the end of the whole problem: <code>zarf init</code> needs no storage, there is no seed-to-permanent handover to sequence, and your storage driver becomes an ordinary day-two package with no special position in the order.</p>
+<pre><code class="language-sh">zarf init --registry-url=registry.internal --registry-push-username=... --registry-push-password=...
+</code></pre>
+<p>Through this provider, that is the init package’s own values rather than a flag, and the registry address Zarf records in state is what every package’s image references are rewritten to - so a package built to pull from <code>{{ .State.Registry.Address }}</code> works unchanged in this mode.</p>
+<p>Two things it needs, and they are both about the workload cluster rather than the management cluster. <strong>Every node must be able to reach that registry</strong>, because the node is what pulls; and Zarf writes a pull secret into each namespace it deploys into, which is where those credentials come from. If the registry is behind credentials or a private CA, the controller side of that is <code>pullSecretRef</code>, <code>caBundleConfigMapRef</code> and friends on the package source - see <a href="#reach-a-registry-that-needs-credentials-or-a-private-ca">Getting started</a>.</p>
+<p>This is the right answer whenever a registry the workload cluster can reach already exists. Do not assume one does: an air gap is a topology, not a single pattern, and a management cluster holding the packages does not imply the workload clusters may pull from it - the segment may be routed, firewalled, or physically separate. Where that is the case this option is simply unavailable, and options 2 through 5 are the whole menu.</p>
+<h2 id="option-2-provide-storage-outside-the-package-system"><a class="header" href="#option-2-provide-storage-outside-the-package-system">Option 2: provide storage outside the package system</a></h2>
 <p>If a <code>StorageClass</code> already exists when <code>zarf init</code> runs, there is no cycle and no ordering problem. Nothing to sequence, nothing to stage, one proxy.</p>
 <p>This is the right answer whenever the storage is something your cluster images or your infrastructure provider can carry: <code>local-path</code> on a single-node or lab cluster, a CSI driver your node image already ships, a cloud provider’s default class, or a Cluster API <code>ClusterResourceSet</code> that applies the provisioner as the cluster comes up.</p>
 <p><code>local-path</code> as a <code>ClusterResourceSet</code>, applied by Cluster API itself at cluster creation:</p>
@@ -356,9 +369,6 @@ spec:
 <li><strong><code>autoInit</code> is keyed on observed cluster state, never on a name.</strong> The controller probes for Zarf state and only initializes a cluster that has none, so this commutes with a fleet that manages init through its own proxy. Whoever gets there first wins, and the other no-ops.</li>
 </ul>
 <p><strong>Two things <code>local-path</code> will want on a real cluster</strong>, both learned by running it rather than reading about it. Its volume-provisioning helper pod mounts a <code>hostPath</code>, which the <code>baseline</code> Pod Security standard forbids - so its namespace needs <code>pod-security.kubernetes.io/enforce: privileged</code>. And a single-node cluster whose only node carries a control-plane <code>NoSchedule</code> taint has nowhere to put the registry: Zarf’s injector treats any <code>NoSchedule</code> or <code>NoExecute</code> taint as disqualifying and reports <code>no suitable injector image or node exists</code>.</p>
-<h2 id="option-2-put-the-storage-inside-a-custom-init-package"><a class="header" href="#option-2-put-the-storage-inside-a-custom-init-package">Option 2: put the storage inside a custom init package</a></h2>
-<p>Zarf’s component <code>import</code> mechanism composes a <code>ZarfInitConfig</code> that carries your storage provider’s components alongside the registry’s. One package, one proxy, no ordering - the cycle is resolved inside the package instead of between packages.</p>
-<p>This is the documented escape hatch for exactly this constraint, and the cost is that each fleet segment needing different storage carries its own init package. Worth it when storage genuinely cannot exist before init; not worth it otherwise, because you have taken on building and maintaining an init package.</p>
 <h2 id="option-3-let-the-whole-thing-wait-on-a-seeded-registry"><a class="header" href="#option-3-let-the-whole-thing-wait-on-a-seeded-registry">Option 3: let the whole thing wait on a seeded registry</a></h2>
 <p>If your storage provider can run from an ephemeral registry, you can order the pieces with <code>dependsOn</code> and let the controller sequence them. The seed registry that <code>zarf init</code> stands up before the permanent one is enough to pull from:</p>
 <pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
@@ -392,14 +402,14 @@ spec:
     matchLabels:
       zarf: enabled
   dependsOn:
-    - zarf-init
+    - name: zarf-init
   package:
     repository: registry.internal/packages/local-path
     version: "0.0.37"
     api: v1beta1
 </code></pre>
 <p>The init package is declared as a package in its own right here, not through <code>init.autoInit</code>. It resolves as <code>ZarfInitConfig</code>, which makes it init-capable, so the gate lets it take the cluster’s deploy slot while everything else waits. <code>dependsOn</code> then holds <code>storage</code> until that release reports deployed, and <code>Retain</code> keeps a later deletion of the proxy from uninstalling the thing the cluster is built on.</p>
-<p>Whether this works depends on your storage provider tolerating a registry that is about to be replaced. If it does not, you are in option 1 or 2.</p>
+<p>Whether this works depends on your storage provider tolerating a registry that is about to be replaced. If it does not, you are in option 2 or option 5.</p>
 <h2 id="option-4-stage-it-in-two-passes-like-the-ansible-playbook"><a class="header" href="#option-4-stage-it-in-two-passes-like-the-ansible-playbook">Option 4: stage it in two passes, like the Ansible playbook</a></h2>
 <p>The Ansible flow deploys the init package <strong>twice</strong>: once with seed components only, then the storage package, then init again with the full component set - because the permanent registry cannot come up until storage exists, and storage cannot be pulled until the seed registry does.</p>
 <p>You can do the same here, with one proxy and two commits. Declare it with the seed components:</p>
@@ -417,7 +427,77 @@ spec:
     - name: zarf-agent
 </code></pre>
 <p>Editing the component list re-renders the deploy and the package redeploys with the wider selection, which is Zarf doing an in-place upgrade of a package it already has a record for.</p>
-<p><strong>What you cannot do today is split those two passes across two proxies.</strong> Both would manage the same package name, so both would own the same deployed-package record on the cluster, and this provider has no <code>takeOwnership</code> knob to hand one to the other. So the staging is a sequence of edits - a GitOps commit each - rather than something the DAG performs for you. If your bootstrap genuinely needs two passes without a human between them, option 2 is the one that gets you there.</p>
+<p><strong>What you cannot do is split those two passes across two packages, one per proxy.</strong> The reason is not this provider’s missing <code>takeOwnership</code> knob, which is what it looks like; it is that the seed registry and the permanent registry are <em>the same Helm release</em>, so two packages that each carry one of them fight over it - measured in <a href="#why-the-init-package-cannot-be-split">Why the init package cannot be split</a>. So the staging is a sequence of edits - a GitOps commit each - rather than something the DAG performs for you. If your bootstrap genuinely needs two passes with nobody in between, option 1 removes the need and option 5 is the one that performs it.</p>
+<h2 id="option-5-put-the-storage-inside-a-custom-init-package"><a class="header" href="#option-5-put-the-storage-inside-a-custom-init-package">Option 5: put the storage inside a custom init package</a></h2>
+<p>Zarf’s component <code>import</code> mechanism composes a <code>ZarfInitConfig</code> that carries your storage provider’s components alongside the registry’s. One package, one proxy, no ordering - the cycle is resolved inside the package instead of between packages.</p>
+<p>This is the documented escape hatch for exactly this constraint, and it is the only option that performs the whole bootstrap with nobody in between. It is listed last because its cost is higher than it looks, and part of that cost is measurable.</p>
+<p>Each fleet segment needing different storage carries its own init package - that is the obvious half. The half worth knowing is that <strong>you then cannot also manage that storage driver with a proxy of its own on the same cluster.</strong> The bundled init and the standalone driver package would install the same Helm releases, which is the shared-release collision below: whichever ran last owns the resources, removing either uninstalls them, and re-running the other reverts their values. So bundling genuinely forfeits independent storage updates rather than merely being untidy.</p>
+<p>Worth it when storage cannot exist before init and no reachable registry exists. Otherwise prefer options 1 through 4.</p>
+<h2 id="why-the-init-package-cannot-be-split"><a class="header" href="#why-the-init-package-cannot-be-split">Why the init package cannot be split</a></h2>
+<p>It is tempting to cut the init package in two - <code>zarf-injector</code> + <code>zarf-seed-registry</code> in one package, <code>zarf-registry</code> + <code>zarf-agent</code> in another - and let <code>dependsOn</code> sequence storage between them. It looks like the clean answer: three packages, three proxies, no commit in the middle, and each piece versioned on its own.</p>
+<p>It does not work, and the way it fails is quiet. Two <code>ZarfInitConfig</code>s composed from one upstream set, deployed in order onto a bare cluster:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Step</th><th>What happens</th></tr>
+</thead>
+<tbody>
+<tr><td>Deploy the seed half</td><td>Succeeds. Helm release <code>zarf-docker-registry</code> at revision 1, its objects labelled <code>zarf.dev/package: &lt;seed package&gt;</code></td></tr>
+<tr><td>Deploy the registry half</td><td>Succeeds, with no warning - Zarf logs <code>performing Helm upgrade</code> and exits 0</td></tr>
+<tr><td>…but the ownership label</td><td>silently flips to <code>zarf.dev/package: &lt;registry package&gt;</code>, and <strong>both</strong> deployed-package records now claim that chart</td></tr>
+<tr><td>Remove the seed half</td><td><strong>Destroys the live registry.</strong> The deployment and the release secrets go, and the other record is left claiming a dead chart</td></tr>
+<tr><td>Re-run the seed half, as a version bump</td><td><strong>Reverts the shared release.</strong> <code>helm get values</code> shows the permanent settings replaced by the seed’s</td></tr>
+</tbody>
+</table>
+</div>
+<p>The cause is that <code>zarf-seed-registry</code> and <code>zarf-registry</code> are not two deployments of two things. They are one Helm release lineage - the seed is revision 1 of <code>zarf-docker-registry</code> and the permanent registry is revision 2. Zarf never objects, because the release name matches and it simply re-labels what it finds. Two packages each carrying one revision therefore both believe they own the registry, and the last writer wins at every event.</p>
+<p>The last row is the one that matters, because independent versioning is the whole reason to split: bumping the seed half downgrades the permanent registry to seed configuration. With upstream’s <code>seedRegistry.persistence.enabled: false</code>, that revert strips the registry’s storage configuration, not merely its autoscaling.</p>
+<p><strong>The general rule, which reaches further than init:</strong> two Zarf packages that install the same Helm release cannot both be managed on one cluster. Nothing refuses the second deploy, so the collision shows up later - as a removal that takes a live component with it, or a redeploy that reverts another package’s configuration. When you split a package, cut between Helm releases, never through one. <code>zarf-agent</code> and <code>git-server</code> are safely separable for exactly this reason: separate charts, separate releases, no shared lineage.</p>
+<p>If you do end up with two packages over one release, <code>deletionPolicy: Retain</code> on both is not optional - the default <code>Delete</code> runs precisely the removal that destroyed the registry above.</p>
+<h2 id="if-you-package-a-storage-driver-make-it-prove-itself-ready"><a class="header" href="#if-you-package-a-storage-driver-make-it-prove-itself-ready">If you package a storage driver, make it prove itself ready</a></h2>
+<p>Whatever comes next in the order starts when your package’s deploy Job exits zero, and that Job exits when <strong>Zarf</strong> says the deploy succeeded. The controller does not inspect your driver. So if your package reports success while its controller pods are still starting, the next thing in the order runs against a <code>StorageClass</code> that cannot yet provision - and the failure surfaces somewhere else entirely, as a <code>PersistentVolumeClaim</code> stuck <code>Pending</code> in a package that is not at fault.</p>
+<p>Zarf installs charts with a readiness wait of its own, so the common case is handled: a chart whose Deployment never becomes available fails the deploy. That is not the same as the driver <em>working</em>, which is what the next stage depends on. Add a wait that only a functioning provisioner can satisfy.</p>
+<p>In a <code>zarf.dev/v1beta1</code> package that is a component action. <code>healthChecks</code> is <strong>not</strong> available - it is a <code>v1alpha1</code> field, and v1beta1 rejects it - so use <code>actions.onDeploy.onSuccess</code> with a <code>wait.cluster</code>:</p>
+<pre><code class="language-yaml">components:
+  - name: registry-bucket
+    manifests:
+      - name: registry-bucket
+        namespace: zarf
+        files:
+          - manifests/obc-registry-bucket.yaml
+    actions:
+      onDeploy:
+        onSuccess:
+          - wait:
+              cluster:
+                kind: ObjectBucketClaim
+                name: registry-bucket
+                namespace: zarf
+                condition: "'{.status.phase}'=Bound"
+            maxTotalSeconds: 2700
+            description: Waiting for ceph bucket to be created and bound
+</code></pre>
+<p>That is Rook-Ceph’s, and it is the right shape because a <code>Bound</code> <code>ObjectBucketClaim</code> cannot exist unless the operator, the Ceph cluster, the object store and the provisioner are all genuinely working. Pick the equivalent for your driver:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Driver</th><th>A wait that proves the chart is installed</th><th>A wait that proves the driver works</th></tr>
+</thead>
+<tbody>
+<tr><td>Rook-Ceph</td><td>the operator Deployment is available</td><td>an <code>ObjectBucketClaim</code>, or a <code>CephCluster</code> whose <code>.status.phase</code> is <code>Ready</code></td></tr>
+<tr><td>Longhorn</td><td>the <code>longhorn-manager</code> DaemonSet rolled out</td><td>a <code>PersistentVolumeClaim</code> against its <code>StorageClass</code> reaching <code>Bound</code></td></tr>
+<tr><td>vSphere CSI</td><td>the controller Deployment is available</td><td>a <code>CSINode</code> per node, which only appears once the node plugin registers</td></tr>
+<tr><td>AWS EBS CSI</td><td>the <code>ebs-csi-controller</code> Deployment is available</td><td>a <code>Bound</code> claim - it is the only thing that proves the credentials work too</td></tr>
+<tr><td>local-path</td><td>the provisioner Deployment is available</td><td>a <code>Bound</code> claim, which also proves the helper pod’s <code>hostPath</code> is permitted</td></tr>
+</tbody>
+</table>
+</div>
+<p>The second column is the one that matters, and for most drivers the honest answer is a claim that actually binds, because that exercises the credentials, the node plugin and the backing storage in one go. A small <code>PersistentVolumeClaim</code> plus a wait for <code>Bound</code>, deleted again by a later action, costs seconds and removes a whole class of ordering bug.</p>
+<p>Two things to get right:</p>
+<ul>
+<li><strong><code>maxTotalSeconds</code> is the real bound on how long your package can take</strong>, and it is invisible to whoever declares the order. Ceph forming quorum on slow disks is minutes, not seconds; the 2700 above is not paranoia.</li>
+<li><strong>Keep it under the deploy Job’s timeout.</strong> A package that waits longer than the Job is allowed to run fails the stage, and the pod log is the only place that says why.</li>
+</ul>
 <h2 id="day-two"><a class="header" href="#day-two">Day two</a></h2>
 <p>Once a cluster has Zarf state, none of the above applies to it again. The gate is open, <code>autoInit</code> no-ops because it probes and finds state, and packages deploy in whatever order <code>dependsOn</code> describes.</p>
 <p>The Ansible playbook distinguishes bootstrap from convergence by inspecting what is installed and branching. Here that distinction does not exist, because the controller re-derives it on every pass: a release that is already on the declared digest is left alone, a release whose proxy moved to a new version redeploys, and <code>ApplyOnce</code> packages adopt zarf’s existing record rather than re-running. You declare the end state once and the same declaration is correct on day one and day two.</p>
@@ -860,8 +940,8 @@ spec:
 
   # Explicit dependency ordering across ZarfPackageProxies
   dependsOn:
-    - zarf-init
-    - csi-ceph
+    - name: zarf-init
+    - name: csi-ceph
 
   # Zarf initialization parameters if target cluster is not initialized
   init:
@@ -1043,7 +1123,7 @@ status:
 <pre><code>[ zarf-init ] ──► [ csi-ceph (CSI Driver) ] ──► [ logging / monitoring ]
 </code></pre>
 <h3 id="a-declarative-ordering-via-specdependson"><a class="header" href="#a-declarative-ordering-via-specdependson">A. Declarative Ordering via <code>spec.dependsOn</code></a></h3>
-<p>A <code>ZarfPackageProxy</code> can declare dependencies on other <code>ZarfPackageProxy</code> resources:</p>
+<p>A <code>ZarfPackageProxy</code> can declare dependencies on other objects in its namespace:</p>
 <pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
 kind: ZarfPackageProxy
 metadata:
@@ -1051,9 +1131,11 @@ metadata:
   namespace: fleet-default
 spec:
   dependsOn:
-    - zarf-init
-    - csi-ceph
+    - name: zarf-init
+    - kind: ZarfPackageProxy
+      name: csi-ceph
 </code></pre>
+<p>Each entry is a <code>{kind, name}</code> reference rather than a bare name. <code>kind</code> defaults to <code>ZarfPackageProxy</code>, which is the only kind the enum admits today, so the short form above is the ordinary one. It is typed because ordered bundles will be a second kind a package can wait for, and a bare string cannot say which of two kinds a name means; taking the break while the API is <code>v1alpha1</code> is cheaper than a second field later. A dependency carries no namespace - the graph resolves in the referring object’s own namespace, because one that spans namespaces is one no single author can read.</p>
 <h3 id="b-dependency-resolution--reconcile-gating"><a class="header" href="#b-dependency-resolution--reconcile-gating">B. Dependency Resolution &amp; Reconcile Gating</a></h3>
 <p>For each workload cluster, every entry in <code>dependsOn</code> is resolved to a verdict. The rule that prevents deadlock: <strong>a dependency that cannot be satisfied on this cluster is a named error condition, never a silent wait.</strong> Waiting is reserved for the one case where progress is actually coming.</p>
 <div class="table-wrapper">
@@ -1201,6 +1283,256 @@ Update <code>ZarfPackageRelease.status</code> and surface condition <code>Ready:
 <li><strong>Supply Chain Security</strong>: Cosign signature verification occurs on the management plane before any package payload touches the remote workload cluster.</li>
 <li><strong>Native CAPI Integration</strong>: Works across all CAPI infrastructure providers (vSphere, AWS, Azure, bare-metal) and bootstrap providers (Cargoship, RKE2, Kubeadm).</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="design-ordered-stages-on-a-package-proxy"><a class="header" href="#design-ordered-stages-on-a-package-proxy">Design: ordered stages on a package proxy</a></h1>
+<p><strong>Status: proposed.</strong> Nothing here is implemented. Tracked in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/379">#379</a>.</p>
+<p>This replaces an earlier draft that proposed a separate <code>ZarfPackageBundle</code> kind with its own per-cluster release. The problem it solves is unchanged; the shape is not, for the reason in <a href="#the-proxy-is-already-a-two-stage-pipeline">The proxy is already a two-stage pipeline</a>.</p>
+<h2 id="the-problem"><a class="header" href="#the-problem">The problem</a></h2>
+<p>A <code>ZarfPackageProxy</code> declares one package and one component selection for every cluster it matches. A bootstrap is not that shape: it is a sequence in which <strong>the same package is deployed more than once with a different component selection each time</strong>, interleaved with another package doing the same.</p>
+<p>The reference case is a cluster with no storage and no registry, which is the case this provider exists for. <a href="#bootstrap-order"><code>bootstrap-order.md</code></a> describes the cycle and the ways out of it; the one an operator actually runs, when no reachable registry exists and storage is a Zarf package, is a staged sequence. Here is the real one, from <code>uds-bundles/minimus/init-ceph/uds-bundle.yaml</code> in the sister repository:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Stage</th><th>Package</th><th>Components</th><th>Why</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td><code>zarf-init</code></td><td><code>zarf-injector</code>, <code>zarf-seed-registry</code></td><td>Zarf state plus an ephemeral registry, which needs no storage</td></tr>
+<tr><td>2</td><td><code>csi-rook-ceph</code></td><td>images, <code>operator-seed-chart</code>, <code>cluster-seed-chart</code>, <code>registry-bucket</code></td><td>Storage, pulled from the seed registry, exposing an object bucket</td></tr>
+<tr><td>3</td><td><code>zarf-init</code></td><td><code>zarf-registry</code>, <code>zarf-agent</code>, <code>git-server</code></td><td>The permanent registry, now that it has somewhere to live</td></tr>
+<tr><td>4</td><td><code>csi-rook-ceph</code></td><td>images, <strong>plain</strong> charts, <code>registry-bucket</code></td><td>The end state, pulled from the permanent registry</td></tr>
+</tbody>
+</table>
+</div>
+<p>Both packages appear twice. Today the only way to express that through this provider is an operator editing a component list between passes - a GitOps commit per stage, which has to land when <em>every</em> matched cluster is ready for it. That is acceptable for one cluster and wrong for a fleet.</p>
+<h2 id="the-proxy-is-already-a-two-stage-pipeline"><a class="header" href="#the-proxy-is-already-a-two-stage-pipeline">The proxy is already a two-stage pipeline</a></h2>
+<p>The first draft argued a new kind was needed. It is not, because the concept already exists in this codebase - hardcoded at two stages. Everything a sequence needs is there, in pairs:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Concept</th><th>Already there, twice</th></tr>
+</thead>
+<tbody>
+<tr><td>A package source</td><td><code>spec.package</code> and <code>spec.init.package</code></td></tr>
+<tr><td>A resolution result in status</td><td><code>status.resolvedDigest</code> and <code>status.initResolvedDigest</code>, with their refs</td></tr>
+<tr><td>A document in the deploy-spec Secret</td><td><code>deploy-spec.yaml</code> and <code>init-spec.yaml</code>, in one Secret</td></tr>
+<tr><td>A Job per release</td><td><code>buildJob(..., "-init")</code>, <code>"-deploy"</code>, <code>"-remove"</code></td></tr>
+<tr><td>Sequencing between them</td><td><code>convergeInit</code> stamps the init Job and <code>settleInitJob</code> holds the deploy until it settles</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>spec.init</code> plus <code>spec.package</code> <em>is</em> a two-stage sequence: deploy this package with these components first, then that one. So stages are not a new concept to add. <strong>They are an existing concept with the 2 taken out.</strong></p>
+<p>Two things follow that the first draft got wrong. Per-stage Job names are not a new pattern - a release already has three Jobs - so <code>&lt;release&gt;-&lt;stage&gt;-deploy</code> is the same trick with a wider suffix. And ordering is not wholly unimplemented either: init-before-deploy exists, it is simply not a loop.</p>
+<h2 id="the-shape"><a class="header" href="#the-shape">The shape</a></h2>
+<p>Two additions, both to types that already exist.</p>
+<p><strong>On <code>ZarfPackageProxy</code>:</strong> the sources hoisted so a version is declared once, and an ordered list of stages over them.</p>
+<pre><code class="language-yaml">apiVersion: addons.colonel-byte.dev/v1alpha1
+kind: ZarfPackageProxy
+metadata:
+  name: rook-ceph-bootstrap
+  namespace: default
+spec:
+  clusterSelector:
+    matchLabels:
+      storage: rook-ceph
+  packages:
+    init:
+      repository: registry.internal/zarf/init-slim
+      version: v1.0.1
+      api: v1beta1
+      signatureKeySecretRef:
+        name: cosign-pubkey
+    csi:
+      repository: registry.internal/zarf/csi-rook-ceph
+      version: v1.21.2
+  stages:
+    - name: init-seed
+      packageRef: init
+      strategy: ApplyOnce
+      components:
+        - name: zarf-injector
+        - name: zarf-seed-registry
+    - name: storage-seed
+      packageRef: csi
+      strategy: ApplyOnce
+      components:
+        - name: operator-images
+        - name: cluster-images
+        - name: operator-seed-chart
+        - name: cluster-seed-chart
+        - name: registry-bucket
+    - name: registry
+      packageRef: init
+      strategy: Reconcile
+      components:
+        - name: zarf-registry
+        - name: zarf-agent
+    - name: storage-final
+      packageRef: csi
+      strategy: Reconcile
+      components:
+        - name: operator-images
+        - name: cluster-images
+        # The plain charts, not the seed ones - by now the agent is running and rewrites
+        # image references itself, so the templated addresses are no longer needed.
+        - name: operator-chart
+        - name: cluster-chart
+        - name: registry-bucket
+</code></pre>
+<p><strong>Hoisting the sources is not cosmetic.</strong> A stage list of near-complete sources means a version bump is edited in two places, and a half-finished edit produces two digests of one package name - two revisions of one Helm release lineage with disagreeing values, which is the measured revert in <a href="#why-the-init-package-cannot-be-split"><code>bootstrap-order.md</code></a> reintroduced inside a single object. A <code>packageRef</code> makes that disagreement structurally impossible.</p>
+<p><strong>On <code>ZarfPackageRelease</code>:</strong> <code>status.stages[]</code>, one entry per stage that has run on this cluster, carrying the stage name, the applied identity and when. The release is already the per-cluster object, already owner-referenced to the <code>Cluster</code>, and already carries the per-cluster phase - so per-cluster stage progress belongs here and nowhere new.</p>
+<p><strong>And <code>spec.package</code> becomes sugar for a single <code>Reconcile</code> stage</strong>, <code>spec.init</code> for a preceding <code>ApplyOnce</code> one. That is what keeps this one API rather than two dialects: internally everything is a stage list, and every proxy written before this existed is the one- or two-stage case. There is no <code>oneOf</code> for a reader to learn, and no second code path to keep in step.</p>
+<h2 id="what-this-reuses-literally"><a class="header" href="#what-this-reuses-literally">What this reuses literally</a></h2>
+<p>Not “mirrors” - reuses, with no second expression to drift:</p>
+<ul>
+<li><code>matchClusters</code>, <code>stampReleases</code>, <code>findRelease</code>, the finalizers, the removal path</li>
+<li><code>dependsOn</code>, including the cycle walk, because every edge stays proxy-to-proxy</li>
+<li>the per-cluster deploy slot</li>
+<li>the <code>Ready</code> roll-up, the cluster counts, the printer columns, the Events</li>
+<li>all four watches, and the release-to-proxy fan-out</li>
+<li>resolution, digest pinning, signature verification, the <code>api</code> claim check, and every registry reachability field, per stage</li>
+<li>the deploy-spec Secret, which already holds more than one document, and the deploy Job, which already has more than one name</li>
+</ul>
+<p>A separate kind would have needed each of those a second time, plus a second reconciler, RBAC surface, CRD, status aggregation, docs chapter and e2e harness - and a cross-kind <code>dependsOn</code> resolver and cycle walk, which is a silent-hang bug rather than extra typing: <code>proxyDependencies</code> filters by kind, so a proxy-to-bundle-to-proxy cycle would be invisible and every member would report <code>WaitingForDependency</code> forever.</p>
+<h3 id="the-honest-objections-to-a-field"><a class="header" href="#the-honest-objections-to-a-field">The honest objections to a field</a></h3>
+<ul>
+<li><strong><code>kubectl get zarfpackageproxy</code> mixes two lifecycles.</strong> A four-stage bootstrap and an ordinary one-package proxy appear in one list, and the <code>Version</code> column reads <code>.spec.package.version</code>, which a staged proxy does not have. Needs a <code>STAGES</code> column (<code>4/6</code>) and a <code>Version</code> that means the last stage’s.</li>
+<li><strong><code>spec.strategy</code> becomes ambiguous.</strong> Per-stage strategy is the point, so the top-level field has to be refused when <code>stages</code> is set. More validation, and a reason a reader has to learn.</li>
+<li><strong>“A sequence is a different noun” is a legitimate taste argument.</strong> <code>kubectl get zarfbundles</code> reads better than filtering proxies. It costs a cross-kind cycle walk, a cross-kind conflict detector and a second reconciler, which is what this design judges too expensive for the ergonomics.</li>
+</ul>
+<h2 id="per-stage-state-not-a-cursor"><a class="header" href="#per-stage-state-not-a-cursor">Per-stage state, not a cursor</a></h2>
+<p>A cursor integer - “this cluster reached stage 3” - cannot answer the question an operator has, which is <em>what happens when I bump one thing</em>. Recording an applied identity per stage answers it:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Change</th><th>Re-runs</th></tr>
+</thead>
+<tbody>
+<tr><td><code>csi</code> version bumped</td><td><code>storage-final</code>, which carries its plain charts; <code>storage-seed</code> is <code>ApplyOnce</code> and stays put</td></tr>
+<tr><td><code>init</code> version bumped</td><td><code>registry</code>; <code>init-seed</code> is <code>ApplyOnce</code> and stays put</td></tr>
+<tr><td>A stage’s <code>components</code> or <code>values</code> edited</td><td>that stage</td></tr>
+<tr><td>Nothing</td><td>nothing - a converged proxy is quiet</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>The identity has to be the controller’s own hash of the rendered spec, not a value the pod reported back.</strong> <code>status.deployedDigest</code> is parsed from the pod’s termination message, and <code>jobabsorb.go</code> already tolerates its absence - <em>“the completed deploy pod left no readable result; deployedDigest stays unset”</em> - because a pod evicted or deleted by hand leaves nothing to read. Today that is cosmetic, since the re-run trigger is the Job’s <code>spec-hash</code> annotation. Keying stage identity on the reported digest would make a lost termination message permanent: the recorded identity stays empty, mismatches forever, and the stage hot-loops under <code>Reconcile</code> or records nothing under <code>ApplyOnce</code>. The existing <code>specHash</code> over the rendered deploy spec already covers the digest, components, values and set, so it is the thing to compare; the pod’s digest stays a status field for display.</p>
+<h2 id="which-stages-need-applyonce-precisely"><a class="header" href="#which-stages-need-applyonce-precisely">Which stages need <code>ApplyOnce</code>, precisely</a></h2>
+<blockquote>
+<p>A stage must be <code>ApplyOnce</code> exactly when re-running it would re-apply values that a later stage supersedes <strong>on the same Helm release</strong>.</p>
+</blockquote>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Stage</th><th>Carries</th><th>Strategy</th><th>Why</th></tr>
+</thead>
+<tbody>
+<tr><td><code>init-seed</code></td><td>injector, seed registry</td><td><code>ApplyOnce</code></td><td>Same release as <code>registry</code>, with values that stage supersedes - re-running reverts it</td></tr>
+<tr><td><code>storage-seed</code></td><td>images, <strong>seed</strong> charts, bucket</td><td><code>ApplyOnce</code></td><td>Same releases as <code>storage-final</code>, whose plain charts supersede these</td></tr>
+<tr><td><code>registry</code></td><td>permanent registry, <strong>agent</strong></td><td><code>Reconcile</code></td><td>The convergent half of the init package</td></tr>
+<tr><td><code>storage-final</code></td><td>images, <strong>plain</strong> charts, bucket</td><td><code>Reconcile</code></td><td>The end state, and where storage upgrades flow</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>The last stage must apply the plain charts, not merely re-push images.</strong> The reference bundle as originally written gets this wrong - its final stage selects images and the bucket but no charts, so the driver runs on seed values forever.</p>
+<p>Both forms resolve, which is why the mistake is quiet: <code>src/pkg/images/push.go</code> pushes every image twice, once as <code>&lt;registry&gt;/&lt;path&gt;:&lt;tag&gt;-&lt;crc32&gt;</code>, which is what the agent’s rewrite produces, and once as <code>&lt;registry&gt;/&lt;path&gt;:&lt;tag&gt;</code>, which is what a hand-templated address asks for. What a cluster left on seed values loses is that <strong>the agent re-evaluates image references on every pod admission, while templated values were evaluated once</strong> - so the release hard-codes the registry address, and a mode switch, a port change or a move to an external registry leaves every pod in it pointing somewhere that no longer serves. The seed flavour exists because during the seed stage the agent is not running yet; it is scaffolding for one stage, and leaving it in place is leaving the scaffolding up.</p>
+<h2 id="re-running-a-stage"><a class="header" href="#re-running-a-stage">Re-running a stage</a></h2>
+<ul>
+<li><strong>Only changed stages re-run.</strong> Bumping one package does not re-deploy the others.</li>
+<li><strong>Re-runs happen in stage order.</strong> If two stages changed, the earlier goes first.</li>
+</ul>
+<p>Those do not conflict, because the feared case - a changed early stage reverting a later one - is a stage that should have been <code>ApplyOnce</code>, which is a property of the package rather than of the ordering algorithm.</p>
+<p><strong>Ordering is the reconciler’s job, and the deploy slot does not provide it.</strong> <code>clusterSlotHolder</code> refuses to stamp a second Job while one runs on that cluster; nothing in it says stage 2 wins the slot before stage 4. It is also opt-out-able per <code>Cluster</code> through the <code>concurrent-deploys</code> annotation, so a stage list cannot lean on it as an invariant at all. What <em>does</em> carry over is <code>settleInitJob</code>’s shape: hold until the previous stage’s Job has settled, then proceed.</p>
+<h3 id="the-hazard-this-leaves"><a class="header" href="#the-hazard-this-leaves">The hazard this leaves</a></h3>
+<p>A stage can be correct only because of an <em>earlier</em> stage’s side effect, and the controller cannot see that. <code>storage-final</code> needs its images in the registry <code>registry</code> stood up; if a re-run of <code>registry</code> ever recreated that registry’s storage rather than upgrading it in place, the images would be gone and <code>storage-final</code> would need to re-run even though its own identity did not change. The operator’s lever is to bump both. A per-stage <code>rerunAfterEarlierStages</code> flag is the obvious later addition if real sequences need it; a flag nobody has needed yet is not.</p>
+<h2 id="readiness-is-the-packages-job"><a class="header" href="#readiness-is-the-packages-job">Readiness is the package’s job</a></h2>
+<p>A stage completes when its deploy Job completes, and the controller makes no attempt to decide whether the workload it installed is <em>working</em>. A per-stage readiness probe in the spec would put a second health model beside Zarf’s own and would have to be generic enough for every driver anybody packages. Zarf can already wait inside the package, where the author knows what ready means, so a package that reports success before its workload can serve is a bug in the package.</p>
+<p>What that obliges of a package author is written up for operators in <a href="#if-you-package-a-storage-driver-make-it-prove-itself-ready"><code>bootstrap-order.md</code></a>. Two consequences here: a stage’s timeout is the Job’s timeout, and <code>maxTotalSeconds</code> inside the package is the real bound on how long a stage can take - invisible from the proxy, and usually the explanation for a stage that appears hung.</p>
+<h2 id="dependencies-stay-between-objects"><a class="header" href="#dependencies-stay-between-objects">Dependencies stay between objects</a></h2>
+<p>Any <code>dependsOn</code> edge between whole proxies is allowed, and <strong>no edge may point at a stage</strong>. A stage list is its own and only order.</p>
+<p>This is now a reuse rather than an extension: every edge is proxy-to-proxy, so the existing per-cluster evaluation and the existing cycle walk apply unchanged. A proxy depending on a staged proxy is satisfied when <strong>every</strong> stage has been applied on that cluster - all-or-nothing, which is what makes a sequence a single node rather than a sub-graph somebody can reach into.</p>
+<p>Three reasons the stage-level edge stays out: it would be a second ordering mechanism over one object; cycle detection would have to span <code>(object, stage)</code> pairs rather than objects; and a half-run sequence has no sane answer for status or the deploy slot. The restriction costs nothing - a sequence needing something external in the middle is two proxies with a dependency between them, which object-level edges already express.</p>
+<h2 id="two-managers-of-one-package"><a class="header" href="#two-managers-of-one-package">Two managers of one package</a></h2>
+<p>A package managed by two objects on one cluster is the shared-record collision: both own <code>zarf-package-&lt;name&gt;</code>, so whichever ran last owns it, removing either uninstalls it, and re-running the other reverts it.</p>
+<p><strong>The refusal has to be narrower than “two managers”, because one such pair is already a supported pattern.</strong> <code>architecture.md</code>’s seed-then-manage handoff is exactly two managers of one package name: an <code>ApplyOnce</code> proxy seeds <code>zarf-init</code> and a <code>Reconcile</code> proxy takes over the same name for day-two lifecycle, which <em>“works by construction”</em>. A symmetric refusal keyed on “two managers, one package, one cluster” would hold both sides of every fleet using it, fleet-wide, with no obvious fix.</p>
+<p>So the conflict is <strong>two managers that will both re-execute</strong>. A manager whose release is <code>Completed</code> with <code>applied</code> set will never deploy again and cannot collide with anything; excluding it leaves the handoff alone and still catches what stages introduce, which is a stage and a separate <code>Reconcile</code> proxy both converging one package name. The successor must still be <code>deletionPolicy: Retain</code>, for the reason §3 gives.</p>
+<p>Where it does apply, both sides hold rather than just the newcomer: there is no ordering between two live declarations that makes one the intruder, and holding only the second would let whichever reconciled first deploy over the other’s work.</p>
+<h3 id="what-counts"><a class="header" href="#what-counts">What counts</a></h3>
+<ul>
+<li><strong>The same resolved package name</strong>, not the same repository or object name - the record is keyed on the name the artifact declares, which the controller learns at resolution.</li>
+<li><strong>On the same cluster.</strong> Selectors that never overlap are not in conflict.</li>
+<li><strong>Between distinct managers that can still deploy.</strong> One proxy naming one package across several stages is the entire point and must never trip this.</li>
+</ul>
+<p>Keying on the resolved name means <strong>this cannot be an admission check</strong> - no CEL rule can see a name that only exists after a registry read - so it is a reconciler-time hold, level-triggered like every other verdict here. The scan is also not single-namespace: with <code>--cluster-namespaces</code>, proxies elsewhere may select the same cluster.</p>
+<h2 id="status-and-columns"><a class="header" href="#status-and-columns">Status and columns</a></h2>
+<p>The fleet roll-up stages reuse is <code>internal/controller/aggregate.go</code>, which lands in the same series of changes as this design rather than being something stages have to build: a <code>Ready</code> condition plus <code>clusterCount</code>, <code>readyClusterCount</code> and <code>supersededClusterCount</code>, with the reason taken from <strong>the first cluster that is not done, in selector order</strong> rather than the worst by severity, because every hold is equally a reason the fleet has not converged and a stable choice beats one that churns. Condition Events come from the single status-write choke point, so any new condition emits on transition with no extra wiring.</p>
+<p>What stages still owe:</p>
+<ul>
+<li><strong>A <code>STAGES</code> column</strong>, <code>4/6</code>, which needs integer status fields for the same reason <code>readyClusterCount</code> does - a printer column cannot take the length of a list.</li>
+<li><strong>A <code>Version</code> column that means something for a staged proxy</strong>, since it currently reads <code>.spec.package.version</code>.</li>
+<li><strong>Per-stage resolution status on the proxy.</strong> Resolution is fleet-level and cached per <code>(ref, digest)</code>, so the proxy needs <code>status.stages[]</code> of its own carrying <code>resolvedRef</code>, <code>resolvedDigest</code>, <code>packageName</code>, <code>packageKind</code> and the signature and drift conditions. That is a second status list, distinct from the release’s applied-identity list.</li>
+</ul>
+<h2 id="adopting-a-cluster-the-stages-have-not-run-on"><a class="header" href="#adopting-a-cluster-the-stages-have-not-run-on">Adopting a cluster the stages have not run on</a></h2>
+<p>Clusters will arrive that were bootstrapped by hand, by the Ansible collection, or before a <code>clusterctl move</code> discarded per-cluster state. Something has to decide whether each <code>ApplyOnce</code> stage already happened there.</p>
+<p><strong>The two ways of being wrong are not symmetric, and that decides the bias.</strong> Deciding “not satisfied” when a stage did run re-applies seed values over a converged cluster - measured to revert the permanent registry and, with upstream’s <code>seedRegistry.persistence.enabled: false</code>, to strip its storage configuration. Deciding “satisfied” when it did not run means a later stage fails loudly with its Job kept as evidence. Destruction versus a recoverable error, so ambiguity leans towards satisfied.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Option</th><th>Cost</th><th>Why it is or is not enough</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>A. Zarf state exists on the cluster</strong></td><td>nothing - <code>hasZarfState</code> already exists</td><td>Too coarse: state is evidence about the <em>init</em> package, yet would satisfy every <code>ApplyOnce</code> stage, including a storage seed that never ran</td></tr>
+<tr><td><strong>B. Zarf’s record for that stage’s own package</strong></td><td>nothing - <code>hasDeployedPackage</code> already exists</td><td>Per-stage evidence from the cluster itself. Cannot tell two stages of one package apart, which does not matter here: if the init package was deployed at all, re-running its seed stage is the dangerous act</td></tr>
+<tr><td><strong>C. An explicit operator declaration</strong></td><td>a field or a Cluster annotation</td><td>Unambiguous and auditable, but per-cluster toil, and forgetting it is the destructive direction</td></tr>
+<tr><td><strong>D. Refuse and hold until told</strong></td><td>a condition and a runbook</td><td>Never silently wrong, which is the house style - but every migrated cluster then needs a human touch where a single-package proxy needs none</td></tr>
+<tr><td><strong>E. Keep the stage record on the workload cluster</strong></td><td>a secret the deploy pod writes</td><td>Solves move, re-creation and adoption at once, and matches the principle that <em>Zarf’s record of what is deployed lives on the workload cluster, not on the management cluster</em>. The most robust and the most work</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>B is where to start, and it is also the cheapest thing that is not wrong.</strong> <code>hasDeployedPackage(ctx, workload, &lt;stage's package name&gt;)</code> is the probe a proxy’s <code>ApplyOnce</code> already uses. Two holes it leaves, neither arguing for a different start: a driver installed by something that is not Zarf leaves no record, so the seed stage collides with the existing Helm release - the <code>takeOwnership</code> gap, which already exists for proxies; and a half-finished init can leave state without a registry, where B skips the seed stage and the next one fails, which is the recoverable direction.</p>
+<p>One thing to verify before committing to B: whether Zarf writes <code>zarf-package-&lt;name&gt;</code> on a partially-failed deploy. Nothing in this tree establishes it either way.</p>
+<h2 id="editing-a-stage-list-that-clusters-have-already-run"><a class="header" href="#editing-a-stage-list-that-clusters-have-already-run">Editing a stage list that clusters have already run</a></h2>
+<p><strong>A stage’s identity is its name</strong>, which is why stages are named rather than positional - and that is the hazard: <strong>a rename reads as a removal plus an insertion.</strong> The new name has never been applied, so it runs. On a <code>Reconcile</code> stage that is an idempotent redeploy; on an <code>ApplyOnce</code> seed stage it is the destructive case this design spends most of its decisions avoiding.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Edit</th><th>The question it raises</th></tr>
+</thead>
+<tbody>
+<tr><td>Append at the end</td><td>None. A new stage has never run, so it runs. The only unambiguous edit</td></tr>
+<tr><td>Insert in the middle</td><td>Does it run after stages declared after it? If yes the declared order was a lie for this cluster; if no the declaration is a lie about this cluster</td></tr>
+<tr><td>Remove</td><td>What it deployed stays - nothing uninstalls. Is the record kept as history or pruned?</td></tr>
+<tr><td>Reorder</td><td>The applied order is a historical fact and cannot be changed retroactively</td></tr>
+<tr><td>Rename</td><td>Indistinguishable from remove-plus-insert unless something says otherwise</td></tr>
+</tbody>
+</table>
+</div>
+<ul>
+<li><strong>A. Forward-only.</strong> Applied stage names are the state; anything else runs in declared order relative to other unapplied stages. Never destructive, and still exactly right for clusters that join later - the cost is that one document means two things depending on when a cluster arrived.</li>
+<li><strong>B. Refuse structural divergence.</strong> Applied names must remain a prefix of the declared list; otherwise hold with a condition naming the first divergence. Never silently wrong, and rigid enough that an append for new clusters can block a converged fleet.</li>
+<li><strong>C. Immutable stages, versioned objects.</strong> Reject edits other than appends. Strongest guarantee, worst fit for GitOps.</li>
+<li><strong>D. Split the list by strategy.</strong> <code>ApplyOnce</code> stages are history and immutable once applied - edits and renames refused as in B. <code>Reconcile</code> stages are desired state, where inserting, removing and reordering are free and order matters only among those needing to run, as in A.</li>
+</ul>
+<p><strong>D is the one worth building</strong>, because the per-stage <code>strategy</code> already divides the list into exactly those two halves, and it closes the rename hazard precisely where it bites. Two sub-questions it leaves: whether a removed stage’s record is pruned or kept - keeping it, marked undeclared, is safer, since it is the evidence an <code>ApplyOnce</code> decision rests on - and that the refusal is reconciler-time rather than admission, because CEL cannot see a per-cluster record.</p>
+<p>What CEL <em>can</em> enforce, and should, is spec-only: stage names unique, and <strong>a stage’s <code>strategy</code> immutable once declared</strong>, since flipping <code>ApplyOnce</code> to <code>Reconcile</code> turns a history stage into a convergent one and re-runs it. A full validating webhook is not worth it for the rest: the precise check needs per-cluster state, this repo has no webhook infrastructure at all, and a webhook adds an outage mode where it being down blocks every edit - to replace a hold that clears itself.</p>
+<h2 id="what-a-first-implementation-needs-that-this-does-not-cover"><a class="header" href="#what-a-first-implementation-needs-that-this-does-not-cover">What a first implementation needs that this does not cover</a></h2>
+<p>Found by review rather than by building. Each is a prerequisite rather than a nice-to-have, and none of them is cheaper under a separate kind.</p>
+<ul>
+<li><strong>A retry that is not a fleet-wide edit.</strong> <code>BackoffLimit: 0</code> means one pod attempt and there is no retry timer, so a single node eviction fails a stage. The documented lever - edit the spec - changes the stage’s identity on <em>every</em> cluster, redeploying hundreds of healthy ones to retry one. At several stages across a large fleet, at least one eviction per rollout is the expected case. Either a bounded per-release retry with backoff, which the removal path already models, or a way to re-run one stage on one cluster.</li>
+<li><strong>A bound on how much deploys at once.</strong> The deploy slot is per cluster and nothing limits clusters in flight, so every cluster of a fleet created from one template enters stage 1 together - correlated bursts of multi-gigabyte pulls against one registry, which single-package proxies never produce. A <code>--max-concurrent-deploys</code> or a per-proxy <code>maxConcurrentClusters</code> is worth having on its own.</li>
+<li><strong><code>spec.paused</code> is not honoured anywhere today.</strong> <code>clusterctl move</code> pauses objects before moving them; this controller keeps resolving, stamping and creating Jobs regardless. With a sequence in flight, a move can leave the source cluster’s Job deploying one stage while the destination’s rebuilt release starts the same stage again against the same workload cluster. A provider-conformance gap with or without stages.</li>
+<li><strong>Stage 1 has to be init-capable, and nothing says so.</strong> The init gate holds any package whose kind is not <code>ZarfInitConfig</code> on a cluster with no Zarf state. A sequence whose first stage is an ordinary package holds forever with reason <code>WaitingForZarfState</code>, naming the symptom rather than the mistake.</li>
+<li><strong>A test plan.</strong> The four-stage Ceph case is not reproducible in the CAPD-plus-local-registry e2e topology, so as specified it can never be regression-tested. A synthetic four-stage sequence over two trivial packages that deliberately share one Helm release would exercise every decision here and does fit the existing topology.</li>
+<li><strong>Per-stage Job and deploy-spec naming.</strong> <code>&lt;release&gt;-&lt;stage&gt;-deploy</code> plus a stage label on the Job, making Job creation the commit point with status read back off the labelled Job - otherwise a controller restart between creating a Job and writing status leaves a running Job whose stage nothing can recover, and for an <code>ApplyOnce</code> seed stage guessing wrong is the destructive direction. The 63-character name limit goes on the budget alongside a release name that is already proxy-plus-cluster derived.</li>
+</ul>
+<h2 id="out-of-scope-for-a-first-version"><a class="header" href="#out-of-scope-for-a-first-version">Out of scope for a first version</a></h2>
+<p>Named so they are not mistaken for oversights: rollback, parallel stages, retry on a timer, per-stage architecture selection, <code>deletionPolicy: Delete</code> over a staged proxy - removal of a bootstrap sequence should not be something anybody gets by deleting an object - and generating a stage list from a <code>uds-bundle.yaml</code>.</p>
+<h2 id="open-questions"><a class="header" href="#open-questions">Open questions</a></h2>
+<ol>
+<li><strong>How is an <code>ApplyOnce</code> stage satisfied on a cluster the proxy has not seen before?</strong> <strong>Punted deliberately</strong>, with the option space recorded above. Nobody has asked for adoption yet; option B is what a first implementation should do, costs nothing, and is not the destructive direction.</li>
+<li><strong>What does editing the stage list mean?</strong> Open, with option D recommended above.</li>
+</ol>
+<p>Everything else is decided: readiness is the deploy Job only; dependencies at object level and never at stage level; conflict refusal narrowed to managers that can both re-execute; changed stages only, in stage order; the final stage applies the plain charts; per-stage <code>ApplyOnce</code> by the superseded-values criterion; status shape settled and reused rather than redesigned; and the shape itself is a field rather than a kind.</p>
+<h2 id="one-measurement-that-makes-the-last-stage-make-sense"><a class="header" href="#one-measurement-that-makes-the-last-stage-make-sense">One measurement that makes the last stage make sense</a></h2>
+<p>In nodeport mode the registry’s address in Zarf state is the same before and after the handover - the spike observed <code>127.0.0.1:31999</code> and a <code>NodePort:31999</code> service after the seed stage <em>and</em> after the permanent one. That is why stage 2’s seed charts, whose image references are templated to <code>{{ .State.Registry.Address }}</code>, remain resolvable after stage 3 replaces the registry behind that address, and why stage 4 has to re-install the plain charts for the agent to take over rather than merely re-push images.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="e2e-testing-the-kind--capd-topology"><a class="header" href="#e2e-testing-the-kind--capd-topology">E2E testing: the kind + CAPD topology</a></h1>
 <p>The end-to-end suite runs the things <a href="../magefiles/test.go"><code>test:envtest</code></a> structurally cannot: real CAPI lifecycle machinery (a control-plane provider flipping <code>ControlPlaneInitialized</code>, the <code>&lt;cluster-name&gt;-kubeconfig</code> secrets CAPI writes, garbage-collection cascades), pods actually scheduling, and an OCI registry reachable from every side of the topology. It stands up a kind management cluster with CAPI core + CAPD initialized into it, one CAPD workload cluster with a CNI, and a <code>ghcr.io/distribution/distribution:3</code> registry on the kind docker network, then runs the suite in the separate <code>test/e2e</code> module against all of it.</p>
