@@ -138,6 +138,38 @@ func initSource(proxy *addonsv1alpha1.ZarfPackageProxy) *addonsv1alpha1.ZarfPack
 	return nil
 }
 
+// findStageState returns the release's applied record for the named stage, nil when none.
+func findStageState(release *addonsv1alpha1.ZarfPackageRelease, name string) *addonsv1alpha1.StageState {
+	for i := range release.Status.Stages {
+		if release.Status.Stages[i].Name == name {
+			return &release.Status.Stages[i]
+		}
+	}
+	return nil
+}
+
+// upsertStageState writes a stage's applied record, replacing an existing one of the same name.
+func upsertStageState(release *addonsv1alpha1.ZarfPackageRelease, record addonsv1alpha1.StageState) {
+	if existing := findStageState(release, record.Name); existing != nil {
+		*existing = record
+		return
+	}
+	release.Status.Stages = append(release.Status.Stages, record)
+}
+
+// markUndeclaredStages flags applied records whose names the spec no longer declares. Kept
+// rather than pruned: the record is the evidence an ApplyOnce decision rests on, and pruning
+// it would make a re-declared stage of the same name run again.
+func markUndeclaredStages(release *addonsv1alpha1.ZarfPackageRelease, stages []stage) {
+	declared := map[string]bool{}
+	for _, st := range stages {
+		declared[st.name] = true
+	}
+	for i := range release.Status.Stages {
+		release.Status.Stages[i].Undeclared = !declared[release.Status.Stages[i].Name]
+	}
+}
+
 // declaredVersion is the version an operator reads as "what this proxy wants": the single
 // package's declared version, or a staged proxy's last stage's - the end state the sequence
 // converges on.

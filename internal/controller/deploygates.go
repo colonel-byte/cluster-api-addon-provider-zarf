@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -97,13 +98,6 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	if len(stages) == 0 {
 		return nil, nil
 	}
-	if proxy.Spec.Package == nil {
-		// The staged ordering walk lands in the next layer; until then a staged release
-		// renders its documents and holds here without a Job.
-		release.Status.Phase = addonsv1alpha1.PhasePending
-		return nil, nil
-	}
-	st := stages[0]
 
 	// §3's first tier: an applied ApplyOnce release never round-trips anywhere again.
 	//
@@ -113,7 +107,7 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 	// never deploy here" is two fields compared by eye. When they agree there is nothing to add,
 	// and overwriting whatever reason recorded how this release completed - an adoption, say -
 	// would lose the more specific fact and re-write the condition on every pass.
-	if proxy.Spec.Strategy == addonsv1alpha1.StrategyApplyOnce && release.Status.Applied {
+	if proxy.Spec.Package != nil && proxy.Spec.Strategy == addonsv1alpha1.StrategyApplyOnce && release.Status.Applied {
 		release.Status.Phase = addonsv1alpha1.PhaseCompleted
 		if message, diverged := applyOnceSupersededMessage(proxy, release); diverged {
 			setReady(metav1.ConditionTrue, addonsv1alpha1.ReasonAlreadySeeded, message)
@@ -131,6 +125,11 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		release.Status.Phase = addonsv1alpha1.PhasePending
 		return nil, nil
 	}
+
+	if proxy.Spec.Package == nil {
+		return r.convergeStages(ctx, proxy, cluster, release, stages, setReady)
+	}
+	st := stages[0]
 
 	// An existing Job blocks a new one: running means Deploying, finished means its outcome is
 	// absorbed into status - and a stale finished Job is deleted there, so the next pass
@@ -223,6 +222,200 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 		job.Annotations = map[string]string{specHashAnnotation: hash}
 	}
 	return job, nil
+}
+
+// convergeStages is the staged form's ordering walk (docs/dev/design-package-stages.md): each
+// stage is settled (its applied record matches the rendered spec, or it is ApplyOnce with any
+// record), in flight (its labelled Job is running), or owed - and the first owed stage whose
+// predecessors are all settled takes the cluster's deploy slot. Only changed stages re-run, in
+// declared order. Job creation is the commit point: in-flight work is reconstructed from the
+// stage-labelled Jobs, never from status, so a controller restart between creating a Job and
+// writing status recovers rather than guessing - and for an ApplyOnce seed stage guessing
+// wrong is the destructive direction.
+func (r *ZarfPackageProxyReconciler) convergeStages(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, release *addonsv1alpha1.ZarfPackageRelease, stages []stage, setReady func(metav1.ConditionStatus, string, string)) (*batchv1.Job, error) {
+	markUndeclaredStages(release, stages)
+
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(release.Namespace),
+		client.MatchingLabels{releaseLabel: release.Name}); err != nil {
+		return nil, err
+	}
+	byStage := map[string]*batchv1.Job{}
+	for i := range jobs.Items {
+		if name := jobs.Items[i].Labels[stageLabel]; name != "" {
+			byStage[name] = &jobs.Items[i]
+		}
+	}
+
+	// Probes are rare; the workload client dials lazily so a walk that never probes never dials.
+	var workload client.Client
+	workloadFor := func() (client.Client, error) {
+		if workload != nil {
+			return workload, nil
+		}
+		var err error
+		workload, err = r.workloadClient(ctx, release.Namespace, cluster.Name)
+		return workload, err
+	}
+
+	for _, st := range stages {
+		desired := r.specHash(ctx, release, st.specFileName)
+
+		if job := byStage[st.name]; job != nil {
+			switch DeployJobPhase(job, st.strategy) {
+			case addonsv1alpha1.PhaseDeploying:
+				release.Status.Phase = addonsv1alpha1.PhaseDeploying
+				setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeploying,
+					fmt.Sprintf("stage %s's deploy Job is running", st.name))
+				return nil, nil
+			case addonsv1alpha1.PhaseFailed:
+				result, _ := r.jobResult(ctx, job)
+				message := result.Error
+				if message == "" {
+					message = fmt.Sprintf("stage %s's deploy Job failed and its pod left no termination message", st.name)
+				}
+				release.Status.Phase = addonsv1alpha1.PhaseFailed
+				setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeployFailed, message)
+				// Edit-to-retry, the single-package rule: a failed stage holds the sequence
+				// until its spec changes, at which point the stale Job is deleted and the walk
+				// re-runs it. A failed ApplyOnce stage never applied, so re-running it on an
+				// edit re-attempts the seed rather than re-executing applied work.
+				if desired != "" && job.Annotations[specHashAnnotation] != desired {
+					propagation := metav1.DeletePropagationBackground
+					if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+						return nil, err
+					}
+				}
+				return nil, nil
+			default:
+				// Finished successfully: absorb into the applied record. A stale Reconcile
+				// stage's Job is deleted so the walk re-stamps it; an ApplyOnce stage's
+				// finished Job stays as the record of the run.
+				r.absorbStageJob(ctx, release, st, job)
+				if st.strategy == addonsv1alpha1.StrategyReconcile && desired != "" &&
+					job.Annotations[specHashAnnotation] != desired {
+					propagation := metav1.DeletePropagationBackground
+					if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+						return nil, err
+					}
+				}
+			}
+		}
+
+		record := findStageState(release, st.name)
+		if record != nil && (st.strategy == addonsv1alpha1.StrategyApplyOnce ||
+			(desired != "" && record.SpecHash == desired)) {
+			continue
+		}
+
+		if desired == "" {
+			// The stage's document is not rendered - its package has not resolved - so there
+			// is no identity to deploy or compare. Hold; the proxy's conditions say why.
+			release.Status.Phase = addonsv1alpha1.PhasePending
+			setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForStageSpec,
+				fmt.Sprintf("stage %s's document is not rendered; see the proxy's PackageResolved condition", st.name))
+			return nil, nil
+		}
+
+		resolution := packageResolution(proxy, st)
+
+		// Adoption, option B: an ApplyOnce stage with no record is satisfied by the cluster's
+		// own deployed-package record - the probe the single-package ApplyOnce path already
+		// uses. Deciding "satisfied" wrongly fails a later stage loudly; deciding "not
+		// satisfied" wrongly re-applies seed values over a converged cluster, so ambiguity
+		// leans towards satisfied.
+		if st.strategy == addonsv1alpha1.StrategyApplyOnce && resolution != nil && resolution.PackageName != "" {
+			w, err := workloadFor()
+			if err != nil {
+				return nil, err
+			}
+			adopted, err := hasDeployedPackage(ctx, w, resolution.PackageName)
+			if err != nil {
+				return nil, err
+			}
+			if adopted {
+				upsertStageState(release, addonsv1alpha1.StageState{
+					Name:      st.name,
+					SpecHash:  desired,
+					AppliedAt: metav1.Now(),
+				})
+				continue
+			}
+		}
+
+		// §6 step 5 per stage: a stage that is not itself init-capable needs zarf state first.
+		if resolution == nil || resolution.PackageKind != "ZarfInitConfig" {
+			w, err := workloadFor()
+			if err != nil {
+				return nil, err
+			}
+			hasState, err := hasZarfState(ctx, w)
+			if err != nil {
+				return nil, err
+			}
+			if !hasState {
+				return r.convergeInit(ctx, proxy, cluster, release, setReady)
+			}
+			if proxy.Spec.Init != nil && proxy.Spec.Init.AutoInit {
+				hold, err := r.settleInitJob(ctx, release, setReady)
+				if err != nil {
+					return nil, err
+				}
+				if hold {
+					return nil, nil
+				}
+			}
+		}
+
+		holder, err := r.clusterSlotHolder(ctx, release.Namespace, cluster)
+		if err != nil {
+			return nil, err
+		}
+		if holder != "" {
+			release.Status.Phase = addonsv1alpha1.PhasePending
+			setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonWaitingForActiveDeploy,
+				fmt.Sprintf("Job %s holds the cluster's deploy slot", holder))
+			return nil, nil
+		}
+
+		release.Status.Phase = addonsv1alpha1.PhaseDeploying
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonDeploying,
+			fmt.Sprintf("stage %s's deploy Job is starting", st.name))
+		job := BuildDeployJob(proxy, release, r.DeployImage, r.CachePath, st)
+		job.Annotations = map[string]string{specHashAnnotation: desired}
+		return job, nil
+	}
+
+	release.Status.Phase = addonsv1alpha1.PhaseDeployed
+	setReady(metav1.ConditionTrue, addonsv1alpha1.ReasonDeployed,
+		fmt.Sprintf("all %d stages applied", len(stages)))
+	return nil, nil
+}
+
+// absorbStageJob writes a finished stage Job's outcome into the release's applied record. The
+// identity recorded is the hash the Job was stamped from - the controller's own hash of the
+// rendered spec, never the pod-reported digest, which a lost termination message leaves empty.
+// Idempotent: a record already carrying the Job's hash is left alone, keeping its appliedAt.
+func (r *ZarfPackageProxyReconciler) absorbStageJob(ctx context.Context, release *addonsv1alpha1.ZarfPackageRelease, st stage, job *batchv1.Job) {
+	ranHash := job.Annotations[specHashAnnotation]
+	if existing := findStageState(release, st.name); existing != nil && existing.SpecHash == ranHash {
+		return
+	}
+	record := addonsv1alpha1.StageState{
+		Name:      st.name,
+		SpecHash:  ranHash,
+		AppliedAt: metav1.Now(),
+	}
+	if t := job.Status.CompletionTime; t != nil {
+		record.AppliedAt = *t
+	}
+	if result, found := r.jobResult(ctx, job); found {
+		if i := strings.LastIndex(result.Package, "@"); i >= 0 {
+			record.DeployedDigest = result.Package[i+1:]
+		}
+		record.DeployedVersion = result.Version
+	}
+	upsertStageState(release, record)
 }
 
 // convergeInit drives §6 step 5's auto-init deploy path for one release on a state-less
