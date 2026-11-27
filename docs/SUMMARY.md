@@ -11,6 +11,7 @@
 - [bootstrap-order](guides/bootstrap-order.md)
 - [getting-started](guides/getting-started.md)
 - [rancher-turtles](guides/rancher-turtles.md)
+- [staged-packages](guides/staged-packages.md)
 
 -----------
 
