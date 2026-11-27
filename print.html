@@ -38,7 +38,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-25e66f42.js";
+            window.path_to_searchindex_js = "searchindex-0d6b1acf.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-41f4cb6d.js"></script>
@@ -1653,7 +1653,7 @@ go run ./magefiles/core e2e:moveDown  # remove only that second cluster
 <tr><td>10</td><td><code>CNI on the workload cluster</code></td><td>Writes <code>dist/e2e/workload.kubeconfig</code>, applies Calico, waits for node <code>Ready</code>, labels the node for the registry’s affinity, removes the control-plane taint, installs local-path as the default StorageClass, and marks its namespace Pod-Security <code>privileged</code></td></tr>
 <tr><td>11</td><td><code>spike image in registry</code></td><td>Stages the busybox the Phase 0 assertions use</td></tr>
 <tr><td>12</td><td><code>fixture signing keypairs</code></td><td>Generates two Cosign keypairs into <code>dist/e2e/keys</code> - the signing pair, and an unrelated one for the bad-signature case</td></tr>
-<tr><td>13</td><td><code>fixture packages in registry</code></td><td>Builds and pushes three signed fixture packages through the vendored Zarf SDK</td></tr>
+<tr><td>13</td><td><code>fixture packages in registry</code></td><td>Builds and pushes five signed fixture packages through the vendored Zarf SDK - the app and drift pair, plus the two staged-sequence fixtures</td></tr>
 <tr><td>14</td><td><code>app fixture in the secure registry</code></td><td>Copies the app fixture from the plain registry into the secure one with oras - the SDK’s publish takes no credentials</td></tr>
 <tr><td>15</td><td><code>init package mirror</code></td><td>Copies the v1beta1 init package into the local registry, registry to registry. The one large transfer; skipped when already present</td></tr>
 <tr><td>16</td><td><code>zarf in the management cluster</code></td><td>Zarf-initializes the management cluster itself through the SDK, in proxy mode so Zarf issues a registry certificate - what <code>fromZarfState</code> reads. Labels the node for the registry’s affinity, and every existing namespace <code>zarf.dev/agent=ignore</code>, first</td></tr>
