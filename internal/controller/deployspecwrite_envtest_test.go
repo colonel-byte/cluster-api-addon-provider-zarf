@@ -141,3 +141,103 @@ func TestDeploySpecSecret(t *testing.T) {
 		t.Fatalf("DeploySpecReady = %+v, want False/%s", ready, addonsv1alpha1.ReasonRenderFailed)
 	}
 }
+
+// TestStagedDeploySpecDocuments is the staged form's rendering contract: a four-stage proxy
+// writes one document per stage into the one Secret, and editing one stage's values changes
+// exactly that stage's document.
+func TestStagedDeploySpecDocuments(t *testing.T) {
+	c := envtest.Client(t)
+	ns := envtest.Namespace(t, c)
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "staged-1", Namespace: ns, Labels: map[string]string{"tier": "staged"}},
+		Spec:       clusterv1.ClusterSpec{Paused: ptr.To(false)},
+	}
+	if err := c.Create(t.Context(), cluster); err != nil {
+		t.Fatalf("creating the Cluster: %v", err)
+	}
+	before := cluster.DeepCopy()
+	cluster.Status.Initialization = clusterv1.ClusterInitializationStatus{ControlPlaneInitialized: ptr.To(true)}
+	if err := c.Status().Patch(t.Context(), cluster, client.MergeFrom(before)); err != nil {
+		t.Fatalf("marking the control plane initialized: %v", err)
+	}
+
+	proxy := &addonsv1alpha1.ZarfPackageProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "boot", Namespace: ns},
+		Spec: addonsv1alpha1.ZarfPackageProxySpec{
+			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "staged"}},
+			Packages: map[string]addonsv1alpha1.ZarfPackageSource{
+				"a": {Repository: "registry.internal/zarf/a", Version: "1.0.0"},
+				"b": {Repository: "registry.internal/zarf/b", Version: "2.0.0"},
+			},
+			Stages: []addonsv1alpha1.PackageStage{
+				{Name: "a-seed", PackageRef: "a", Strategy: addonsv1alpha1.StrategyApplyOnce},
+				{Name: "b-seed", PackageRef: "b", Strategy: addonsv1alpha1.StrategyApplyOnce},
+				{Name: "a-final", PackageRef: "a"},
+				{Name: "b-final", PackageRef: "b"},
+			},
+		},
+	}
+	if err := c.Create(t.Context(), proxy); err != nil {
+		t.Fatalf("creating the staged proxy: %v", err)
+	}
+
+	stub := &stubResolver{
+		result: resolver.Result{
+			Digest:     "sha256:feed",
+			APIVersion: "v1beta1",
+		},
+		tagDigest: "sha256:feed",
+	}
+	r := &ZarfPackageProxyReconciler{Client: c, Resolver: stub}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "boot"}}
+	for range 2 {
+		if _, err := r.Reconcile(t.Context(), req); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+	}
+
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{Namespace: ns, Name: "boot-staged-1-deploy-spec"}
+	if err := c.Get(t.Context(), secretKey, secret); err != nil {
+		t.Fatalf("the deploy-spec Secret was not written: %v", err)
+	}
+	wantFiles := []string{"stage-a-seed.yaml", "stage-b-seed.yaml", "stage-a-final.yaml", "stage-b-final.yaml"}
+	for _, name := range wantFiles {
+		if len(secret.Data[name]) == 0 {
+			t.Fatalf("stage document %s missing; secret holds %d files", name, len(secret.Data))
+		}
+	}
+	if !strings.Contains(string(secret.Data["stage-a-seed.yaml"]), "registry.internal/zarf/a@sha256:feed") {
+		t.Fatalf("stage document is not digest-pinned:\n%s", secret.Data["stage-a-seed.yaml"])
+	}
+	kept := map[string][]byte{}
+	for name, data := range secret.Data {
+		kept[name] = append([]byte(nil), data...)
+	}
+
+	// Edit one stage's values: exactly that document changes.
+	fresh := &addonsv1alpha1.ZarfPackageProxy{}
+	if err := c.Get(t.Context(), types.NamespacedName{Namespace: ns, Name: "boot"}, fresh); err != nil {
+		t.Fatalf("re-reading the proxy: %v", err)
+	}
+	fresh.Spec.Stages[3].Values = &apiextensionsv1.JSON{Raw: []byte(`{"marker":"edited"}`)}
+	if err := c.Update(t.Context(), fresh); err != nil {
+		t.Fatalf("editing stage 4's values: %v", err)
+	}
+	if _, err := r.Reconcile(t.Context(), req); err != nil {
+		t.Fatalf("Reconcile after the edit: %v", err)
+	}
+	if err := c.Get(t.Context(), secretKey, secret); err != nil {
+		t.Fatalf("re-reading the Secret: %v", err)
+	}
+	for name := range kept {
+		changed := !strings.EqualFold(string(kept[name]), string(secret.Data[name]))
+		if name == "stage-b-final.yaml" && !changed {
+			t.Fatalf("the edited stage's document did not change")
+		}
+		if name != "stage-b-final.yaml" && changed {
+			t.Fatalf("document %s changed on another stage's edit", name)
+		}
+	}
+}

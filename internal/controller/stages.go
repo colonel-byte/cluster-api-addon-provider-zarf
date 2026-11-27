@@ -31,6 +31,10 @@ type stage struct {
 	// file keep their pre-stages names so an upgrade renames nothing.
 	name string
 
+	// packageRefKey is the spec.packages key this stage resolved its source from; empty for
+	// the single-package form, whose resolution lives in the flat status fields.
+	packageRefKey string
+
 	source     *addonsv1alpha1.ZarfPackageSource
 	strategy   addonsv1alpha1.DeploymentStrategy
 	components []addonsv1alpha1.ComponentSelector
@@ -79,17 +83,59 @@ func effectiveStages(proxy *addonsv1alpha1.ZarfPackageProxy) []stage {
 			strategy = addonsv1alpha1.StrategyReconcile
 		}
 		stages = append(stages, stage{
-			name:         declared.Name,
-			source:       &source,
-			strategy:     strategy,
-			components:   declared.Components,
-			values:       declared.Values,
-			set:          declared.Set,
-			jobSuffix:    "-" + declared.Name + "-deploy",
-			specFileName: deployspec.StageFileName(declared.Name),
+			name:          declared.Name,
+			packageRefKey: declared.PackageRef,
+			source:        &source,
+			strategy:      strategy,
+			components:    declared.Components,
+			values:        declared.Values,
+			set:           declared.Set,
+			jobSuffix:     "-" + declared.Name + "-deploy",
+			specFileName:  deployspec.StageFileName(declared.Name),
 		})
 	}
 	return stages
+}
+
+// packageResolution is a stage's resolution verdict: the flat status fields for the
+// single-package form, the stage's status.packages entry otherwise. Nil until resolved.
+func packageResolution(proxy *addonsv1alpha1.ZarfPackageProxy, st stage) *addonsv1alpha1.PackageResolution {
+	if st.packageRefKey == "" {
+		if proxy.Status.ResolvedDigest == "" {
+			return nil
+		}
+		return &addonsv1alpha1.PackageResolution{
+			ResolvedRef:    proxy.Status.ResolvedRef,
+			ResolvedDigest: proxy.Status.ResolvedDigest,
+			PackageName:    proxy.Status.PackageName,
+			PackageKind:    proxy.Status.PackageKind,
+		}
+	}
+	for i := range proxy.Status.Packages {
+		entry := &proxy.Status.Packages[i]
+		if entry.Name == st.packageRefKey && entry.ResolvedDigest != "" {
+			return entry
+		}
+	}
+	return nil
+}
+
+// initSource is the init package's source, whichever form declared it: the inline
+// init.package, or the spec.packages entry init.packageRef names. Nil when the proxy
+// declares no init package.
+func initSource(proxy *addonsv1alpha1.ZarfPackageProxy) *addonsv1alpha1.ZarfPackageSource {
+	if proxy.Spec.Init == nil {
+		return nil
+	}
+	if proxy.Spec.Init.Package != nil {
+		return proxy.Spec.Init.Package
+	}
+	if key := proxy.Spec.Init.PackageRef; key != "" {
+		if source, ok := proxy.Spec.Packages[key]; ok {
+			return &source
+		}
+	}
+	return nil
 }
 
 // declaredVersion is the version an operator reads as "what this proxy wants": the single
