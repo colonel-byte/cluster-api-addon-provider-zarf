@@ -124,3 +124,75 @@ func TestEffectiveStages(t *testing.T) {
 		t.Errorf("dangling ref produced %d stages, want 1", len(stages))
 	}
 }
+
+// TestStageDivergence pins option D's boundary: ApplyOnce history is immutable - renames,
+// removals, and insertions before an applied seed hold - while Reconcile stages insert, remove
+// and reorder freely, and appends are always the unambiguous edit.
+func TestStageDivergence(t *testing.T) {
+	appliedSeed := func() *addonsv1alpha1.ZarfPackageRelease {
+		release := &addonsv1alpha1.ZarfPackageRelease{}
+		release.Status.Stages = []addonsv1alpha1.StageState{
+			{
+				Name:     "seed",
+				Strategy: addonsv1alpha1.StrategyApplyOnce,
+			},
+			{
+				Name:     "final",
+				Strategy: addonsv1alpha1.StrategyReconcile,
+			},
+		}
+		return release
+	}
+	declare := func(entries ...stage) []stage { return entries }
+	applyOnce := func(name string) stage {
+		return stage{name: name, strategy: addonsv1alpha1.StrategyApplyOnce}
+	}
+	reconcile := func(name string) stage {
+		return stage{name: name, strategy: addonsv1alpha1.StrategyReconcile}
+	}
+
+	tests := []struct {
+		name         string
+		stages       []stage
+		wantDiverged bool
+	}{
+		{
+			name:         "the declared list unchanged",
+			stages:       declare(applyOnce("seed"), reconcile("final")),
+			wantDiverged: false,
+		},
+		{
+			name:         "an applied ApplyOnce stage renamed away",
+			stages:       declare(applyOnce("seed-v2"), reconcile("final")),
+			wantDiverged: true,
+		},
+		{
+			name:         "an applied Reconcile stage removed",
+			stages:       declare(applyOnce("seed")),
+			wantDiverged: false,
+		},
+		{
+			name:         "an ApplyOnce stage inserted before the applied seed",
+			stages:       declare(applyOnce("pre-seed"), applyOnce("seed"), reconcile("final")),
+			wantDiverged: true,
+		},
+		{
+			name:         "an ApplyOnce stage appended after history",
+			stages:       declare(applyOnce("seed"), reconcile("final"), applyOnce("late-seed")),
+			wantDiverged: false,
+		},
+		{
+			name:         "a Reconcile stage inserted anywhere",
+			stages:       declare(reconcile("pre"), applyOnce("seed"), reconcile("mid"), reconcile("final")),
+			wantDiverged: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := stageDivergence(appliedSeed(), test.stages)
+			if (message != "") != test.wantDiverged {
+				t.Errorf("divergence = %q, want diverged=%v", message, test.wantDiverged)
+			}
+		})
+	}
+}
