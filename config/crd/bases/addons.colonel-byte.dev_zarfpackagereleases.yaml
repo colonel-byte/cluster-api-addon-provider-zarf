@@ -40,6 +40,11 @@ spec:
       name: Reason
       priority: 1
       type: string
+    - description: Registry mode the cluster's zarf-state records
+      jsonPath: .status.observedRegistryMode
+      name: Registry
+      priority: 1
+      type: string
     - description: Declared stages settled on this cluster
       jsonPath: .status.appliedStageCount
       name: Applied
@@ -200,6 +205,14 @@ spec:
               deployedVersion:
                 description: deployedVersion is the package version last deployed
                   successfully.
+                type: string
+              observedRegistryMode:
+                description: |-
+                  observedRegistryMode is the registry mode the cluster's own zarf-state records, read on
+                  each deploy-gating pass - what `kubectl get zarfpackagereleases -o wide` shows beside
+                  the declaration, so a fleet whose clusters disagree about their mode is legible without
+                  opening a single cluster. Empty when the cluster has no state, or its state predates
+                  modes.
                 type: string
               phase:
                 description: phase is where the release is in its lifecycle.

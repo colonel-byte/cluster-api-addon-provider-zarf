@@ -417,3 +417,126 @@ func TestStagedOrderingWalk(t *testing.T) {
 		t.Fatalf("alpha's applied record changed on another stage's edit: %+v", got)
 	}
 }
+
+// TestInitSettingsGuard proves the two-proxies-one-cluster story: a ZarfInitConfig deploy whose
+// declared registry mode the cluster's own zarf-state contradicts holds with
+// RegistryModeMismatch and the InitSettingsSuperseded condition, the observed mode lands in
+// status for kubectl, and agreement clears the condition and lets the deploy stamp.
+func TestInitSettingsGuard(t *testing.T) {
+	c := envtest.Client(t)
+	ns := envtest.Namespace(t, c)
+	ctx := t.Context()
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "guard-1", Namespace: ns, Labels: map[string]string{"tier": "guard"}},
+		Spec:       clusterv1.ClusterSpec{Paused: ptr.To(false)},
+	}
+	if err := c.Create(ctx, cluster); err != nil {
+		t.Fatalf("creating the Cluster: %v", err)
+	}
+	clusterBefore := cluster.DeepCopy()
+	cluster.Status.Initialization = clusterv1.ClusterInitializationStatus{ControlPlaneInitialized: ptr.To(true)}
+	if err := c.Status().Patch(ctx, cluster, client.MergeFrom(clusterBefore)); err != nil {
+		t.Fatalf("marking the control plane initialized: %v", err)
+	}
+	kubeconfig := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "guard-1-kubeconfig", Namespace: ns},
+		Data:       map[string][]byte{kubeconfigSecretKey: envtest.Kubeconfig(t)},
+	}
+	if err := c.Create(ctx, kubeconfig); err != nil {
+		t.Fatalf("creating the kubeconfig secret: %v", err)
+	}
+	zarfNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: zarfstate.ZarfNamespaceName}}
+	if err := c.Create(ctx, zarfNS); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating the zarf namespace: %v", err)
+	}
+	stateSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: zarfstate.ZarfStateSecretName, Namespace: zarfstate.ZarfNamespaceName},
+		Data:       map[string][]byte{zarfstate.ZarfStateDataKey: []byte(`{"registryInfo":{"registryMode":"nodeport"}}`)},
+	}
+	if err := c.Create(ctx, stateSecret); err != nil {
+		t.Fatalf("creating the zarf-state secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = c.Delete(context.Background(), stateSecret) //nolint:errcheck // best-effort cleanup
+	})
+
+	proxy := &addonsv1alpha1.ZarfPackageProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "init-owner-b", Namespace: ns},
+		Spec: addonsv1alpha1.ZarfPackageProxySpec{
+			ClusterSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "guard"}},
+			Package: &addonsv1alpha1.ZarfPackageSource{
+				Repository: "registry.internal/zarf/init-slim",
+				Version:    "v1.0.1",
+			},
+			Init: &addonsv1alpha1.InitOptions{
+				Registry:      &addonsv1alpha1.InitRegistryOptions{Mode: addonsv1alpha1.RegistryModeProxy},
+				InjectorImage: "registry.internal/injector:v1",
+			},
+		},
+	}
+	if err := c.Create(ctx, proxy); err != nil {
+		t.Fatalf("creating the proxy: %v", err)
+	}
+	r := &ZarfPackageProxyReconciler{
+		Client:      c,
+		Resolver:    &stubResolver{result: resolver.Result{Digest: "sha256:cccc", Name: "init-slim", APIVersion: "v1beta1", IsInitPackage: true}, tagDigest: "sha256:cccc"},
+		DeployImage: "registry.internal/caapz:test",
+		CachePath:   "/var/lib/caapz/cache",
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: ns, Name: "init-owner-b"}}
+	for range 3 {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+	}
+
+	release := &addonsv1alpha1.ZarfPackageRelease{}
+	releaseKey := types.NamespacedName{Namespace: ns, Name: "init-owner-b-guard-1"}
+	if err := c.Get(ctx, releaseKey, release); err != nil {
+		t.Fatalf("reading the release: %v", err)
+	}
+	if release.Status.Phase != addonsv1alpha1.PhasePending {
+		t.Fatalf("phase = %q, want Pending; conditions %+v", release.Status.Phase, release.Status.Conditions)
+	}
+	if release.Status.ObservedRegistryMode != "nodeport" {
+		t.Fatalf("observedRegistryMode = %q, want nodeport", release.Status.ObservedRegistryMode)
+	}
+	ready := meta.FindStatusCondition(release.Status.Conditions, addonsv1alpha1.ConditionReady)
+	if ready == nil || ready.Reason != addonsv1alpha1.ReasonRegistryModeMismatch {
+		t.Fatalf("Ready = %+v, want reason RegistryModeMismatch", ready)
+	}
+	superseded := meta.FindStatusCondition(release.Status.Conditions, addonsv1alpha1.ConditionInitSettingsSuperseded)
+	if superseded == nil || superseded.Status != metav1.ConditionTrue {
+		t.Fatalf("InitSettingsSuperseded = %+v, want True", superseded)
+	}
+	jobKey := types.NamespacedName{Namespace: ns, Name: "init-owner-b-guard-1-deploy"}
+	if err := c.Get(ctx, jobKey, &batchv1.Job{}); err == nil {
+		t.Fatal("a deploy Job was stamped despite the mode conflict")
+	}
+
+	// The cluster's state coming to agree - another proxy's mode was changed, or this one is
+	// recreated to match - clears the condition and the deploy proceeds.
+	stateBefore := stateSecret.DeepCopy()
+	stateSecret.Data[zarfstate.ZarfStateDataKey] = []byte(`{"registryInfo":{"registryMode":"proxy"}}`)
+	if err := c.Patch(ctx, stateSecret, client.MergeFrom(stateBefore)); err != nil {
+		t.Fatalf("updating the zarf-state secret: %v", err)
+	}
+	for range 2 {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("Reconcile after agreement: %v", err)
+		}
+	}
+	if err := c.Get(ctx, releaseKey, release); err != nil {
+		t.Fatalf("re-reading the release: %v", err)
+	}
+	if release.Status.ObservedRegistryMode != "proxy" {
+		t.Fatalf("observedRegistryMode = %q, want proxy", release.Status.ObservedRegistryMode)
+	}
+	if cond := meta.FindStatusCondition(release.Status.Conditions, addonsv1alpha1.ConditionInitSettingsSuperseded); cond != nil {
+		t.Fatalf("InitSettingsSuperseded still present after agreement: %+v", cond)
+	}
+	if err := c.Get(ctx, jobKey, &batchv1.Job{}); err != nil {
+		t.Fatalf("the deploy Job was not stamped after agreement: %v", err)
+	}
+}

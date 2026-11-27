@@ -167,11 +167,14 @@ kubectl get zarfpackagereleases -o wide        # per cluster: Phase, Applied/Sta
 
 Per-stage detail lives on the release: `status.stages[]` records each applied stage's identity and time, and the per-stage deploy Jobs are named `<release>-<stage>-deploy`, labelled with `addons.colonel-byte.dev/stage`. An `ApplyOnce` stage's finished Job is kept as the record of its run.
 
+The wide release view also carries a `Registry` column - the registry mode the cluster's *own* zarf-state records, read on every gating pass. When two proxies select the same clusters with different `init.registry.mode`, whichever initialized first owns the mode: the other's releases show the disagreement in that column, carry an `InitSettingsSuperseded` condition naming both modes, and - where the loser would actually deploy a `ZarfInitConfig` carrying its mode - hold with `RegistryModeMismatch` rather than swapping the registry out from under deployed releases. A proxy that merely declares a superseded mode keeps deploying; the condition is its record.
+
 Holds you may see and what they mean:
 
-| Ready reason          | What it means                                                                                               |
-| --------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `WaitingForZarfState` | The cluster has no zarf-state and the next stage is not init-capable; `spec.init` (or someone) must init it |
-| `WaitingForStageSpec` | A stage's package has not resolved; the proxy's `PackageResolved` condition says why                        |
-| `StageListDiverged`   | The declared list diverges from this cluster's applied `ApplyOnce` history; the message names where         |
-| `DeployFailed`        | A stage's Job failed; the message carries the pod's error, and editing that stage retries it                |
+| Ready reason           | What it means                                                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `WaitingForZarfState`  | The cluster has no zarf-state and the next stage is not init-capable; `spec.init` (or someone) must init it                       |
+| `WaitingForStageSpec`  | A stage's package has not resolved; the proxy's `PackageResolved` condition says why                                              |
+| `StageListDiverged`    | The declared list diverges from this cluster's applied `ApplyOnce` history; the message names where                               |
+| `RegistryModeMismatch` | The declared `init.registry.mode` contradicts the mode the cluster's zarf-state records; another proxy or an earlier init owns it |
+| `DeployFailed`         | A stage's Job failed; the message carries the pod's error, and editing that stage retries it                                      |

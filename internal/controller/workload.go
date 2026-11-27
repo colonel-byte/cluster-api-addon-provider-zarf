@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -63,6 +64,26 @@ func (r *ZarfPackageProxyReconciler) workloadClient(ctx context.Context, namespa
 // init-first eligibility gate reads exactly this, never a package or proxy name.
 func hasZarfState(ctx context.Context, c client.Client) (bool, error) {
 	return hasZarfSecret(ctx, c, zarfstate.ZarfStateSecretName)
+}
+
+// clusterRegistryMode reads the registry mode the cluster's own zarf-state records - the
+// ground truth the init-settings guard compares a declaration against. Empty, never an error,
+// when the cluster has no state, the secret is malformed, or the state predates modes: an
+// unreadable mode must degrade to "unknown, do not hold" rather than fail the pass (§7B).
+func clusterRegistryMode(ctx context.Context, c client.Client) (string, error) {
+	secret := &corev1.Secret{}
+	err := c.Get(ctx, types.NamespacedName{Namespace: zarfstate.ZarfNamespaceName, Name: zarfstate.ZarfStateSecretName}, secret)
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	s := &zarfstate.State{}
+	if err := json.Unmarshal(secret.Data[zarfstate.ZarfStateDataKey], s); err != nil {
+		return "", nil
+	}
+	return string(s.RegistryInfo.RegistryMode), nil
 }
 
 // hasDeployedPackage reports whether the cluster carries zarf's deployed-package record for the
