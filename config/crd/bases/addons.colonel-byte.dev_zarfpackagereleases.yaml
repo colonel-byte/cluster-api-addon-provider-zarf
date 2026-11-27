@@ -252,6 +252,15 @@ spec:
                         specHash is the controller's hash of the rendered stage document the applied run was
                         stamped from - the identity a changed stage is detected by.
                       type: string
+                    strategy:
+                      description: |-
+                        strategy is the stage's strategy as declared when it applied, so history stays
+                        self-describing after the stage leaves the spec - the structural-divergence check needs
+                        to know whether an undeclared record was ApplyOnce without the list that said so.
+                      enum:
+                      - Reconcile
+                      - ApplyOnce
+                      type: string
                     undeclared:
                       description: |-
                         undeclared is true when the spec no longer declares a stage of this name. The record is

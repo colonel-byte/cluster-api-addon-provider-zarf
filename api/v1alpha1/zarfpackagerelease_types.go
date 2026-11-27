@@ -104,6 +104,11 @@ const (
 	// declared version is deployed" and "the declared version will never deploy here" is
 	// comparing two fields by eye.
 	ReasonAlreadySeeded = "AlreadySeeded"
+	// ReasonStageListDiverged is Ready: False - the declared stage list structurally diverges
+	// from this cluster's applied ApplyOnce history (a rename, a removal, or an insertion
+	// before an applied seed), and running it could re-apply superseded seed values. The
+	// message names the first divergence; Reconcile stages are free to change.
+	ReasonStageListDiverged = "StageListDiverged"
 	// ReasonWaitingForStageSpec holds a staged release while a stage's document is not yet
 	// rendered - its package has not resolved; the proxy's PackageResolved condition says why.
 	ReasonWaitingForStageSpec = "WaitingForStageSpec"
@@ -213,6 +218,12 @@ type StageState struct {
 	// stamped from - the identity a changed stage is detected by.
 	// +optional
 	SpecHash string `json:"specHash,omitempty"`
+
+	// strategy is the stage's strategy as declared when it applied, so history stays
+	// self-describing after the stage leaves the spec - the structural-divergence check needs
+	// to know whether an undeclared record was ApplyOnce without the list that said so.
+	// +optional
+	Strategy DeploymentStrategy `json:"strategy,omitempty"`
 
 	// appliedAt is when the stage's deploy Job completed.
 	// +optional

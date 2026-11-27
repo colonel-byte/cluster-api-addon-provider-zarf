@@ -15,6 +15,8 @@
 package controller
 
 import (
+	"fmt"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
@@ -168,6 +170,40 @@ func markUndeclaredStages(release *addonsv1alpha1.ZarfPackageRelease, stages []s
 	for i := range release.Status.Stages {
 		release.Status.Stages[i].Undeclared = !declared[release.Status.Stages[i].Name]
 	}
+}
+
+// stageDivergence is option D's structural check (docs/dev/design-package-stages.md, "Editing
+// a stage list that clusters have already run"): applied ApplyOnce stages are history, and the
+// declared list must still contain each one, with no unapplied ApplyOnce stage inserted before
+// an applied one - a rename reads as a removal plus an insertion, and re-running an ApplyOnce
+// seed is the destructive direction. Reconcile stages are desired state: inserting, removing
+// and reordering them is free. Returns a message naming the first divergence, "" when none.
+// Reconciler-time rather than CEL, because no admission rule can see a per-cluster record.
+func stageDivergence(release *addonsv1alpha1.ZarfPackageRelease, stages []stage) string {
+	declared := map[string]bool{}
+	for _, st := range stages {
+		declared[st.name] = true
+	}
+	for _, record := range release.Status.Stages {
+		if record.Strategy == addonsv1alpha1.StrategyApplyOnce && !declared[record.Name] {
+			return fmt.Sprintf("applied ApplyOnce stage %q is no longer declared - a rename or removal of history; restore the stage, or delete this release to deliberately discard the record", record.Name)
+		}
+	}
+	applied := map[string]bool{}
+	for _, record := range release.Status.Stages {
+		applied[record.Name] = true
+	}
+	for i, st := range stages {
+		if st.strategy != addonsv1alpha1.StrategyApplyOnce || applied[st.name] {
+			continue
+		}
+		for _, later := range stages[i+1:] {
+			if later.strategy == addonsv1alpha1.StrategyApplyOnce && applied[later.name] {
+				return fmt.Sprintf("ApplyOnce stage %q is declared before applied ApplyOnce stage %q - an insertion into history; append it instead, or re-seed deliberately", st.name, later.name)
+			}
+		}
+	}
+	return ""
 }
 
 // declaredVersion is the version an operator reads as "what this proxy wants": the single

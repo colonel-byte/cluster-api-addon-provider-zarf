@@ -235,6 +235,12 @@ func (r *ZarfPackageProxyReconciler) convergeDeploy(ctx context.Context, proxy *
 func (r *ZarfPackageProxyReconciler) convergeStages(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy, cluster *clusterv1.Cluster, release *addonsv1alpha1.ZarfPackageRelease, stages []stage, setReady func(metav1.ConditionStatus, string, string)) (*batchv1.Job, error) {
 	markUndeclaredStages(release, stages)
 
+	if divergence := stageDivergence(release, stages); divergence != "" {
+		release.Status.Phase = addonsv1alpha1.PhasePending
+		setReady(metav1.ConditionFalse, addonsv1alpha1.ReasonStageListDiverged, divergence)
+		return nil, nil
+	}
+
 	// The counts behind the printer columns: declared stages stamped from the proxy so the
 	// release self-describes after a clusterctl move, settled ones counted as the walk passes
 	// them - whichever return ends this pass.
@@ -347,6 +353,7 @@ func (r *ZarfPackageProxyReconciler) convergeStages(ctx context.Context, proxy *
 				upsertStageState(release, addonsv1alpha1.StageState{
 					Name:      st.name,
 					SpecHash:  desired,
+					Strategy:  st.strategy,
 					AppliedAt: metav1.Now(),
 				})
 				applied++
@@ -415,6 +422,7 @@ func (r *ZarfPackageProxyReconciler) absorbStageJob(ctx context.Context, release
 	record := addonsv1alpha1.StageState{
 		Name:      st.name,
 		SpecHash:  ranHash,
+		Strategy:  st.strategy,
 		AppliedAt: metav1.Now(),
 	}
 	if t := job.Status.CompletionTime; t != nil {
