@@ -40,13 +40,14 @@ const defaultFollowTagInterval = 15 * time.Minute
 func (r *ZarfPackageProxyReconciler) resolvePackage(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) (time.Duration, error) {
 	log := ctrl.LoggerFrom(ctx)
 
+	proxy.Status.StageCount = int32(len(proxy.Spec.Stages))
+	proxy.Status.Version = declaredVersion(proxy)
+
 	// Nil in tests that exercise matching or stamping alone; main always wires one.
 	if r.Resolver == nil {
 		return 0, nil
 	}
 
-	proxy.Status.StageCount = int32(len(proxy.Spec.Stages))
-	proxy.Status.Version = declaredVersion(proxy)
 	if proxy.Spec.Package == nil {
 		return 0, r.resolveStagedPackages(ctx, proxy)
 	}

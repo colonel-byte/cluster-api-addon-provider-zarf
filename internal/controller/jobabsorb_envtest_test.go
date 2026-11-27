@@ -372,6 +372,16 @@ func TestStagedOrderingWalk(t *testing.T) {
 	if release.Status.Stages[0].SpecHash == "" || release.Status.Stages[0].DeployedVersion != "1.0.0" {
 		t.Fatalf("alpha's record is incomplete: %+v", release.Status.Stages[0])
 	}
+	if release.Status.StageCount != 2 || release.Status.AppliedStageCount != 2 {
+		t.Fatalf("stage counts = %d/%d, want 2/2", release.Status.AppliedStageCount, release.Status.StageCount)
+	}
+	proxyNow := &addonsv1alpha1.ZarfPackageProxy{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "walk"}, proxyNow); err != nil {
+		t.Fatalf("re-reading the proxy: %v", err)
+	}
+	if proxyNow.Status.StageCount != 2 || proxyNow.Status.Version != "2.0.0" {
+		t.Fatalf("proxy stageCount/version = %d/%q, want 2/2.0.0", proxyNow.Status.StageCount, proxyNow.Status.Version)
+	}
 	alphaHash := release.Status.Stages[0].SpecHash
 
 	// Edit stage beta's values: beta alone re-runs.

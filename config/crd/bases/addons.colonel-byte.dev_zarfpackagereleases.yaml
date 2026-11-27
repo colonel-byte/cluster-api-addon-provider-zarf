@@ -40,6 +40,16 @@ spec:
       name: Reason
       priority: 1
       type: string
+    - description: Declared stages settled on this cluster
+      jsonPath: .status.appliedStageCount
+      name: Applied
+      priority: 1
+      type: integer
+    - description: Stages the proxy declares
+      jsonPath: .status.stageCount
+      name: Stages
+      priority: 1
+      type: integer
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -117,6 +127,12 @@ spec:
                 description: applied is true once an ApplyOnce release has executed;
                   it is never reset.
                 type: boolean
+              appliedStageCount:
+                description: |-
+                  appliedStageCount is how many declared stages have settled on this cluster - carried as
+                  a number because a printer column cannot take the length of a list.
+                format: int32
+                type: integer
               conditions:
                 description: |-
                   conditions detail the release's state: Ready, PackageSignatureVerified,
@@ -195,6 +211,13 @@ spec:
                 - Failed
                 - Removing
                 type: string
+              stageCount:
+                description: |-
+                  stageCount is how many stages the proxy declared, stamped onto the release so it stays
+                  self-describing after a clusterctl move separates it from its proxy. Zero on the
+                  single-package form.
+                format: int32
+                type: integer
               stages:
                 description: |-
                   stages are the per-stage applied records of a staged proxy's release, one entry per
