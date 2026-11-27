@@ -21,6 +21,9 @@ jobs:
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
+          # No restore-only mode, so merge-queue runs skip the module cache entirely rather
+          # than save one from a ref that is deleted right after the run.
+          cache: ${{ github.event_name != 'merge_group' }}
 
       # Runs the hooks from .pre-commit-config.yaml, so licensing, formatting and sorting can
       # never drift from the local pre-commit setup. Skipped:
@@ -34,6 +37,9 @@ jobs:
       - name: Run hooks
         uses: j178/prek-action@7b101f8338a08d2bd6fdb3625e4e7692428763a3 # v3.1.1
         with:
+          # No restore-only mode, so merge-queue runs rebuild the hook environments rather
+          # than save a cache from a ref that is deleted right after the run.
+          cache: ${{ github.event_name != 'merge_group' }}
           extra-args: >-
             --all-files
             --skip docs-generator

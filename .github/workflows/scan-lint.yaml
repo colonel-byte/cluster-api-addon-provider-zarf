@@ -45,6 +45,9 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: ${{ steps.pinned.outputs.version }}
+          # Merge-queue refs are deleted right after the run, so a cache saved there is dead
+          # weight in the repository's cache quota. Restores still hit main's cache.
+          skip-save-cache: ${{ github.event_name == 'merge_group' }}
 
   # TEMPLATE: a `containers` job belongs here once there are Dockerfiles, with one matrix entry
   # per path. hadolint's action takes a single path, and its `recursive` mode globs from the
