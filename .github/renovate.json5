@@ -73,7 +73,8 @@
   packageRules: [
     // Container images (Dockerfile bases, workflow runner images) move separately from the
     // annotated release pins: an image digest bump and a tool-version bump are reviewed by
-    // different evidence.
+    // different evidence. No groupName on purpose - each image gets its own branch, so one
+    // image's digest bump is reviewed and reverted on its own.
     {
       matchDatasources: [
         "docker",
@@ -81,8 +82,6 @@
       addLabels: [
         "renovate/oci",
       ],
-      groupName: "container images",
-      groupSlug: "docker",
       matchPackageNames: [
         "*",
       ],
@@ -134,72 +133,6 @@
       matchDepTypes: ["indirect"],
       enabled: true,
     },
-    // Named gomod groups, split out of the all-gomod catch-all above - rules apply in
-    // order and the last match wins, so these must stay below it.
-    {
-      matchManagers: ["gomod"],
-      matchPackageNames: ["k8s.io/**", "sigs.k8s.io/**"],
-      groupName: "k8s",
-      groupSlug: "k8s",
-    },
-    {
-      matchManagers: ["gomod"],
-      matchPackageNames: ["golang.org/x/**"],
-      groupName: "golang",
-      groupSlug: "golang",
-    },
-    // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
-    // so it gets a PR of its own rather than riding in a group. The Go module and the
-    // annotated release pin (zarf.yaml, the publish workflow) describe the same version
-    // and the deploy stack vendors the packager surface, so both names move together here.
-    {
-      matchPackageNames: [
-        "github.com/zarf-dev/zarf",
-        "zarf-dev/zarf",
-      ],
-      groupName: "zarf",
-      groupSlug: "zarf",
-    },
-    // Everything indirect moves as one mechanical PR, reviewed by the vendored offline
-    // build and the test suite rather than by reading 170 version lines. It wins over the
-    // family groups above, so an indirect k8s.io bump rides here, not in the k8s PR.
-    {
-      matchManagers: ["gomod"],
-      matchDepTypes: ["indirect"],
-      groupName: "go indirect",
-      groupSlug: "gomod-indirect",
-    },
-    // The two families below sit under the indirect rule on purpose: their members are
-    // entirely indirect (the zarf/cosign fan-out), and these rules carve them back out of
-    // the indirect blob into PRs of their own.
-    {
-      matchManagers: ["gomod"],
-      matchPackageNames: ["github.com/go-openapi/**"],
-      groupName: "openapi",
-      groupSlug: "openapi",
-    },
-    {
-      matchManagers: ["gomod"],
-      matchPackageNames: [
-        "cloud.google.com/go/**",
-        "github.com/AliyunContainerService/ack-ram-tool/**",
-        "github.com/Azure/**",
-        "github.com/AzureAD/**",
-        "github.com/alibabacloud-go/**",
-        "github.com/aws/**",
-        "github.com/awslabs/**",
-        "github.com/google/**",
-        "github.com/googleapis/**",
-        "github.com/hashicorp/**",
-        "github.com/mozillazg/docker-credential-acr-helper/**",
-        "github.com/sigstore/**",
-        "github.com/spiffe/**",
-        "github.com/theupdateframework/**",
-        "google.golang.org/**",
-      ],
-      groupName: "cloud-kms",
-      groupSlug: "cloud-kms",
-    },
     {
       matchManagers: ["pre-commit"],
       addLabels: [
@@ -239,21 +172,130 @@
       matchUpdateTypes: ["major"],
       enabled: false,
     },
-    // Dissolve the gomod groups: a branch per module, named `renovate/<module>-<major>.x`.
-    // The groups above stay in the file and keep applying their labels - `groupName: null`
-    // removes only the grouping, and the rules are still what attaches `renovate/gomod` and
-    // decides what is enabled. This sits last so it wins over all of them.
-    //
-    // The trade this makes is the opposite of the one the groups made, and it is only
-    // affordable because of the limits at the top of this file. The counts, from the
-    // 2026-11-23 dry run: 170 indirect updates, 82 in the cloud-kms families, 8 openapi, 1
-    // direct. Ungrouped and throttled to 2 per hour, a full backlog takes days to drain -
-    // which is the intended behaviour, not a problem to solve, because each one arrives with
-    // its own vendored diff and its own CI run. Re-group a family by deleting this rule's
-    // match for it if the trickle is not worth the per-module isolation.
+    // Ungroup gomod by default: a branch per module, named `renovate/<module>-<major>.x`.
+    // The rules above keep applying their labels and enablement - `groupName: null` removes
+    // only the grouping. The family rules below this one win over it (rules apply in order,
+    // last match wins), so a member of a named family rides its family PR and everything
+    // else stays one PR per module, throttled by the limits at the top of this file.
     {
       matchManagers: ["gomod"],
       groupName: null,
+    },
+    // Named families, re-grouped out of the per-module default above. Each is a vendor
+    // whose modules version together (the zarf/cosign fan-out is almost all of them), so
+    // one PR per family is one vendored diff and one CI run instead of a dozen. These must
+    // stay below the ungrouping rule or it dissolves them.
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "k8s.io/**",
+        "sigs.k8s.io/**",
+      ],
+      groupName: "k8s",
+      groupSlug: "k8s",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "golang.org/x/**",
+      ],
+      groupName: "golang",
+      groupSlug: "golang",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "github.com/go-openapi/**",
+      ],
+      groupName: "openapi",
+      groupSlug: "openapi",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "github.com/aws/**",
+        "github.com/awslabs/**",
+      ],
+      groupName: "aws",
+      groupSlug: "aws",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "github.com/Azure/**",
+        "github.com/AzureAD/**",
+      ],
+      groupName: "azure",
+      groupSlug: "azure",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "cloud.google.com/go/**",
+        "github.com/GoogleCloudPlatform/**",
+        "github.com/google/**",
+        "github.com/googleapis/**",
+        "google.golang.org/**",
+      ],
+      groupName: "google",
+      groupSlug: "google",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "github.com/AliyunContainerService/**",
+        "github.com/alibabacloud-go/**",
+        "github.com/mozillazg/docker-credential-acr-helper/**",
+      ],
+      groupName: "alibaba",
+      groupSlug: "alibaba",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "github.com/sigstore/**",
+        "github.com/spiffe/**",
+        "github.com/theupdateframework/**",
+        "github.com/transparency-dev/**",
+      ],
+      groupName: "sigstore",
+      groupSlug: "sigstore",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["github.com/hashicorp/**"],
+      groupName: "hashicorp",
+      groupSlug: "hashicorp",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: ["go.opentelemetry.io/**"],
+      groupName: "opentelemetry",
+      groupSlug: "opentelemetry",
+    },
+    {
+      matchManagers: ["gomod"],
+      matchPackageNames: [
+        "github.com/containerd/**",
+        "github.com/docker/**",
+        "github.com/moby/**",
+        "github.com/opencontainers/**",
+      ],
+      groupName: "containers",
+      groupSlug: "containers",
+    },
+    // zarf is the load-bearing direct dependency - a bump of it changes deploy behavior -
+    // so it gets a PR of its own rather than riding in a group. The Go module and the
+    // annotated release pin (zarf.yaml, the publish workflow) describe the same version
+    // and the deploy stack vendors the packager surface, so both names move together here.
+    // Below the ungrouping rule so the gomod half keeps its group.
+    {
+      matchPackageNames: [
+        "github.com/zarf-dev/zarf",
+        "zarf-dev/zarf",
+      ],
+      groupName: "zarf",
+      groupSlug: "zarf",
     },
     // The `go` directive and the toolchain line are a decision about the language version,
     // not a dependency update, so they are not Renovate's to move.
@@ -268,7 +310,9 @@
     // effect is to re-tidy a file CI already pins.
     {
       matchManagers: ["gomod"],
-      matchPackageNames: ["github.com/colonel-byte/cluster-api-addon-provider-zarf"],
+      matchPackageNames: [
+        "github.com/colonel-byte/cluster-api-addon-provider-zarf",
+      ],
       enabled: false,
     },
   ],
