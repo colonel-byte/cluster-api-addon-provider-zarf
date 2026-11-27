@@ -209,19 +209,20 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 
 Before creating or updating a pull request description, read [`.github/pull_request_template.md`](.github/pull_request_template.md) and follow the format rules in [`.github/AGENTS.md`](.github/AGENTS.md#writing-a-pull-request-description).
 
-### Generated output goes in a pull request of its own
+### Generated output may share a pull request with the change that prompted it
 
-A change that adds or re-renders generated artifacts does not share a pull request with the code change that prompted it. Where both are needed, they are two layers of a stacked PR: the generator, template, or format change first, then the rendered output on top of it.
+**In this repository, a code change and the artifacts it re-renders belong on one branch.** Add the API field and the re-rendered CRD in the same change; change the generator and commit its output beside it. Separate commits are welcome where they make the diff easier to read, but a separate branch and a separate pull request are not required, and splitting one anyway has a cost worth avoiding: a layer whose generated half is missing does not pass its own tests. The envtest suites load this project's CRDs from `config/crd/bases`, so an API change without its render is a branch where every envtest fails against a stale schema, for no reviewer's benefit.
 
-This is about what a reviewer can see. A generator run that touches an existing template re-renders every directory already on disk - so the twenty lines that were actually written end up buried in a diff nobody can read to the end. GitHub collapses `linguist-generated` files, which helps with the file list and not at all with the review: the reasoning that needs checking is in the template and the generator, and it is the thing that disappears.
+This is a deliberate local relaxation, so it is worth saying what the general rule protects against and why it does not bite here. The rule exists where a generator writes **hundreds of lines per input** - `cluster-api-provider-cargoship`'s rendered examples are the case it was written for - because there the twenty lines somebody actually wrote end up buried in a diff nobody reads to the end, and `linguist-generated` collapsing the file list does not help with the part that needs checking. This repository's generated artifacts are small and local: a CRD schema gains the properties the Go types gained, `config/rbac/role.yaml` gains the verbs a new marker asked for, `docs/SUMMARY.md` gains a line per page. A reviewer can read the render and the reason for it together, which is better than reading them in two places.
 
 So:
 
-- **A generator or template change, and the output it renders, are separate layers.** The lower layer carries whatever was reasoned about. The upper layer carries the rendered output and nothing else.
-- **A render that is only a re-render is its own pull request.** Bumping a pin, backfilling a release line, refreshing a cached asset: there is no code to review, so there is nothing for it to be mixed with.
-- **Check the split before pushing, not after.** `git show --stat <branch> -- <generated-path>` on the lower layer should print nothing. It is easy to leave rendered output in the wrong layer by running the generator while the wrong branch is checked out, and the fix once a reviewer is reading is a rebase of everything above it.
+- **One branch, by default.** Code and its render together, in whatever commit layout reads best.
+- **A render that is only a re-render is still its own change.** Bumping a pin, backfilling a release line, refreshing a cached asset: there is no code to review, so there is nothing for it to be mixed with, and the commit message should say the render is all it is.
+- **Re-render before committing, not after review.** `git status` after the generate target should be empty; a stale render is the failure this relaxation makes more likely, because nothing downstream is waiting to catch it.
+- **If a render ever does swamp a change here** - a new generator writing many files per input, say - split it then, for that change, and say why in the pull request. The threshold is whether a reviewer can still find the reasoning, not which directory the file sits in.
 
-The one thing that does belong with the code is a *fixture* a test reads - those live under `test/`, and the rule does not reach them.
+A *fixture* a test reads was never covered by the general rule either; those live under `test/`.
 
 ### Naming the branches in a stacked PR
 
