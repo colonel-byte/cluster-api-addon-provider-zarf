@@ -283,7 +283,7 @@ func (r *ZarfPackageProxyReconciler) releaseToProxies(ctx context.Context, obj c
 		return requests
 	}
 	for _, proxy := range proxies.Items {
-		if proxy.Name != own.Name && slices.Contains(proxy.Spec.DependsOn, own.Name) {
+		if proxy.Name != own.Name && slices.Contains(proxyDependencies(&proxy), own.Name) {
 			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
 				Namespace: proxy.Namespace,
 				Name:      proxy.Name,

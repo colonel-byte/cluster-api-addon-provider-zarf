@@ -32,6 +32,16 @@ import (
 )
 
 // newTestProxy creates a proxy selecting tier=edge clusters.
+// proxyRefs turns names into ZarfPackageProxy dependency references, which is what every
+// dependency in this suite is - the kind field exists for bundles, which do not exist yet.
+func proxyRefs(names ...string) []addonsv1alpha1.DependencyReference {
+	refs := make([]addonsv1alpha1.DependencyReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, addonsv1alpha1.DependencyReference{Name: name})
+	}
+	return refs
+}
+
 func newTestProxy(t *testing.T, c client.Client, ns, name string, dependsOn []string) {
 	t.Helper()
 	proxy := &addonsv1alpha1.ZarfPackageProxy{
@@ -42,7 +52,7 @@ func newTestProxy(t *testing.T, c client.Client, ns, name string, dependsOn []st
 				Repository: "registry.internal/zarf/" + name,
 				Version:    "1.0.0",
 			},
-			DependsOn: dependsOn,
+			DependsOn: proxyRefs(dependsOn...),
 		},
 	}
 	if err := c.Create(t.Context(), proxy); err != nil {

@@ -143,7 +143,7 @@ spec:
     matchLabels:
       zarf: enabled
   dependsOn:
-    - zarf-init
+    - name: zarf-init
   package:
     repository: registry.internal/packages/local-path
     version: "0.0.37"

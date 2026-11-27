@@ -228,7 +228,7 @@ func TestDependsOnVerdicts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		proxy := testProxy(tc.name, "default")
-		proxy.Spec.DependsOn = []string{tc.dependsOn}
+		proxy.Spec.DependsOn = []addonsv1alpha1.DependencyReference{{Name: tc.dependsOn}}
 		createProxy(t, c, proxy)
 	}
 	for _, tc := range cases {

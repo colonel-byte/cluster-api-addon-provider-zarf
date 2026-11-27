@@ -76,8 +76,8 @@ spec:
 
   # Explicit dependency ordering across ZarfPackageProxies
   dependsOn:
-    - zarf-init
-    - csi-ceph
+    - name: zarf-init
+    - name: csi-ceph
 
   # Zarf initialization parameters if target cluster is not initialized
   init:
@@ -271,7 +271,7 @@ Foundational platform services require strict execution ordering. For example, w
 ```
 
 ### A. Declarative Ordering via `spec.dependsOn`
-A `ZarfPackageProxy` can declare dependencies on other `ZarfPackageProxy` resources:
+A `ZarfPackageProxy` can declare dependencies on other objects in its namespace:
 ```yaml
 apiVersion: addons.colonel-byte.dev/v1alpha1
 kind: ZarfPackageProxy
@@ -280,9 +280,12 @@ metadata:
   namespace: fleet-default
 spec:
   dependsOn:
-    - zarf-init
-    - csi-ceph
+    - name: zarf-init
+    - kind: ZarfPackageProxy
+      name: csi-ceph
 ```
+
+Each entry is a `{kind, name}` reference rather than a bare name. `kind` defaults to `ZarfPackageProxy`, which is the only kind the enum admits today, so the short form above is the ordinary one. It is typed because ordered bundles will be a second kind a package can wait for, and a bare string cannot say which of two kinds a name means; taking the break while the API is `v1alpha1` is cheaper than a second field later. A dependency carries no namespace - the graph resolves in the referring object's own namespace, because one that spans namespaces is one no single author can read.
 
 ### B. Dependency Resolution & Reconcile Gating
 For each workload cluster, every entry in `dependsOn` is resolved to a verdict. The rule that prevents deadlock: **a dependency that cannot be satisfied on this cluster is a named error condition, never a silent wait.** Waiting is reserved for the one case where progress is actually coming.

@@ -148,10 +148,29 @@ spec:
                 type: string
               dependsOn:
                 description: |-
-                  dependsOn names other ZarfPackageProxies in the same namespace whose releases must be
-                  Deployed (or Completed, for ApplyOnce) on a cluster before this package deploys there.
+                  dependsOn names other objects in the same namespace whose releases must be Deployed (or
+                  Completed, for ApplyOnce) on a cluster before this package deploys there.
                 items:
-                  type: string
+                  description: |-
+                    DependencyReference names one object this package waits for. Always in the referring object's
+                    own namespace: unlike the secret references, a dependency carries no namespace field, because
+                    a dependency graph spanning namespaces is one no single author can read.
+                  properties:
+                    kind:
+                      default: ZarfPackageProxy
+                      description: kind of the referenced object. Empty means ZarfPackageProxy.
+                      enum:
+                      - ZarfPackageProxy
+                      type: string
+                    name:
+                      description: name of the referenced object, in this object's
+                        namespace.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
                 type: array
               deployJob:
                 description: deployJob customizes the Kubernetes Job each deploy runs

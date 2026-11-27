@@ -29,13 +29,26 @@ import (
 	addonsv1alpha1 "github.com/colonel-byte/cluster-api-addon-provider-zarf/api/v1alpha1"
 )
 
+// proxyDependencies is the names of the ZarfPackageProxies a proxy waits for, which is every
+// dependsOn entry of that kind and no other. One helper so the cycle walk, the per-cluster
+// verdict and the watch fan-out cannot disagree about what an entry means.
+func proxyDependencies(proxy *addonsv1alpha1.ZarfPackageProxy) []string {
+	names := make([]string, 0, len(proxy.Spec.DependsOn))
+	for _, entry := range proxy.Spec.DependsOn {
+		if entry.ProxyKind() {
+			names = append(names, entry.Name)
+		}
+	}
+	return names
+}
+
 // inDependencyCycle reports whether the proxy is a member of a dependsOn cycle, by following
 // dependsOn edges through the namespace's proxies (informer cache, no API round trips - §5C) and
 // asking whether the proxy can reach itself. Missing proxies are dead ends here, not errors; the
 // per-cluster verdict (§5B) is what names them.
 func (r *ZarfPackageProxyReconciler) inDependencyCycle(ctx context.Context, proxy *addonsv1alpha1.ZarfPackageProxy) (bool, error) {
 	visited := map[string]bool{}
-	frontier := append([]string{}, proxy.Spec.DependsOn...)
+	frontier := proxyDependencies(proxy)
 	for len(frontier) > 0 {
 		name := frontier[len(frontier)-1]
 		frontier = frontier[:len(frontier)-1]
@@ -55,7 +68,7 @@ func (r *ZarfPackageProxyReconciler) inDependencyCycle(ctx context.Context, prox
 		if err != nil {
 			return false, err
 		}
-		frontier = append(frontier, dep.Spec.DependsOn...)
+		frontier = append(frontier, proxyDependencies(dep)...)
 	}
 	return false, nil
 }
@@ -81,7 +94,14 @@ func (r *ZarfPackageProxyReconciler) dependencyVerdict(ctx context.Context, prox
 		}
 	}
 
-	for _, name := range proxy.Spec.DependsOn {
+	for _, entry := range proxy.Spec.DependsOn {
+		if !entry.ProxyKind() {
+			// Unreachable while ZarfPackageProxy is the only kind the enum admits, and a
+			// refusal rather than a skip when a second kind lands before its resolution does.
+			return failed(addonsv1alpha1.ReasonDependencyNotFound,
+				fmt.Sprintf("dependency %q is of kind %s, which this controller cannot resolve", entry.Name, entry.Kind)), nil
+		}
+		name := entry.Name
 		dep := &addonsv1alpha1.ZarfPackageProxy{}
 		err := r.Get(ctx, types.NamespacedName{Namespace: proxy.Namespace, Name: name}, dep)
 		if apierrors.IsNotFound(err) {
