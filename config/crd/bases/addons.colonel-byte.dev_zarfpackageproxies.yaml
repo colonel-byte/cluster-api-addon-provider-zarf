@@ -3566,6 +3566,10 @@ spec:
                 to Reconcile re-runs a history stage
               rule: '!has(oldSelf.stages) || !has(self.stages) || self.stages.all(s,
                 oldSelf.stages.all(o, o.name != s.name || o.strategy == s.strategy))'
+            - message: 'a staged proxy requires deletionPolicy: Retain - removal of
+                a bootstrap sequence must not be something anybody gets by deleting
+                an object'
+              rule: '!has(self.stages) || self.deletionPolicy == ''Retain'''
           status:
             description: status is the observed state of ZarfPackageProxy.
             properties:

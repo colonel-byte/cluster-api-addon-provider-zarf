@@ -49,6 +49,11 @@ const (
 	// rejected rather than drifting.
 	driftPackage = "e2e-drift"
 
+	// stagePackageA and stagePackageB are the staged-sequence fixtures (#379); see
+	// stagedFixtureDefinition for why they are v1alpha1 and variable-marked.
+	stagePackageA = "e2e-stage-a"
+	stagePackageB = "e2e-stage-b"
+
 	// fixtureVersion is the version every fixture declares, and driftAltVersion the second one
 	// the drift pair needs.
 	fixtureVersion  = "0.1.0"
@@ -150,6 +155,43 @@ data:
 	return zarfYAML, configMap
 }
 
+// stagedFixtureDefinition renders the staged-sequence fixture (#379): a v1alpha1 package -
+// v1alpha1 because deploy-time variables (spec.set) are what let one component produce
+// different content per stage - holding one ConfigMap, named after the package, whose marker
+// value is the MARKER variable. Every stage that deploys the package upgrades the SAME Helm
+// release with different set values, which is the superseded-values hazard the staged design's
+// ApplyOnce criterion is defined by, with no storage and no Ceph: re-running a seed stage would
+// revert the marker a later stage set.
+func stagedFixtureDefinition(name, version string) (zarfYAML, configMap string) {
+	zarfYAML = fmt.Sprintf(`kind: ZarfPackageConfig
+metadata:
+  name: %s
+  version: %s
+  description: CAAPZ e2e staged fixture - one variable-marked ConfigMap, one Helm release
+variables:
+  - name: MARKER
+    default: unset
+components:
+  - name: marker
+    required: true
+    manifests:
+      - name: marker
+        namespace: default
+        files:
+          - configmap.yaml
+`, name, version)
+
+	configMap = fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: default
+data:
+  marker: "###ZARF_VAR_MARKER###"
+`, name)
+	return zarfYAML, configMap
+}
+
 // seedFixturePackages builds every fixture package and pushes it to the local registry, signed
 // with the fixture key. Unconditionally rebuilt rather than probed for: create is cheap for a
 // manifest-only package, and a staleness probe gets the answer wrong exactly when a fixture
@@ -181,17 +223,29 @@ func seedFixturePackages() error {
 			return fmt.Errorf("creating fixture %s:%s: %w", fixture.name, fixture.version, err)
 		}
 	}
+	for _, name := range []string{stagePackageA, stagePackageB} {
+		zarfYAML, configMap := stagedFixtureDefinition(name, fixtureVersion)
+		if err := pushFixturePackage(name, fixtureVersion, zarfYAML, configMap); err != nil {
+			return fmt.Errorf("creating staged fixture %s:%s: %w", name, fixtureVersion, err)
+		}
+	}
 	return nil
 }
 
 // createFixturePackage writes the definition into the workdir and pushes the built, signed
 // package to the local registry.
 func createFixturePackage(name, version, marker string) error {
+	zarfYAML, configMap := fixtureDefinition(name, version, marker)
+	return pushFixturePackage(name, version, zarfYAML, configMap)
+}
+
+// pushFixturePackage writes one definition pair into the workdir and pushes the built, signed
+// package to the local registry.
+func pushFixturePackage(name, version, zarfYAML, configMap string) error {
 	dir := filepath.Join(workDir, "fixtures", name+"-"+version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	zarfYAML, configMap := fixtureDefinition(name, version, marker)
 	if err := os.WriteFile(filepath.Join(dir, "zarf.yaml"), []byte(zarfYAML), 0o644); err != nil { //nolint:gosec // fixture
 		return err
 	}

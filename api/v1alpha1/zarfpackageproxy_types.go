@@ -565,6 +565,7 @@ type DeployJobOptions struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.init) || !has(self.init.packageRef) || (has(self.packages) && self.init.packageRef in self.packages)",message="init.packageRef must name a key in spec.packages"
 // +kubebuilder:validation:XValidation:rule="!has(self.init) || !has(self.init.set) || !has(self.init.packageRef) || (has(self.packages) && self.init.packageRef in self.packages && has(self.packages[self.init.packageRef].api) && self.packages[self.init.packageRef].api == 'v1alpha1')",message="init.set requires the referenced package's api: v1alpha1; v1beta1 init packages take init.values"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.stages) || !has(self.stages) || self.stages.all(s, oldSelf.stages.all(o, o.name != s.name || o.strategy == s.strategy))",message="a stage's strategy is immutable once declared - flipping ApplyOnce to Reconcile re-runs a history stage"
+// +kubebuilder:validation:XValidation:rule="!has(self.stages) || self.deletionPolicy == 'Retain'",message="a staged proxy requires deletionPolicy: Retain - removal of a bootstrap sequence must not be something anybody gets by deleting an object"
 type ZarfPackageProxySpec struct {
 	// clusterSelector selects the CAPI Clusters this package deploys to, by label. Only
 	// Clusters in the proxy's own namespace match unless the controller was started with
