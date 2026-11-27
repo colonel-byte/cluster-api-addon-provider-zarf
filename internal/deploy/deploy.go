@@ -129,6 +129,13 @@ func Options(spec deployspec.Spec, cachePath string) (packager.LoadOptions, pack
 			PlainHTTP:             spec.PlainHTTP,
 			InsecureSkipTLSVerify: spec.InsecureSkipTLSVerify,
 		},
+		// Empty values are safe to pass through: upstream applies a registry mode only when it
+		// is non-empty, and preserves the cluster's existing state otherwise.
+		RegistryInfo: state.RegistryInfo{
+			RegistryMode: state.RegistryMode(spec.RegistryMode),
+			Port:         int(spec.RegistryPort),
+		},
+		InjectorImage: spec.InjectorImage,
 	}
 	if spec.Values != "" {
 		if err := yaml.Unmarshal([]byte(spec.Values), &deployOpts.Values); err != nil {

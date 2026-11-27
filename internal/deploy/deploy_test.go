@@ -139,6 +139,39 @@ func TestOptions(t *testing.T) {
 	}
 }
 
+// TestOptionsInitSettings maps the init-only fields onto DeployOptions, and proves the empty
+// case stays empty - upstream applies a registry mode only when it is non-empty, so a document
+// without init settings must produce zero-valued RegistryInfo.
+func TestOptionsInitSettings(t *testing.T) {
+	spec := deployspec.Spec{
+		Package:       "registry.local/init@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		RegistryMode:  "proxy",
+		RegistryPort:  5000,
+		InjectorImage: "registry.local/injector:v1",
+	}
+	_, deployOpts, err := Options(spec, "/cache")
+	if err != nil {
+		t.Fatalf("Options: %v", err)
+	}
+	if string(deployOpts.RegistryInfo.RegistryMode) != "proxy" || deployOpts.RegistryInfo.Port != 5000 {
+		t.Errorf("registry info = %+v", deployOpts.RegistryInfo)
+	}
+	if deployOpts.InjectorImage != "registry.local/injector:v1" {
+		t.Errorf("injector image = %q", deployOpts.InjectorImage)
+	}
+
+	plain := deployspec.Spec{
+		Package: spec.Package,
+	}
+	_, plainOpts, err := Options(plain, "/cache")
+	if err != nil {
+		t.Fatalf("Options: %v", err)
+	}
+	if plainOpts.RegistryInfo.RegistryMode != "" || plainOpts.RegistryInfo.Port != 0 || plainOpts.InjectorImage != "" {
+		t.Errorf("init settings leaked into a plain deploy: %+v", plainOpts.RegistryInfo)
+	}
+}
+
 // TestOptionsComponentFilter is the behaviour the filter exists for: an optional component -
 // the Zarf init package's k3s, which reprovisions the node - stays out of a deploy unless it is
 // named, and required components come along either way. Before this filter was applied

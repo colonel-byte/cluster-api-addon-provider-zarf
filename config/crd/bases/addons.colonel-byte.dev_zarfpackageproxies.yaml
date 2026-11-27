@@ -2800,6 +2800,13 @@ spec:
                       - name
                       type: object
                     type: array
+                  injectorImage:
+                    description: |-
+                      injectorImage is the container image Zarf's injector runs as during initialization.
+                      Proxy mode requires it on first init, when no registry exists to pull from, so it must
+                      be an image the node already holds - a per-fleet value, typically something the node
+                      image ships. A wrong value fails at init with an image-pull symptom, not a config error.
+                    type: string
                   package:
                     description: |-
                       package is the init package to deploy - resolved, digest-pinned, and signature-verified
@@ -2978,6 +2985,33 @@ spec:
                         must be unset
                       rule: '!has(self.fromZarfState) || !self.fromZarfState || (!has(self.pullSecretRef)
                         && !has(self.caBundleSecretRef) && !has(self.caBundleConfigMapRef))'
+                  registry:
+                    description: |-
+                      registry shapes the registry half of the zarf-state initialization creates. The settings
+                      apply to every ZarfInitConfig this proxy deploys - the auto-init package here, or a
+                      spec.package that itself resolves to one - so an init block carrying only settings, with
+                      no package or autoInit, is valid for proxies that init through spec.package.
+                    properties:
+                      mode:
+                        description: |-
+                          mode is how the registry is served: nodeport (Zarf's default) or proxy. Immutable once
+                          set, including unsetting it - switching a live cluster's mode re-addresses the registry
+                          under every release that templated the old address, so this provider refuses to drive
+                          one. A cluster whose existing zarf-state disagrees holds with condition
+                          InitSettingsSuperseded instead of being converged onto the declared mode.
+                        enum:
+                        - nodeport
+                        - proxy
+                        type: string
+                      port:
+                        description: |-
+                          port is the registry's port: a Kubernetes NodePort in nodeport mode, a host port in
+                          proxy mode. Zero takes upstream's per-mode default.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    type: object
                   set:
                     additionalProperties:
                       type: string
@@ -3001,6 +3035,10 @@ spec:
                     init packages take init.values'
                   rule: '!has(self.set) || (has(self.package) && has(self.package.api)
                     && self.package.api == ''v1alpha1'')'
+                - message: 'init.registry.mode: proxy requires init.injectorImage
+                    - first init has no registry to pull an injector from'
+                  rule: '!has(self.registry) || !has(self.registry.mode) || self.registry.mode
+                    != ''proxy'' || has(self.injectorImage)'
               package:
                 description: package is the package source and verification settings.
                 properties:
@@ -3205,6 +3243,12 @@ spec:
                 take spec.values'
               rule: '!has(self.set) || (has(self.package.api) && self.package.api
                 == ''v1alpha1'')'
+            - message: init.registry.mode is immutable once set, including unsetting
+                it - switching a live cluster's registry mode re-addresses the registry
+                under deployed releases
+              rule: '!has(oldSelf.init) || !has(oldSelf.init.registry) || !has(oldSelf.init.registry.mode)
+                || (has(self.init) && has(self.init.registry) && has(self.init.registry.mode)
+                && self.init.registry.mode == oldSelf.init.registry.mode)'
           status:
             description: status is the observed state of ZarfPackageProxy.
             properties:
