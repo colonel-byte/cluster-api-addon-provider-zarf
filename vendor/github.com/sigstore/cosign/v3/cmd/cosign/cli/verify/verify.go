@@ -35,6 +35,7 @@ import (
 	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
 	"github.com/sigstore/cosign/v3/pkg/oci/static"
 	sigs "github.com/sigstore/cosign/v3/pkg/signature"
+	"github.com/sigstore/cosign/v3/pkg/types"
 	"github.com/sigstore/protobuf-specs/gen/pb-go/dsse"
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
 	"github.com/sigstore/sigstore/pkg/signature/payload"
@@ -78,7 +79,6 @@ type VerifyCommand struct {
 	MaxWorkers                   int
 	ExperimentalOCI11            bool
 	NewBundleFormat              bool
-	AllowCertificateChain        bool
 }
 
 // Exec runs the verification command
@@ -96,14 +96,18 @@ func (c *VerifyCommand) Exec(ctx context.Context, images []string) (err error) {
 		return flag.ErrHelp
 	}
 
-	// always default to sha256 if the algorithm hasn't been explicitly set
-	if c.HashAlgorithm == 0 {
-		c.HashAlgorithm = crypto.SHA256
-	}
+	// c.HashAlgorithm may be 0 (unset) here, in which case LoadVerifierFromKeyOrCert
+	// picks the digest algorithm that matches the provided key, rather than assuming
+	// SHA256 for keys that require a different algorithm (e.g. P-521 ECDSA keys).
 
 	// key and cert identity are mutually exclusive
 	if options.NOf(c.KeyRef, c.CertIdentity, c.CertIdentityRegexp) > 1 {
 		return &options.KeyAndIdentityParseError{}
+	}
+
+	// key and security key are mutually exclusive
+	if options.NOf(c.KeyRef, c.Sk) > 1 {
+		return &options.PubKeyParseError{}
 	}
 
 	var identities []cosign.Identity
@@ -142,7 +146,7 @@ func (c *VerifyCommand) Exec(ctx context.Context, images []string) (err error) {
 		MaxWorkers:                   c.MaxWorkers,
 		ExperimentalOCI11:            c.ExperimentalOCI11,
 		UseSignedTimestamps:          c.TSACertChainPath != "" || c.UseSignedTimestamps,
-		NewBundleFormat:              c.NewBundleFormat,
+		NewBundleFormat:              c.NewBundleFormat || c.CommonVerifyOptions.NewBundleFormat,
 		AllowCertificateChain:        c.AllowCertificateChain,
 	}
 	vOfflineKey := verifyOfflineWithKey(c.KeyRef, c.CertRef, c.Sk, co)
@@ -156,7 +160,7 @@ func (c *VerifyCommand) Exec(ctx context.Context, images []string) (err error) {
 		co.NewBundleFormat = hasBundles
 	} else {
 		ref, err := name.ParseReference(images[0], c.NameOptions...)
-		if err == nil && c.NewBundleFormat {
+		if err == nil && (c.NewBundleFormat || c.CommonVerifyOptions.NewBundleFormat) {
 			newBundles, _, err := cosign.GetBundles(ctx, ref, co.RegistryClientOpts, c.NameOptions...)
 			if len(newBundles) == 0 || err != nil {
 				co.NewBundleFormat = false
@@ -222,6 +226,15 @@ func (c *VerifyCommand) Exec(ctx context.Context, images []string) (err error) {
 				if err != nil {
 					return err
 				}
+
+				verifiedOutput, err := transformOutput(verified, img)
+				if err != nil {
+					return err
+				}
+				if len(verifiedOutput) == 0 {
+					return fmt.Errorf("no matching signatures exist")
+				}
+				verified = verifiedOutput
 			} else {
 				verified, bundleVerified, err = cosign.VerifyLocalImageSignatures(ctx, img, co)
 				if err != nil {
@@ -244,9 +257,13 @@ func (c *VerifyCommand) Exec(ctx context.Context, images []string) (err error) {
 				}
 
 				verifiedOutput, err := transformOutput(verified, ref.Name())
-				if err == nil {
-					verified = verifiedOutput
+				if err != nil {
+					return err
 				}
+				if len(verifiedOutput) == 0 {
+					return fmt.Errorf("no matching signatures exist")
+				}
+				verified = verifiedOutput
 			} else {
 				ref, err = sign.GetAttachedImageRef(ref, c.Attachment, ociremoteOpts...)
 				if err != nil {
@@ -271,23 +288,26 @@ func transformOutput(verified []oci.Signature, name string) (verifiedOutput []oc
 	for _, v := range verified {
 		dssePayload, err := v.Payload()
 		if err != nil {
-			return nil, err
+			continue
 		}
 		var dsseEnvelope dsse.Envelope
 		err = json.Unmarshal(dssePayload, &dsseEnvelope)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		if dsseEnvelope.PayloadType != in_toto.PayloadType {
-			return nil, fmt.Errorf("unable to understand payload type %s", dsseEnvelope.PayloadType)
+			continue
 		}
 		intotoStatement := &attestation.Statement{}
 		err = intotoStatement.UnmarshalJSON(dsseEnvelope.Payload)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		if len(intotoStatement.Subject) < 1 || len(intotoStatement.Subject[0].Digest) < 1 {
-			return nil, fmt.Errorf("no intoto subject or digest found")
+			continue
+		}
+		if intotoStatement.PredicateType != types.CosignSignPredicateType {
+			continue
 		}
 
 		var digest string
