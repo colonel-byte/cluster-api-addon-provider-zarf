@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-f829326a.js";
+            window.path_to_searchindex_js = "../searchindex-523cde56.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-67056014.js"></script>
@@ -192,7 +192,8 @@
 </ul>
 <p>The cost is that the workflow is now a thing to maintain, and that the Renovate version is pinned - the <code>renovate-version</code> input in the workflow, which Renovate bumps itself via its datasource comment - rather than tracking the hosted service.</p>
 <h2 id="the-run-is-cached-which-is-what-makes-it-hourly"><a class="header" href="#the-run-is-cached-which-is-what-makes-it-hourly">The run is cached, which is what makes it hourly</a></h2>
-<p>Renovate resolves every dependency from the registry on each run, and on a 540-module vendored tree that is most of the wall clock - an uncached run takes upwards of twenty minutes. The workflow restores a <code>RENOVATE_REPOSITORY_CACHE</code> of resolved versions and changelogs before the Renovate step, which is the only reason an hourly cron is affordable rather than a way to spend the Actions budget re-asking the module proxy the same questions.</p>
+<p>Renovate resolves every dependency from the registry on each run, and on a 540-module vendored tree that is most of the wall clock - an uncached run takes upwards of twenty minutes. The workflow restores Renovate’s package cache - resolved versions and changelogs - before the Renovate step, which is the only reason an hourly cron is affordable rather than a way to spend the Actions budget re-asking the module proxy the same questions.</p>
+<p>The other cache Renovate keeps, the repository cache of branch SHAs and pull request state, is deliberately disabled (<code>RENOVATE_REPOSITORY_CACHE: disabled</code> in the workflow). Restored across runs it goes stale the moment a Renovate pull request merges: the next run sees the merge happen “during” the run, aborts with “Repository has changed during renovation”, and - because an aborted run still saves its cache entry - every following run inherits the same stale state and aborts the same way. Re-reading branch and pull request state from the API each run is a handful of list calls, not the twenty minutes the package cache saves.</p>
 <p>Two things follow. The cache key carries <code>github.run_id</code>, so every run writes a new entry and <code>restore-keys</code> picks up the newest previous one; a fixed key would be written once and then never updated. And the <code>renovate</code> concurrency group holds <code>cancel-in-progress: false</code>, so a run that outlasts its hour queues the next one instead of overlapping it - the schedule degrades to “as often as a run takes” rather than breaking.</p>
 <p>How often this fires is not how many pull requests arrive. That ceiling is <code>prHourlyLimit</code> and <code>prConcurrentLimit</code> in <a href="https://github.com/colonel-byte/cluster-api-addon-provider-zarf/blob/main/.github/renovate.json5"><code>.github/renovate.json5</code></a>; the cron only decides how quickly a new release is noticed.</p>
 <h2 id="what-it-needs"><a class="header" href="#what-it-needs">What it needs</a></h2>
