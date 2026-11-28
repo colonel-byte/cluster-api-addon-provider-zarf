@@ -879,6 +879,12 @@ func NumberChecked(s string) (Number, error) {
 	return Number(s), nil
 }
 
+// NumberInRange reports whether s is within the magnitude bound enforced by
+// NumberChecked. Invalid numbers are reported as in range.
+func NumberInRange(s string) bool {
+	return validateNumber(s) != errNumberTooBig
+}
+
 func checkExponent(s string, i int) error {
 	if !smallExponent(s, i) {
 		if err := validateNumber(s); err != nil {
@@ -1821,7 +1827,7 @@ func (s *set) Copy() Set {
 		i := 0
 		for hash, elem := range s.elems {
 			buf[i] = *elem
-			deepCopyTermValue(&buf[i])
+			buf[i].Value = CopyValue(buf[i].Value)
 			cpy.elems[hash] = &buf[i]
 			cpy.keys[i] = &buf[i]
 			i++
@@ -2128,7 +2134,7 @@ func ObjectTerm(o ...[2]*Term) *Term {
 }
 
 func LazyObject(blob map[string]any) Object {
-	return &lazyObj{native: blob, cache: map[string]Value{}}
+	return &lazyObj{native: blob}
 }
 
 type lazyObj struct {
@@ -2143,7 +2149,7 @@ func (lob *lazyObj) force() Object {
 		// NOTE(jf): a possible performance improvement here would be to check how many
 		// entries have been realized to AST in the cache, and if some threshold compared to the
 		// total number of keys is exceeded, realize the remaining entries and set l.strict to l.cache.
-		lob.cache = map[string]Value{} // We don't need the cache anymore; drop it to free up memory.
+		lob.cache = nil // We don't need the cache anymore; drop it to free up memory.
 	}
 	return lob.strict
 }
@@ -2228,6 +2234,9 @@ func (lob *lazyObj) Get(k *Term) *Term {
 			default:
 				converted = MustInterfaceToValue(val)
 			}
+			if lob.cache == nil {
+				lob.cache = map[string]Value{}
+			}
 			lob.cache[string(s)] = converted
 			return NewTerm(converted)
 		}
@@ -2283,6 +2292,11 @@ func (lob *lazyObj) Find(path Ref) (Value, error) {
 			return v.Find(path[1:])
 		}
 
+		// don't convert what doesn't exist
+		if _, found, ok := lob.nativeAt(path); ok && !found {
+			return nil, errFindNotFound
+		}
+
 		if v, ok := lob.native[string(p0)]; ok {
 			var converted Value
 			switch v := v.(type) {
@@ -2291,11 +2305,65 @@ func (lob *lazyObj) Find(path Ref) (Value, error) {
 			default:
 				converted = MustInterfaceToValue(v)
 			}
+			if lob.cache == nil {
+				lob.cache = map[string]Value{}
+			}
 			lob.cache[string(p0)] = converted
 			return converted.Find(path[1:])
 		}
 	}
 	return nil, errFindNotFound
+}
+
+// nativeAt returns what lob holds at path without converting any of it, for a
+// caller that only asks what is there. ok is false where the path runs through
+// something already converted, or other than an object, which Find answers for.
+func (lob *lazyObj) nativeAt(path Ref) (v any, found, ok bool) {
+	cur := lob
+	for j, t := range path {
+		if cur.strict != nil {
+			return nil, false, false
+		}
+		s, isStr := t.Value.(String)
+		if !isStr {
+			return nil, false, true
+		}
+		if conv, cached := cur.cache[string(s)]; cached {
+			sub, isLazy := conv.(*lazyObj)
+			if !isLazy {
+				return nil, false, false
+			}
+			cur = sub
+			continue
+		}
+		nv, exists := cur.native[string(s)]
+		if !exists {
+			return nil, false, true
+		}
+		return nativeAt(nv, path[j+1:])
+	}
+	if cur.strict != nil {
+		return nil, false, false
+	}
+	return cur.native, true, true
+}
+
+func nativeAt(v any, path Ref) (any, bool, bool) {
+	for _, t := range path {
+		m, isMap := v.(map[string]any)
+		if !isMap {
+			return nil, false, false
+		}
+		s, isStr := t.Value.(String)
+		if !isStr {
+			return nil, false, true
+		}
+		var exists bool
+		if v, exists = m[string(s)]; !exists {
+			return nil, false, true
+		}
+	}
+	return v, true, true
 }
 
 type object struct {
@@ -2490,9 +2558,9 @@ func (obj *object) Copy() Object {
 
 	for i, srcElem := range obj.keys {
 		keys[i] = *srcElem.key
-		deepCopyTermValue(&keys[i])
+		keys[i].Value = CopyValue(keys[i].Value)
 		vals[i] = *srcElem.value
-		deepCopyTermValue(&vals[i])
+		vals[i].Value = CopyValue(vals[i].Value)
 
 		elems[i] = objectElem{key: &keys[i], value: &vals[i]}
 		cpy.keys[i] = &elems[i]
@@ -2523,11 +2591,11 @@ func (obj *object) Diff(other Object) Object {
 // as the last two terms in the triplet (respectively).
 func (obj *object) Intersect(other Object) [][3]*Term {
 	r := [][3]*Term{}
-	obj.Foreach(func(k, v *Term) {
-		if v2 := other.Get(k); v2 != nil {
-			r = append(r, [3]*Term{k, v, v2})
+	for _, node := range obj.sortedKeys() {
+		if v2 := other.Get(node.key); v2 != nil {
+			r = append(r, [3]*Term{node.key, node.value, v2})
 		}
-	})
+	}
 	return r
 }
 
@@ -2641,12 +2709,17 @@ func (obj *object) MergeWith(other Object, conflictResolver func(v1, v2 *Term) (
 		return nil, false
 	}
 
+	// Forcing concrete type here avoids function
+	// literal escaping to heap in Foreach call below.
+	otherImp := objectFromObject(other)
+
 	// Copy in any values from other for keys that don't exist in obj
-	other.Foreach(func(k, v *Term) {
+	otherImp.Foreach(func(k, v *Term) {
 		if v2 := obj.Get(k); v2 == nil {
 			result.insert(k, v, false)
 		}
 	})
+
 	return result, true
 }
 
@@ -2694,8 +2767,8 @@ func (obj *object) insert(k, v *Term, resetSortGuard bool) {
 			curr.value = v
 			obj.elems[hash] = curr
 			obj.hash = 0
-			for ehash := range obj.elems {
-				obj.hash += ehash + obj.elems[ehash].value.Hash()
+			for ehash, elem := range obj.elems {
+				obj.hash += ehash + elem.value.Hash()
 			}
 
 			return
@@ -2751,11 +2824,11 @@ func filterObject(o Value, filter Value) (Value, error) {
 			}
 		}
 		return NewArray(values...), nil
-	case Set:
+	case *set:
 		terms := make([]*Term, 0, v.Len())
 		for _, t := range v.Slice() {
-			if filteredObj.Get(t) != nil {
-				filteredValue, err := filterObject(t.Value, filteredObj.Get(t).Value)
+			if vt := filteredObj.Get(t); vt != nil {
+				filteredValue, err := filterObject(t.Value, vt.Value)
 				if err != nil {
 					return nil, err
 				}
@@ -2804,11 +2877,7 @@ type objectKeysIterator struct {
 }
 
 func newobjectKeysIterator(o *object) ObjectKeysIterator {
-	return &objectKeysIterator{
-		obj:     o,
-		numKeys: o.Len(),
-		index:   0,
-	}
+	return &objectKeysIterator{obj: o, numKeys: o.Len()}
 }
 
 func (oki *objectKeysIterator) Next() (*Term, bool) {
@@ -2819,6 +2888,10 @@ func (oki *objectKeysIterator) Next() (*Term, bool) {
 	return oki.obj.sortedKeys()[oki.index-1].key, true
 }
 
+func (oki *objectKeysIterator) Reset() {
+	oki.obj, oki.numKeys, oki.index = nil, 0, 0
+}
+
 // ArrayComprehension represents an array comprehension as defined in the language.
 type ArrayComprehension struct {
 	Term *Term `json:"term"`
@@ -2827,12 +2900,10 @@ type ArrayComprehension struct {
 
 // ArrayComprehensionTerm creates a new Term with an ArrayComprehension value.
 func ArrayComprehensionTerm(term *Term, body Body) *Term {
-	return &Term{
-		Value: &ArrayComprehension{
-			Term: term,
-			Body: body,
-		},
-	}
+	return &Term{Value: &ArrayComprehension{
+		Term: term,
+		Body: body,
+	}}
 }
 
 // Copy returns a deep copy of ac.
@@ -3082,34 +3153,6 @@ func (c Call) String() string {
 	return util.ByteSliceToString(buf)
 }
 
-// deepCopyTermValue deep copies the Value of term in-place.
-// Scalar values (Null, Boolean, Number, String, Var) are already
-// copied by struct assignment, so only container types need work.
-func deepCopyTermValue(term *Term) {
-	switch v := term.Value.(type) {
-	case Null, Boolean, Number, String, Var:
-		// Already copied by *term = *src struct assignment.
-	case Ref:
-		term.Value = v.Copy()
-	case *Array:
-		term.Value = v.Copy()
-	case Set:
-		term.Value = v.Copy()
-	case *object:
-		term.Value = v.Copy()
-	case *ArrayComprehension:
-		term.Value = v.Copy()
-	case *ObjectComprehension:
-		term.Value = v.Copy()
-	case *SetComprehension:
-		term.Value = v.Copy()
-	case *TemplateString:
-		term.Value = v.Copy()
-	case Call:
-		term.Value = v.Copy()
-	}
-}
-
 func termSliceCopy(a []*Term) []*Term {
 	n := len(a)
 	if n == 0 {
@@ -3119,8 +3162,8 @@ func termSliceCopy(a []*Term) []*Term {
 	// instead of N+1) using the same pattern as util.NewPtrSlice.
 	cpy := util.NewPtrSlice[Term](n)
 	for i := range n {
-		*cpy[i] = *a[i]           // copy Term struct (Value + Location)
-		deepCopyTermValue(cpy[i]) // deep copy container Values in-place
+		*cpy[i] = *a[i]                        // copy Term struct (Value + Location)
+		cpy[i].Value = CopyValue(cpy[i].Value) // deep copy container Values in-place
 	}
 	return cpy
 }
@@ -3227,6 +3270,23 @@ func unmarshalExpr(expr *Expr, v map[string]any) error {
 			}
 			expr.Terms = o
 		default:
+			// Every and SomeDecl are written without a type field.
+			if _, ok := ts["domain"]; ok {
+				q := &Every{}
+				if err := unmarshalEvery(q, ts); err != nil {
+					return err
+				}
+				expr.Terms = q
+				break
+			}
+			if _, ok := ts["symbols"]; ok {
+				d := &SomeDecl{}
+				if err := unmarshalSomeDecl(d, ts); err != nil {
+					return err
+				}
+				expr.Terms = d
+				break
+			}
 			t, err := unmarshalTerm(ts)
 			if err != nil {
 				return err
@@ -3528,6 +3588,67 @@ func unmarshalValue(d map[string]any) (Value, error) {
 	}
 unmarshal_error:
 	return nil, errors.New("ast: unable to unmarshal term")
+}
+
+func unmarshalEvery(q *Every, v map[string]any) error {
+	for _, f := range []struct {
+		name string
+		dst  **Term
+	}{{"key", &q.Key}, {"value", &q.Value}, {"domain", &q.Domain}} {
+		switch x := v[f.name].(type) {
+		case nil:
+		case map[string]any:
+			t, err := unmarshalTerm(x)
+			if err != nil {
+				return fmt.Errorf("ast: unable to unmarshal every %s: %w", f.name, err)
+			}
+			*f.dst = t
+		default:
+			return fmt.Errorf("ast: unable to unmarshal every, invalid %s field type: %T (expected object or null)", f.name, x)
+		}
+	}
+
+	b, ok := v["body"].([]any)
+	if !ok {
+		return fmt.Errorf("ast: unable to unmarshal every, invalid body field type: %T (expected list)", v["body"])
+	}
+	body, err := unmarshalBody(b)
+	if err != nil {
+		return fmt.Errorf("ast: unable to unmarshal every body: %w", err)
+	}
+	q.Body = body
+
+	if loc, ok := v["location"].(map[string]any); ok {
+		q.Location = &Location{}
+		if err := unmarshalLocation(q.Location, loc); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func unmarshalSomeDecl(d *SomeDecl, v map[string]any) error {
+	switch x := v["symbols"].(type) {
+	case nil:
+	case []any:
+		symbols, err := unmarshalTermSlice(x)
+		if err != nil {
+			return fmt.Errorf("ast: unable to unmarshal some symbols: %w", err)
+		}
+		d.Symbols = symbols
+	default:
+		return fmt.Errorf("ast: unable to unmarshal some, invalid symbols field type: %T (expected list or null)", x)
+	}
+
+	if loc, ok := v["location"].(map[string]any); ok {
+		d.Location = &Location{}
+		if err := unmarshalLocation(d.Location, loc); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func unmarshalNot(n *Not, v map[string]any) error {
