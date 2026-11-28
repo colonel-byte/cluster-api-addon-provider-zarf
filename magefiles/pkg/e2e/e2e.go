@@ -72,7 +72,7 @@ const (
 	// was valid when that file was written.
 	//
 	// renovate: datasource=docker depName=kindest/node extractVersion=^v(?<version>\d+\.\d+\.\d+)$
-	workloadK8sVersion = "1.34.0"
+	workloadK8sVersion = "1.37.0"
 
 	// calicoVersion pins the CNI the workload cluster gets. CAPD ships none, so without it the
 	// node stays NotReady with "cni plugin not initialized" and nothing can be scheduled -
