@@ -362,9 +362,12 @@ func (w *ObjectStatusReporter) startInformerNow(
 
 	workers := w.StatusComputeWorkers
 
+	// wg tracks every goroutine, other than the informer's own, that can send
+	// on eventCh. It must be waited on before eventCh is closed.
+	var wg sync.WaitGroup
+
 	if workers > 1 {
 		// Async path: dispatch status computation to bounded goroutines.
-		var wg sync.WaitGroup
 		sem := make(chan struct{}, workers)
 		var latestRVs sync.Map
 
@@ -380,8 +383,9 @@ func (w *ObjectStatusReporter) startInformerNow(
 			klog.V(3).Infof("Watch starting: %v", gkn)
 			informer.Run(ctx.Done())
 			klog.V(3).Infof("Watch stopped: %v", gkn)
-			// Wait for all in-flight status computations to finish before
-			// closing the event channel, to avoid send-on-closed-channel panics.
+			// Wait for all in-flight status computations and scheduled status
+			// checks to finish before closing the event channel, to avoid
+			// send-on-closed-channel panics.
 			wg.Wait()
 			// Signal to the caller there will be no more events for this GroupKind.
 			close(eventCh)
@@ -389,7 +393,7 @@ func (w *ObjectStatusReporter) startInformerNow(
 	} else {
 		// Sync path (default): process events inline in the informer handler.
 		// This preserves the original serial behavior for backward compatibility.
-		_, err = informer.AddEventHandler(w.syncEventHandler(ctx, eventCh))
+		_, err = informer.AddEventHandler(w.syncEventHandler(ctx, eventCh, &wg))
 		if err != nil {
 			// Should never happen.
 			return fmt.Errorf("failed add event handler on new informer for %v: %v", mapping.Resource, err)
@@ -399,6 +403,9 @@ func (w *ObjectStatusReporter) startInformerNow(
 			klog.V(3).Infof("Watch starting: %v", gkn)
 			informer.Run(ctx.Done())
 			klog.V(3).Infof("Watch stopped: %v", gkn)
+			// Wait for scheduled status checks, to avoid
+			// send-on-closed-channel panics.
+			wg.Wait()
 			close(eventCh)
 		}()
 	}
@@ -469,10 +476,11 @@ func deletedStatus(id object.ObjMetadata) *event.ResourceStatus {
 func (w *ObjectStatusReporter) syncEventHandler(
 	ctx context.Context,
 	eventCh chan<- event.Event,
+	wg *sync.WaitGroup,
 ) cache.ResourceEventHandler {
 	var handler cache.ResourceEventHandlerFuncs
 
-	handler.AddFunc = func(iobj interface{}) {
+	handler.AddFunc = func(iobj any) {
 		// Bail early if the context is cancelled, to avoid unnecessary work.
 		if ctx.Err() != nil {
 			return
@@ -510,7 +518,7 @@ func (w *ObjectStatusReporter) syncEventHandler(
 		if isObjectUnschedulable(rs) {
 			klog.V(5).Infof("AddFunc: object unschedulable: %v", id)
 			// schedule delayed status update
-			w.taskManager.Schedule(ctx, id, status.ScheduleWindow,
+			w.taskManager.Schedule(ctx, wg, id, status.ScheduleWindow,
 				w.newStatusCheckTaskFunc(ctx, eventCh, id))
 		}
 
@@ -521,7 +529,7 @@ func (w *ObjectStatusReporter) syncEventHandler(
 		}
 	}
 
-	handler.UpdateFunc = func(_, iobj interface{}) {
+	handler.UpdateFunc = func(_, iobj any) {
 		// Bail early if the context is cancelled, to avoid unnecessary work.
 		if ctx.Err() != nil {
 			return
@@ -559,7 +567,7 @@ func (w *ObjectStatusReporter) syncEventHandler(
 		if isObjectUnschedulable(rs) {
 			klog.V(5).Infof("UpdateFunc: object unschedulable: %v", id)
 			// schedule delayed status update
-			w.taskManager.Schedule(ctx, id, status.ScheduleWindow,
+			w.taskManager.Schedule(ctx, wg, id, status.ScheduleWindow,
 				w.newStatusCheckTaskFunc(ctx, eventCh, id))
 		}
 
@@ -570,7 +578,7 @@ func (w *ObjectStatusReporter) syncEventHandler(
 		}
 	}
 
-	handler.DeleteFunc = func(iobj interface{}) {
+	handler.DeleteFunc = func(iobj any) {
 		// Bail early if the context is cancelled, to avoid unnecessary work.
 		if ctx.Err() != nil {
 			return
@@ -630,7 +638,7 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 ) cache.ResourceEventHandler {
 	var handler cache.ResourceEventHandlerFuncs
 
-	handler.AddFunc = func(iobj interface{}) {
+	handler.AddFunc = func(iobj any) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -660,9 +668,7 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 		latestRVs.Store(id, rv)
 		objCopy := obj.DeepCopy()
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -681,7 +687,7 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 
 			if isObjectUnschedulable(rs) {
 				klog.V(5).Infof("AddFunc: object unschedulable: %v", id)
-				w.taskManager.Schedule(ctx, id, status.ScheduleWindow,
+				w.taskManager.Schedule(ctx, wg, id, status.ScheduleWindow,
 					w.newStatusCheckTaskFunc(ctx, eventCh, id))
 			}
 
@@ -695,10 +701,10 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 				Type:     event.ResourceUpdateEvent,
 				Resource: rs,
 			}
-		}()
+		})
 	}
 
-	handler.UpdateFunc = func(_, iobj interface{}) {
+	handler.UpdateFunc = func(_, iobj any) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -728,9 +734,7 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 		latestRVs.Store(id, rv)
 		objCopy := obj.DeepCopy()
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -749,7 +753,7 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 
 			if isObjectUnschedulable(rs) {
 				klog.V(5).Infof("UpdateFunc: object unschedulable: %v", id)
-				w.taskManager.Schedule(ctx, id, status.ScheduleWindow,
+				w.taskManager.Schedule(ctx, wg, id, status.ScheduleWindow,
 					w.newStatusCheckTaskFunc(ctx, eventCh, id))
 			}
 
@@ -763,10 +767,10 @@ func (w *ObjectStatusReporter) asyncEventHandler(
 				Type:     event.ResourceUpdateEvent,
 				Resource: rs,
 			}
-		}()
+		})
 	}
 
-	handler.DeleteFunc = func(iobj interface{}) {
+	handler.DeleteFunc = func(iobj any) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -928,15 +932,23 @@ func (w *ObjectStatusReporter) newStatusCheckTaskFunc(
 		klog.V(5).Infof("Re-reading object status: %s", id)
 		// check again
 		rs, err := w.readStatusFromCluster(ctx, id)
+		if ctx.Err() != nil {
+			// The watch stopped while the status was being read.
+			// Drop the result, so shutdown doesn't wait on the consumer.
+			return
+		}
 		if err != nil {
 			// Send error event and stop the reporter!
 			// TODO: retry N times before terminating
 			w.handleFatalError(eventCh, err)
 			return
 		}
-		eventCh <- event.Event{
+		select {
+		case eventCh <- event.Event{
 			Type:     event.ResourceUpdateEvent,
 			Resource: rs,
+		}:
+		case <-ctx.Done():
 		}
 	}
 }
@@ -1076,7 +1088,10 @@ type taskManager struct {
 	cancelFuncs map[object.ObjMetadata]context.CancelFunc
 }
 
-func (tm *taskManager) Schedule(parentCtx context.Context, id object.ObjMetadata, delay time.Duration, task taskFunc) {
+// Schedule runs the task after the delay, unless the parent context or the task
+// is cancelled first. The goroutine that waits for and runs the task is tracked
+// by wg.
+func (tm *taskManager) Schedule(parentCtx context.Context, wg *sync.WaitGroup, id object.ObjMetadata, delay time.Duration, task taskFunc) {
 	tm.lock.Lock()
 	defer tm.lock.Unlock()
 
@@ -1093,20 +1108,22 @@ func (tm *taskManager) Schedule(parentCtx context.Context, id object.ObjMetadata
 	taskCtx, cancel := context.WithTimeout(context.Background(), delay)
 	tm.cancelFuncs[id] = cancel
 
-	go func() {
+	wg.Go(func() {
 		klog.V(5).Infof("Task scheduled (%v) for object (%s)", delay, id)
 		select {
 		case <-parentCtx.Done():
 			// stop waiting
 			cancel()
 		case <-taskCtx.Done():
-			if taskCtx.Err() == context.DeadlineExceeded {
+			// Both contexts can be done when select runs, and select picks
+			// at random, so check the parent before running the task.
+			if taskCtx.Err() == context.DeadlineExceeded && parentCtx.Err() == nil {
 				klog.V(5).Infof("Task executing (after %v) for object (%v)", delay, id)
 				task()
 			}
 			// else stop waiting
 		}
-	}()
+	})
 }
 
 func (tm *taskManager) Cancel(id object.ObjMetadata) {

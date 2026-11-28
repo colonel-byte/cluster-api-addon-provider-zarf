@@ -9,10 +9,10 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/zarf-dev/zarf v1.0.1
 	golang.org/x/crypto v0.59.0
-	k8s.io/api v0.37.2
+	k8s.io/api v0.37.3
 	k8s.io/apiextensions-apiserver v0.37.2
-	k8s.io/apimachinery v0.37.2
-	k8s.io/client-go v0.37.2
+	k8s.io/apimachinery v0.37.3
+	k8s.io/client-go v0.37.3
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	oras.land/oras-go/v2 v2.7.0
 	sigs.k8s.io/cluster-api/api v1.14.4
@@ -214,7 +214,7 @@ require (
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/fgprof v0.9.5 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
-	github.com/fluxcd/cli-utils v1.4.0 // indirect
+	github.com/fluxcd/cli-utils v1.5.0 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.12.0 // indirect
 	github.com/fluxcd/pkg/apis/meta v1.39.0 // indirect
 	github.com/fluxcd/source-controller/api v1.10.2 // indirect
@@ -531,15 +531,15 @@ require (
 	helm.sh/helm/v4 v4.3.2 // indirect
 	howett.net/plist v1.0.1 // indirect
 	k8s.io/apiserver v0.37.2 // indirect
-	k8s.io/cli-runtime v0.37.2 // indirect
+	k8s.io/cli-runtime v0.37.3 // indirect
 	k8s.io/code-generator v0.37.2 // indirect
-	k8s.io/component-base v0.37.2 // indirect
-	k8s.io/component-helpers v0.37.2 // indirect
+	k8s.io/component-base v0.37.3 // indirect
+	k8s.io/component-helpers v0.37.3 // indirect
 	k8s.io/gengo/v2 v2.0.0-20260408192533-25e2208e0dc3 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260821135717-be32def86098 // indirect
-	k8s.io/kubectl v0.37.2 // indirect
-	k8s.io/streaming v0.37.2 // indirect
+	k8s.io/kubectl v0.37.3 // indirect
+	k8s.io/streaming v0.37.3 // indirect
 	sigs.k8s.io/cli-utils v0.37.2 // indirect
 	sigs.k8s.io/controller-runtime/tools/setup-envtest v0.25.3 // indirect
 	sigs.k8s.io/controller-tools v0.23.0 // indirect
