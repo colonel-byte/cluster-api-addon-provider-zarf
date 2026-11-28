@@ -37,7 +37,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-d18f2d2e.js";
+            window.path_to_searchindex_js = "../searchindex-e34a3fb6.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-67056014.js"></script>
@@ -197,7 +197,7 @@ metadata:
 spec:
   name: zarf
   type: addon
-  version: v0.2.0
+  version: v0.3.0
   fetchConfig:
     url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases
 </code></pre>
@@ -220,17 +220,17 @@ spec:
   providers:
     - name: zarf
       type: AddonProvider
-      url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.2.0/addon-components.yaml
+      url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.3.0/addon-components.yaml
 </code></pre>
 <!-- x-release-please-end-version -->
 <p>The name and namespace are not free: Turtles merges this object into the <code>clusterctl-config</code> ConfigMap it ships and looks it up at that ConfigMap’s own name and namespace - <code>cattle-turtles-system</code> by default, <code>rancher-turtles-system</code> on older installs. One created anywhere else is read by nothing, and nothing says so. Ask the cluster rather than guessing: <code>kubectl get configmap clusterctl-config --all-namespaces</code>.</p>
 <h2 id="air-gapped-from-configmaps"><a class="header" href="#air-gapped-from-configmaps">Air-gapped, from ConfigMaps</a></h2>
 <p><code>fetchConfig</code> takes a <code>selector</code> instead of a <code>url</code>, and then the operator reads the components and the metadata out of a ConfigMap in the cluster - no route to GitHub, no mirror standing in for it. On the connected side, download <code>addon-components.yaml</code> and <code>metadata.yaml</code> from the release; inside:</p>
 <!-- x-release-please-start-version -->
-<pre><code class="language-sh">kubectl create configmap v0.2.0 --namespace caapz-system \
+<pre><code class="language-sh">kubectl create configmap v0.3.0 --namespace caapz-system \
   --from-file=components=addon-components.yaml \
   --from-file=metadata=metadata.yaml
-kubectl label configmap v0.2.0 --namespace caapz-system provider-components=addon-zarf
+kubectl label configmap v0.3.0 --namespace caapz-system provider-components=addon-zarf
 </code></pre>
 <!-- x-release-please-end-version -->
 <p>Then the <code>CAPIProvider</code> loses <code>fetchConfig.url</code> and gains the selector:</p>
@@ -247,7 +247,7 @@ kubectl label configmap v0.2.0 --namespace caapz-system provider-components=addo
 <h3 id="or-let-the-zarf-package-carry-it"><a class="header" href="#or-let-the-zarf-package-carry-it">Or let the Zarf package carry it</a></h3>
 <p>The ConfigMap and the <code>CAPIProvider</code> are pre-rendered into the air-gapped Zarf package as its <code>rancher-turtle-artifacts</code> component - nothing to assemble on the inside:</p>
 <!-- x-release-please-start-version -->
-<pre><code class="language-sh">zarf package deploy zarf-package-cluster-api-addon-provider-zarf-amd64-0.2.0.tar.zst \
+<pre><code class="language-sh">zarf package deploy zarf-package-cluster-api-addon-provider-zarf-amd64-0.3.0.tar.zst \
   --components rancher-turtle-artifacts
 </code></pre>
 <!-- x-release-please-end-version -->
@@ -255,7 +255,7 @@ kubectl label configmap v0.2.0 --namespace caapz-system provider-components=addo
 <h2 id="air-gapped-from-a-registry"><a class="header" href="#air-gapped-from-a-registry">Air-gapped, from a registry</a></h2>
 <p><code>fetchConfig.oci</code> is the third option, for the air gap that already has a registry: the operator pulls <code>metadata.yaml</code> and the components out of one OCI artifact. Every release publishes it at <strong><code>ghcr.io/colonel-byte/turtle/addon-zarf</code></strong>, tagged with the release’s own tag and cosign-signed by digest. Mirror it with <code>oras cp</code>, or - where the connected side cannot reach the mirror either - build it as a file to carry in:</p>
 <!-- x-release-please-start-version -->
-<pre><code class="language-sh">go run ./magefiles/core release:ociArtifact v0.2.0
+<pre><code class="language-sh">go run ./magefiles/core release:ociArtifact v0.3.0
 </code></pre>
 <!-- x-release-please-end-version -->
 <p>That writes an OCI image layout to <code>out/oci</code> and tars it beside it; nothing is pushed, deliberately. Fill the mirror on the inside with <code>oras cp --from-oci-layout</code>, then point the <code>CAPIProvider</code> at it:</p>
