@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.3.0](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.2.0...v0.3.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** make dependsOn a typed kind and name reference ([#383](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/383))
+
+### Features
+
+* **api:** expose init registry mode, port, and injector image ([#388](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/388)) ([36794e9](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/36794e987291398cc00f4f16a2dbfbd80561b3ef))
+* **api:** hoist packages and stages onto the proxy with normalized resolution ([#389](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/389)) ([1167da8](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/1167da8fd659aaeb20cd4b4410065c29c1c191ee))
+* **api:** make dependsOn a typed kind and name reference ([#383](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/383)) ([a93d3e1](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a93d3e14405e9e82c5e31e11de249e3aac8462bf))
+* emit Events on condition transitions and widen the printer columns ([#380](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/380)) ([c646bdd](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/c646bdd554f3ae4a89e3783f01cfd288e6f85a18))
+* guard init registry settings against the cluster's own recorded mode ([#397](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/397)) ([9075bf4](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/9075bf49d6edd3a884effb666dad8f7828056be4))
+* hold a release whose declared stages diverge from applied ApplyOnce history ([#395](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/395)) ([8bf59da](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/8bf59da8e541ad8034ed95bd91ad80d72e0c7a08))
+* render one deploy-spec document per stage with applied-record status ([#390](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/390)) ([9842685](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/98426851f094a4247b24356dfb40f182dbc038b5))
+* roll the fleet up into a proxy Ready condition and count columns ([#385](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/385)) ([f059c6b](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f059c6bd65d1195bdfe9de2bee5e253095855a90))
+* stage counts and columns on both kinds, version from status ([#393](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/393)) ([f73fed3](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/f73fed32695cb9f126119a200c6c1bb74285f68e))
+* stage-suffixed deploy Jobs with stage labels and name truncation ([#391](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/391)) ([34ce14d](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/34ce14d63f0713b83da6bfe1ba62fb5bfa6cc8fc))
+* walk staged releases in declared order, re-running changed stages only ([#392](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/392)) ([a28f1b0](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/a28f1b0c00513911cbf9823a24a895ca4abbe856))
+
+
+### Bug Fixes
+
+* **vendor:** track gitignored vendored files and fail verifyVendor on new ones ([#407](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/407)) ([56f022c](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/56f022c8c8f29494515fb0788a842e8cce54c190))
+
+
+### Documentation
+
+* correct the bootstrap guide and design staged proxies ([#382](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/382)) ([59dd13d](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/59dd13de51329961b1e16e11cd3c78ab183ce56a))
+* keep init outside the stage list and settle the registry knobs ([#387](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/387)) ([908ebc3](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/908ebc381ecaa8c5584ef96592a5553b86fb5344))
+* let generated output share a branch with its change ([#384](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/384)) ([363e78d](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/363e78dd3b453191c3a29fa141aef172519bf068))
+* **renovate:** record the commit statuses and checks app permissions ([#405](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/405)) ([c748790](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/c748790ef843bc1ad97e441022fdc34a10aacc50))
+* staged packages guide with an admission-tested sample manifest ([#396](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/396)) ([0cc9522](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/0cc952260bcf2f5dc599ad9bf527c9a92d5c22d9))
+
+
+### Miscellaneous
+
+* **deps:** update all-actions ([#406](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/406)) ([1a821ef](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/1a821ef04b61f8c57ce2c80dbd70c5d1d648f268))
+* **deps:** update aws ([#401](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/401)) ([3e7f2d1](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/3e7f2d16a722f3a1b0cadb3eb3a09330454ed4ec))
+* **deps:** update kindest/node docker tag to v1.37.0 ([#411](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/411)) ([db7cd24](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/db7cd24d57ee09daa5e7526d0ce1fd5a06ffbf40))
+* **deps:** update module cloud.google.com/go/storage to v1.71.1 ([#403](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/403)) ([ea5df0d](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/ea5df0d686f23e588a8e3c7e206a39b3fd887973))
+* **deps:** update module github.com/charmbracelet/x/ansi to v0.12.0 ([#412](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/412)) ([b5c3153](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/b5c3153a7304d059a0805619a077fae4ff111de9))
+* **deps:** update module github.com/huandu/xstrings to v1.6.6 ([#408](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/408)) ([9feec92](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/9feec92b3b26669c9d17a1cd29d804b8b6d50fcb))
+* **deps:** update module github.com/minio/minlz to v1.3.1 ([#409](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/409)) ([8327642](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/83276422e71bb9d2ccc0fb755fbd013c2f0e17ae))
+* **deps:** update module github.com/open-policy-agent/opa to v1.23.0 ([#415](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/415)) ([741db64](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/741db6438cf8ca118b32688c6654c48e95799124))
+* **deps:** update module github.com/smallnest/ringbuffer to v0.3.0 ([#416](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/416)) ([71803a7](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/71803a7fa3ccd9676191c8a5e0fb54a085f0b986))
+
+
+### CI/CD
+
+* **metadata:** include historical versions ([#377](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/377)) ([5b41920](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/5b4192005285eef0ba0d2b15f0ade30e172d232c))
+* **renovate:** disable the repository cache that replays merged PR state ([#404](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/404)) ([eb8f690](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/eb8f690941097c7bdc772af672036f5a316f14a7))
+* **renovate:** group gomod by vendor family, ungroup container images ([#399](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/399)) ([22c5885](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/22c5885800a04f3c9cf6bf1f95d9804d00f79763))
+* stop saving caches from merge-queue runs ([#402](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/issues/402)) ([c2cc256](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/commit/c2cc25651aa7b31fd97f233f79fb89583357f145))
+
 ## [0.2.0](https://github.com/colonel-byte/cluster-api-addon-provider-zarf/compare/v0.1.2...v0.2.0) (2026-11-26)
 
 

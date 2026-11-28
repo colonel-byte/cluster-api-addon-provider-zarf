@@ -3,7 +3,7 @@
 What you end up with: this provider running in a Cluster API management cluster, and one Zarf package deployed to a workload cluster because you declared that it should be.
 
 <!-- x-release-please-start-version -->
-Every command here was run against `v0.2.0`.
+Every command here was run against `v0.3.0`.
 <!-- x-release-please-end-version -->
 
 Nothing in this guide reaches the public internet from the workload cluster. The packages come from a registry you stage them in, which is the point of the thing.
@@ -22,7 +22,7 @@ Nothing in this guide reaches the public internet from the workload cluster. The
 ```yaml
 providers:
   - name: zarf
-    url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.2.0/addon-components.yaml
+    url: https://github.com/colonel-byte/cluster-api-addon-provider-zarf/releases/v0.3.0/addon-components.yaml
     type: AddonProvider
 ```
 <!-- x-release-please-end-version -->
@@ -31,7 +31,7 @@ Then install it:
 
 <!-- x-release-please-start-version -->
 ```sh
-clusterctl init --addon zarf:v0.2.0
+clusterctl init --addon zarf:v0.3.0
 ```
 <!-- x-release-please-end-version -->
 
@@ -39,7 +39,7 @@ clusterctl init --addon zarf:v0.2.0
 
 <!-- x-release-please-start-version -->
 ```sh
-clusterctl generate provider --addon zarf:v0.2.0
+clusterctl generate provider --addon zarf:v0.3.0
 ```
 <!-- x-release-please-end-version -->
 
