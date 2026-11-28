@@ -61,11 +61,15 @@ So a new ignore pattern is anchored with a leading `/` unless it genuinely has t
 - **It has to be last.** Git takes the last matching pattern, so a negation placed above the patterns it overrides does nothing.
 - **`!/vendor/` is not the same thing.** The bare form un-ignores the directory entry and leaves every file inside it to be matched against the patterns above, which is no protection at all.
 
+The backstop has a reach limit: a vendored module's **own** `.gitignore`, copied in by `go mod vendor`, takes precedence over any parent pattern for files in its own directory, so `!/vendor/**` cannot override it. When an upstream module ignores a file it also ships (go-lzo's `CHANGELOG.md` was one), the fix is `git add -f` on that file - once tracked, re-vendoring keeps it.
+
 Check a change rather than reasoning about it - this lists every vendored file git is dropping, and should print nothing:
 
 ```sh
 git ls-files --others --ignored --exclude-standard -- vendor/
 ```
+
+`dev:verifyVendor` runs this same check and fails on any output, so the pre-commit hook and `check-go-mod.yaml` catch both forms without anyone remembering to run it.
 
 ## The e2e targets are documented step by step, so changing one changes a page
 
