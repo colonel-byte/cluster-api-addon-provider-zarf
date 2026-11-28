@@ -77,8 +77,8 @@ cloud.google.com/go/storage v1.5.0/go.mod h1:tpKbwo567HUNpVclU5sGELwQWBDZ8gh0Zeo
 cloud.google.com/go/storage v1.6.0/go.mod h1:N7U0C8pVQ/+NIKOBQyamJIeKQKkZ+mxpohlUTyfDhBk=
 cloud.google.com/go/storage v1.8.0/go.mod h1:Wv1Oy7z6Yz3DshWRJFhqM/UCfaWIRTdp0RXyy7KQOVs=
 cloud.google.com/go/storage v1.10.0/go.mod h1:FLPqc6j+Ki4BU591ie1oL6qBQGu2Bl/tZ9ullr3+Kg0=
-cloud.google.com/go/storage v1.71.0 h1:vv4wBFygNlKtSmDMcCIz/ATVv9iIJMkZGjk17uzXMv4=
-cloud.google.com/go/storage v1.71.0/go.mod h1:axUlps/Uy9usUkUNd14db8SbV7s+dNV+BU/xkvPmzrU=
+cloud.google.com/go/storage v1.71.1 h1:VV+UWTHX07FLnwNi2cGL9ECRHEnA9UzIMC6D88DrQgk=
+cloud.google.com/go/storage v1.71.1/go.mod h1:S4Fb7xUi2nm0TSlnl8V3Cc+Q0+g6AOBpzt57j5/jY8U=
 cloud.google.com/go/trace v1.17.0 h1:7+RAkTVGq3rmO2G74BdhpP1Bvbk3rFWzGt1MfMfHBt8=
 cloud.google.com/go/trace v1.17.0/go.mod h1:GTuZUt8sliPaEYVumjlXAjc4ClYld/nxWBALepV7Mx4=
 connectrpc.com/connect v1.20.0 h1:6TNDAB+WeNd2uolWNlYczB5E0KNNaVMNUEx8JEUsPmQ=
