@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/open-policy-agent/opa/v1/ast/internal/tokens"
 	astJSON "github.com/open-policy-agent/opa/v1/ast/json"
 	"github.com/open-policy-agent/opa/v1/util"
 )
@@ -231,6 +230,10 @@ type (
 		Rules       []*Rule        `json:"rules,omitempty"`
 		Comments    []*Comment     `json:"comments,omitempty"`
 		regoVersion RegoVersionSpan
+		keyed       bool              // parsed with annotations, see Rule.SourceKey
+		sourceKeys  map[*Rule]RuleKey // of rules parsed without locations
+		// unparsed holds annotations recorded before locations were dropped; nil means use the rows.
+		unparsed []unparsedAnnotation
 	}
 
 	// Comment contains the raw text from the comment in the definition.
@@ -282,10 +285,10 @@ type (
 		Args      Args      `json:"args,omitempty"`
 		Key       *Term     `json:"key,omitempty"`
 		Value     *Term     `json:"value,omitempty"`
-		Assign    bool      `json:"assign,omitempty"`
 		Location  *Location `json:"location,omitempty"`
+		Assign    bool      `json:"assign,omitempty"`
 
-		keywords       []tokens.Token
+		keywords       ruleHeadKeyword
 		generatedValue bool
 	}
 
@@ -414,6 +417,20 @@ func (mod *Module) Copy() *Module {
 	cpy.Comments = make([]*Comment, len(mod.Comments))
 	for i := range mod.Comments {
 		cpy.Comments[i] = mod.Comments[i].Copy()
+	}
+
+	cpy.unparsed = slices.Clone(mod.unparsed)
+	for i := range cpy.unparsed {
+		cpy.unparsed[i].node = nodes[cpy.unparsed[i].node]
+	}
+
+	if mod.sourceKeys != nil {
+		cpy.sourceKeys = make(map[*Rule]RuleKey, len(mod.sourceKeys))
+		for r, k := range mod.sourceKeys {
+			if c, ok := nodes[r].(*Rule); ok {
+				cpy.sourceKeys[c] = k
+			}
+		}
 	}
 
 	return &cpy
@@ -885,8 +902,7 @@ func (head *Head) Copy() *Head {
 	cpy.Args = head.Args.Copy()
 	cpy.Key = head.Key.Copy()
 	cpy.Value = head.Value.Copy()
-	cpy.keywords = nil
-	cpy.Assign = head.Assign
+	cpy.keywords = ruleHeadKeywordNone
 	return &cpy
 }
 
@@ -905,9 +921,11 @@ func (head *Head) stringWithOpts(opts toStringOpts) string {
 }
 
 // Vars returns a set of vars found in the head.
+// Prefer to use [*VarVisitor] to collect variables
+// from the head as that is pooled and reusable without allocating
+// per each call.
 func (head *Head) Vars() VarSet {
 	vis := NewVarVisitor()
-	// TODO: improve test coverage for this.
 	if head.Args != nil {
 		vis.WalkArgs(head.Args)
 	}
@@ -1347,11 +1365,11 @@ func (expr *Expr) OperatorTerm() *Term {
 // at least pos+1 terms, this function returns nil.
 func (expr *Expr) Operand(pos int) *Term {
 	terms, ok := expr.Terms.([]*Term)
-	if !ok {
+	if !ok || pos < 0 {
 		return nil
 	}
-	idx := pos + 1
-	if idx < len(terms) {
+	idx, len := uint(pos+1), uint(len(terms))
+	if idx < len {
 		return terms[idx]
 	}
 	return nil
@@ -1360,7 +1378,7 @@ func (expr *Expr) Operand(pos int) *Term {
 // Operands returns the built-in function operands.
 func (expr *Expr) Operands() []*Term {
 	terms, ok := expr.Terms.([]*Term)
-	if !ok {
+	if !ok || len(terms) == 0 {
 		return nil
 	}
 	return terms[1:]
@@ -1897,7 +1915,7 @@ func validEqAssignArgCount(expr *Expr) bool {
 // function like eq, gt, plus, etc.
 func isGlobalBuiltin(expr *Expr, name Var) bool {
 	terms, ok := expr.Terms.([]*Term)
-	if !ok {
+	if !ok || len(terms) == 0 {
 		return false
 	}
 

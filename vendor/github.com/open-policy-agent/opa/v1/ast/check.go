@@ -158,7 +158,15 @@ func (tc *typeChecker) WithAllowUndefinedFunctionCalls(allow bool) *typeChecker 
 func (tc *typeChecker) Env(builtins map[string]*Builtin) *TypeEnv {
 	env := tc.newEnv(nil)
 	for _, bi := range builtins {
-		env.tree.Put(bi.Ref(), bi.Decl)
+		// The tree only keeps the Values, so skip building a Ref and its Terms
+		// (bi.Ref()) for every builtin on every compile.
+		part, rest, dotted := strings.Cut(bi.Name, ".")
+		node := env.tree.childOrNew(InternedVarValue(part))
+		for dotted {
+			part, rest, dotted = strings.Cut(rest, ".")
+			node = node.childOrNew(InternedValue(part))
+		}
+		node.value = bi.Decl
 	}
 	return env
 }
@@ -725,7 +733,6 @@ func (tc *typeChecker) checkExprWith(env *TypeEnv, expr *Expr, i int) *Error {
 }
 
 func unify2(env *TypeEnv, a *Term, typeA types.Type, b *Term, typeB types.Type) bool {
-
 	nilA := types.Nil(typeA)
 	nilB := types.Nil(typeB)
 
@@ -915,7 +922,8 @@ func unify1Object(env *TypeEnv, val Object, tpe *types.Object, union bool) bool 
 	if val.Len() != tpe.Len() && tpe.DynamicValue() == nil {
 		return false
 	}
-	stop := val.Until(func(k, v *Term) bool {
+	obj := objectFromObject(val)
+	stop := obj.Until(func(k, v *Term) bool {
 		if IsConstant(k.Value) {
 			if child := selectConstant(tpe, k); child != nil {
 				if !unify1(env, v, child, union) {
@@ -1126,6 +1134,13 @@ func (rc *refChecker) checkRefLeaf(tpe types.Type, ref Ref, idx int) *Error {
 	default:
 		child := selectConstant(tpe, head)
 		if child == nil {
+			if arr, ok := unwrapCollectionType(tpe).(*types.Array); ok && arr.Dynamic() == nil {
+				if n, ok := value.(Number); ok {
+					if index, ok := n.Int(); ok && (index < 0 || index >= arr.Len()) {
+						return newRefErrIndexOutOfBounds(ref[0].Location, rc.varRewriter(ref), idx, index, arr.Len())
+					}
+				}
+			}
 			return newRefErrInvalid(ref[0].Location, rc.varRewriter(ref), idx, nil, types.Keys(tpe), getOneOfForType(tpe))
 		}
 		return rc.checkRefLeaf(child, ref, idx+1)
@@ -1138,13 +1153,7 @@ func (rc *refChecker) checkRefLeaf(tpe types.Type, ref Ref, idx int) *Error {
 // can hold nothing: an object with neither static nor dynamic properties, an
 // array with no items, or a set with no element type.
 func isEmptyCollectionType(tpe types.Type) bool {
-	if named, ok := tpe.(*types.NamedType); ok {
-		tpe = named.Type
-	}
-	if rec, ok := tpe.(*types.Recursive); ok {
-		tpe = rec.Unwrap()
-	}
-	switch tpe := tpe.(type) {
+	switch tpe := unwrapCollectionType(tpe).(type) {
 	case *types.Object:
 		return len(tpe.StaticProperties()) == 0 && tpe.DynamicProperties() == nil
 	case *types.Array:
@@ -1220,6 +1229,16 @@ func relaxEmptyCollections(tpe types.Type) types.Type {
 			members[i] = relaxEmptyCollections(m)
 		}
 		return types.NewAny(members...)
+	}
+	return tpe
+}
+
+func unwrapCollectionType(tpe types.Type) types.Type {
+	if named, ok := tpe.(*types.NamedType); ok {
+		tpe = named.Type
+	}
+	if rec, ok := tpe.(*types.Recursive); ok {
+		tpe = rec.Unwrap()
 	}
 	return tpe
 }
@@ -1545,6 +1564,25 @@ func (r *RefErrInvalidDetail) Lines() []string {
 	return lines
 }
 
+// RefErrIndexOutOfBoundsDetail describes an undefined reference error where an
+// array with a known length is indexed outside of its bounds.
+type RefErrIndexOutOfBoundsDetail struct {
+	Ref    Ref `json:"ref"`    // invalid ref
+	Pos    int `json:"pos"`    // invalid element
+	Index  int `json:"index"`  // referenced index
+	Length int `json:"length"` // length of the array
+}
+
+// Lines returns the string representation of the detail.
+func (r *RefErrIndexOutOfBoundsDetail) Lines() []string {
+	pad := strings.Repeat(" ", len(r.Ref[:r.Pos].String())+1)
+	return []string{
+		r.Ref.String(),
+		pad + "^",
+		fmt.Sprintf("%sindex %d out of bounds for array of length %d", pad, r.Index, r.Length),
+	}
+}
+
 func formatArgs(args []types.Type) string {
 	buf := make([]string, len(args))
 	for i := range args {
@@ -1561,6 +1599,17 @@ func newRefErrInvalid(loc *Location, ref Ref, idx int, have, want types.Type, on
 		Have:  have,
 		Want:  want,
 		OneOf: oneOf,
+	}
+	return err
+}
+
+func newRefErrIndexOutOfBounds(loc *Location, ref Ref, idx, index, length int) *Error {
+	err := newRefError(loc, ref)
+	err.Details = &RefErrIndexOutOfBoundsDetail{
+		Ref:    ref,
+		Pos:    idx,
+		Index:  index,
+		Length: length,
 	}
 	return err
 }

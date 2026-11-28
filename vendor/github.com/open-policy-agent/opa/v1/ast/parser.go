@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"maps"
 	"net/url"
 	"regexp"
@@ -30,6 +31,14 @@ import (
 const (
 	// DefaultMaxParsingRecursionDepth is the default maximum recursion depth for the parser
 	DefaultMaxParsingRecursionDepth = 100000
+)
+
+type ruleHeadKeyword uint8
+
+const (
+	ruleHeadKeywordNone ruleHeadKeyword = 0
+	ruleHeadKeywordIf                   = 1 << iota
+	ruleHeadKeywordContains
 )
 
 var (
@@ -56,17 +65,18 @@ var (
 // can do efficient shallow copies of these values when doing a
 // save() and restore().
 type state struct {
-	errors    Errors
-	comments  []*Comment
-	hints     []string
-	s         *scanner.Scanner
-	loc       Location
-	lit       string
-	lastEnd   int
-	tokEnd    int
-	wildcard  int
-	tok       tokens.Token
-	skippedNL bool
+	errors               Errors
+	comments             []*Comment
+	hints                []string
+	s                    *scanner.Scanner
+	loc                  Location
+	lit                  string
+	lastEnd              int
+	tokEnd               int
+	wildcard             int
+	tok                  tokens.Token
+	skippedNL            bool
+	templateStringFailed bool
 }
 
 func (s *state) String() string {
@@ -104,6 +114,8 @@ type parsedTermCacheItem struct {
 	post   *state // post is the post-state that's restored on a cache-hit
 	offset int
 	next   *parsedTermCacheItem
+	st     state           // backing storage for post, so the entry is one allocation
+	sc     scanner.Scanner // backing storage for post.s
 }
 
 type parsedTermCache struct {
@@ -132,6 +144,8 @@ type ParserOptions struct {
 	AllFutureKeywords bool
 	FutureKeywords    []string
 	SkipRules         bool
+	// DropLocations drops locations from parsed modules.
+	DropLocations bool
 	// RegoVersion is the version of Rego to parse for.
 	RegoVersion RegoVersion
 }
@@ -241,9 +255,10 @@ func (p *Parser) parsedTermCacheLookup() (*Term, *state) {
 }
 
 func (p *Parser) parsedTermCachePush(t *Term, s0 *state) {
-	s1 := p.save()
 	o0 := s0.loc.Offset
-	entry := parsedTermCacheItem{t: t, post: s1, offset: o0}
+	entry := &parsedTermCacheItem{t: t, offset: o0, st: *p.s, sc: *p.s.s}
+	entry.st.s = &entry.sc
+	entry.post = &entry.st
 
 	// find the first one whose offset is smaller than ours
 	var e *parsedTermCacheItem
@@ -253,7 +268,7 @@ func (p *Parser) parsedTermCachePush(t *Term, s0 *state) {
 		}
 	}
 	entry.next = e
-	p.cache.m = &entry
+	p.cache.m = entry
 }
 
 // futureParser returns a shallow copy of `p` with an empty
@@ -495,29 +510,58 @@ func (p *Parser) parseAnnotations(stmts []Statement) []Statement {
 }
 
 func parseAnnotations(comments []*Comment) (stmts []*Annotations, errs Errors) {
-	numBlocks := util.Count(IsMetadataComment, comments...)
-	if numBlocks == 0 {
+	return parseMetadataBlocks(util.Count(IsMetadataComment, comments...), func(yield func(unparsedAnnotation) bool) {
+		for b := range metadataBlocks(comments) {
+			if !yield(unparsedAnnotation{comments: b}) {
+				return
+			}
+		}
+	})
+}
+
+// metadataBlocks yields the comments of each METADATA block.
+func metadataBlocks(comments []*Comment) iter.Seq[[]*Comment] {
+	return func(yield func([]*Comment) bool) {
+		for i := 0; i < len(comments); {
+			if !IsMetadataComment(comments[i]) {
+				i++
+				continue
+			}
+			end := i + 1 // scan until end of block
+			for end < len(comments) && !blockBuster(comments[end], comments[end-1]) {
+				end++
+			}
+			if !yield(comments[i:end:end]) {
+				return
+			}
+			i = end
+		}
+	}
+}
+
+// parseMetadataBlocks parses n blocks into annotations attached to the blocks' nodes.
+func parseMetadataBlocks(n int, blocks iter.Seq[unparsedAnnotation]) (stmts []*Annotations, errs Errors) {
+	if n == 0 {
 		return nil, nil
 	}
 
-	stmts = make([]*Annotations, 0, numBlocks)
+	stmts = make([]*Annotations, 0, n)
 	mdp := metadataParserPool.Get()
 	if mdp.buf == nil {
 		mdp.buf = &bytes.Buffer{}
 	}
 
-	for i := range comments {
-		if IsMetadataComment(comments[i]) { // scan until end of block
-			mdp.Reset(comments[i].Location)
-			for i++; i < len(comments) && !blockBuster(comments[i], comments[i-1]); i++ {
-				mdp.Append(comments[i])
-			}
+	for b := range blocks {
+		mdp.Reset(b.comments[0].Location)
+		for _, c := range b.comments[1:] {
+			mdp.Append(c)
+		}
 
-			if a, err := mdp.Parse(); err != nil {
-				errs = append(errs, &Error{Code: ParseErr, Message: err.Error(), Location: mdp.loc})
-			} else {
-				stmts = append(stmts, a)
-			}
+		if a, err := mdp.Parse(); err != nil {
+			errs = append(errs, &Error{Code: ParseErr, Message: err.Error(), Location: mdp.loc})
+		} else {
+			a.node = b.node
+			stmts = append(stmts, a)
 		}
 	}
 
@@ -870,7 +914,7 @@ func (p *Parser) parseRules() []*Rule {
 	}
 
 	if usesContains {
-		rule.Head.keywords = append(rule.Head.keywords, tokens.Contains)
+		rule.Head.keywords |= ruleHeadKeywordContains
 	}
 
 	if rule.Default {
@@ -884,6 +928,7 @@ func (p *Parser) parseRules() []*Rule {
 			}
 		}
 
+		rule.Location.Text = p.s.Text(rule.Location.Offset, p.s.lastEnd)
 		rule.Body = implicitTrueBody(rule.Location)
 		return []*Rule{&rule}
 	}
@@ -929,7 +974,7 @@ func (p *Parser) parseRules() []*Rule {
 
 	switch {
 	case hasIf:
-		rule.Head.keywords = append(rule.Head.keywords, tokens.If)
+		rule.Head.keywords |= ruleHeadKeywordIf
 		p.scan()
 		s := p.save()
 
@@ -1042,7 +1087,6 @@ func (p *Parser) parseRules() []*Rule {
 }
 
 func (p *Parser) parseElse(head *Head) *Rule {
-
 	var rule Rule
 	rule.SetLoc(p.s.Loc())
 
@@ -1088,7 +1132,7 @@ func (p *Parser) parseElse(head *Head) *Rule {
 	}
 
 	if hasIf {
-		rule.Head.keywords = append(rule.Head.keywords, tokens.If)
+		rule.Head.keywords |= ruleHeadKeywordIf
 		p.scan()
 	}
 
@@ -1342,13 +1386,14 @@ func (p *Parser) parseLiteral() (expr *Expr) {
 	}
 
 	if negated && p.notBodies && p.s.tok == tokens.LBrace {
-		nb := p.parseNotBody(notLoc)
-		if nb == nil {
-			return nil
+		if nb, committed := p.parseNotBody(notLoc); committed {
+			if nb == nil {
+				return nil
+			}
+			// A not-body is a complete operand, so it may lead an and/or chain:
+			// `not { x } and y`.
+			return p.foldLogicalTail(NewBody(nb), false, nb.Location)
 		}
-		// A not-body is a complete operand, so it may lead an and/or chain:
-		// `not { x } and y`.
-		return p.foldLogicalTail(NewBody(nb), false, nb.Location)
 	}
 
 	switch p.s.tok {
@@ -1686,7 +1731,11 @@ func (p *Parser) parseSome() *Expr {
 	return NewExpr(decl).SetLocation(decl.Location)
 }
 
-func (p *Parser) parseNotBody(notLoc *Location) *Expr {
+// parseNotBody parses `{...}` after `not` as a body. If a ref operator follows
+// the closing brace, the braces are a term instead: the parser is restored to
+// the opening brace and committed is false. Otherwise committed is true, and a
+// nil expression means an error was reported.
+func (p *Parser) parseNotBody(notLoc *Location) (expr *Expr, committed bool) {
 	braceOffset := p.s.loc.Offset
 	braceLoc := p.s.Loc()
 	s := p.save()
@@ -1699,7 +1748,7 @@ func (p *Parser) parseNotBody(notLoc *Location) *Expr {
 	body := p.parseBody(tokens.RBrace)
 	if body == nil {
 		if empty {
-			return nil
+			return nil, true
 		}
 
 		// The braces may hold a value rather than a body. If so, report the
@@ -1711,24 +1760,29 @@ func (p *Parser) parseNotBody(notLoc *Location) *Expr {
 		// and parens group rather than delimit, so it is the whole operand that has to be wrapped.
 		if term := p.parseTermInfixCall(); term != nil {
 			p.errorOperandBraceNeedsBody(braceLoc, p.s.Text(braceOffset, p.s.lastEnd), term, "not ")
-			return nil
+			return nil, true
 		}
 
 		p.restore(failed)
 
-		return nil
+		return nil, true
 	}
 	p.scan() // consume `}`
 
+	if p.s.tok == tokens.LBrack || p.s.tok == tokens.Dot {
+		p.restore(s)
+		return nil, false
+	}
+
 	if isAmbiguousUnionBody(body) {
 		p.errorAmbiguousUnionBody(braceLoc, braceOffset, body, "not ")
-		return nil
+		return nil, true
 	}
 
 	// Extend the location to also include the 'not ' prefix
 	spanned := p.extendLoc(notLoc)
 	not := &Not{Body: body, ExplicitBody: true, Location: spanned}
-	return NewExpr(not).SetLocation(spanned)
+	return NewExpr(not).SetLocation(spanned), true
 }
 
 // logicalKeywordsActive reports whether the scanner currently treats `and` or
@@ -1913,11 +1967,12 @@ func (p *Parser) parseLogicalOperand(op string) (Body, bool, *Location) {
 	}
 
 	if negated && p.notBodies && p.s.tok == tokens.LBrace {
-		nb := p.parseNotBody(notLoc)
-		if nb == nil {
-			return nil, false, nil
+		if nb, committed := p.parseNotBody(notLoc); committed {
+			if nb == nil {
+				return nil, false, nil
+			}
+			return NewBody(nb), false, nb.Location
 		}
-		return NewBody(nb), false, nb.Location
 	}
 
 	// Parenthesized logical group operand: `(a or b)` or, when negated,
@@ -2616,7 +2671,7 @@ func (p *Parser) parseTerm() *Term {
 
 	term = p.parseTermFinish(term, false)
 	if unaryMinusLoc != nil && term != nil {
-		zero := NewTerm(IntNumberTerm(0).Value).SetLocation(unaryMinusLoc)
+		zero := NewTerm(internedIntNumberValue(0)).SetLocation(unaryMinusLoc)
 		term = p.setLoc(Minus.Call(zero, term), unaryMinusLoc, unaryMinusLoc.Offset, p.s.lastEnd)
 	}
 	p.parsedTermCachePush(term, s0)
@@ -2726,6 +2781,14 @@ func (p *Parser) parseNumber() *Term {
 		return nil
 	}
 
+	loc.Text = p.s.Text(loc.Offset, p.s.tokEnd)
+
+	if prefix == "" && len(s) < 4 {
+		if term := InternedIntNumberTermFromString(s); term != nil {
+			return &Term{Value: term.Value, Location: loc}
+		}
+	}
+
 	// Note: Use the original string, do *not* round trip from
 	// the big.Float as it can cause precision loss.
 	return NumberTerm(json.Number(s)).SetLocation(loc)
@@ -2733,7 +2796,7 @@ func (p *Parser) parseNumber() *Term {
 
 func (p *Parser) parseString() *Term {
 	if p.s.lit[0] == '"' {
-		if p.s.lit == "\"\"" {
+		if p.s.lit == `""` {
 			return NewTerm(InternedEmptyStringValue).SetLocation(p.s.Loc())
 		}
 
@@ -2784,6 +2847,20 @@ func templateStringPartToStringLiteral(tok tokens.Token, lit string) (string, er
 }
 
 func (p *Parser) parseTemplateString(multiLine bool) *Term {
+	numErrors := len(p.s.errors)
+
+	term := p.parseTemplateStringParts(multiLine)
+	if term == nil && len(p.s.errors) > numErrors {
+		// Report only the first error of a template string that fails to
+		// parse, and none of the follow-ups from the callers.
+		p.s.errors = p.s.errors[:numErrors+1]
+		p.s.templateStringFailed = true
+	}
+
+	return term
+}
+
+func (p *Parser) parseTemplateStringParts(multiLine bool) *Term {
 	loc := p.s.Loc()
 
 	if !p.po.Capabilities.ContainsFeatureAt(FeatureTemplateStrings, p.po.EffectiveRegoVersion()) {
@@ -2813,9 +2890,17 @@ func (p *Parser) parseTemplateString(multiLine bool) *Term {
 		p.scan()
 		numCommentsAfter := len(p.s.comments)
 
+		if p.s.tok == tokens.RBrace {
+			p.error(p.s.Loc(), "empty template-string expression")
+			return nil
+		}
+
+		numErrors := len(p.s.errors)
 		expr := p.parseLiteral()
 		if expr == nil {
-			p.error(p.s.Loc(), "invalid template-string expression")
+			if len(p.s.errors) == numErrors {
+				p.error(p.s.Loc(), "invalid template-string expression")
+			}
 			return nil
 		}
 
@@ -3366,6 +3451,11 @@ func writeHints(msg *strings.Builder, hints []string) {
 }
 
 func (p *Parser) error(loc *location.Location, reason string) {
+	if p.s.templateStringFailed {
+		p.s.hints = nil
+		return
+	}
+
 	if len(p.s.hints) > 0 {
 		sb := &strings.Builder{}
 		sb.WriteString(reason)
@@ -3383,6 +3473,11 @@ func (p *Parser) error(loc *location.Location, reason string) {
 }
 
 func (p *Parser) errorf(loc *location.Location, f string, a ...any) {
+	if p.s.templateStringFailed {
+		p.s.hints = nil
+		return
+	}
+
 	msg := &strings.Builder{}
 	fmt.Fprintf(msg, f, a...)
 
@@ -3777,6 +3872,9 @@ func (b *metadataParser) Parse() (result *Annotations, err error) {
 	}
 
 	result.Location = b.loc
+	if result.Location == nil {
+		return result, err
+	}
 
 	// recreate original text of entire metadata block for location text attribute
 	original := bytes.TrimSuffix(b.buf.Bytes(), []byte("\n"))
@@ -3817,7 +3915,7 @@ func augmentYamlError(err error, comments []*Comment) error {
 
 			invalidSpaces = append(invalidSpaces, fmt.Sprintf("%+q", r))
 		}
-		if len(invalidSpaces) > 0 {
+		if len(invalidSpaces) > 0 && comment.Location != nil {
 			err = fmt.Errorf(
 				"%s\n  Hint: on line %d, symbol(s) %v immediately following a"+
 					" key/value separator ':' is not a legal yaml space character",

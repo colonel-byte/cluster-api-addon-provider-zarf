@@ -6,6 +6,7 @@ package bundle
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -77,6 +78,10 @@ func metadataPath(name string) storage.Path {
 
 func moduleRegoVersionPath(id string) storage.Path {
 	return append(ModulesInfoBasePath, strings.Trim(id, "/"), "rego_version")
+}
+
+func moduleGeneratedPath(id string) storage.Path {
+	return append(ModulesInfoBasePath, strings.Trim(id, "/"), "generated")
 }
 
 func moduleInfoPath(id string) storage.Path {
@@ -735,6 +740,7 @@ func eraseData(ctx context.Context, store storage.Store, txn storage.Transaction
 
 type moduleInfo struct {
 	RegoVersion ast.RegoVersion `json:"rego_version"`
+	Generated   bool            `json:"generated"`
 }
 
 func readModuleInfoFromStore(ctx context.Context, store storage.Store, txn storage.Transaction) (map[string]moduleInfo, error) {
@@ -751,20 +757,27 @@ func readModuleInfoFromStore(ctx context.Context, store storage.Store, txn stora
 		versions := make(map[string]moduleInfo, len(m))
 
 		for k, v := range m {
-			if m0, ok := v.(map[string]any); ok {
-				if ver, ok := m0["rego_version"]; ok {
-					if vs, ok := ver.(json.Number); ok {
-						i, err := vs.Int64()
-						if err != nil {
-							return nil, errors.New("corrupt rego version")
-						}
-						rv, err := ast.RegoVersionFromIntStrict(int(i))
-						if err != nil {
-							return nil, fmt.Errorf("corrupt rego version: %w", err)
-						}
-						versions[k] = moduleInfo{RegoVersion: rv}
+			m0, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			var info moduleInfo
+			if ver, ok := m0["rego_version"]; ok {
+				if vs, ok := ver.(json.Number); ok {
+					i, err := vs.Int64()
+					if err != nil {
+						return nil, errors.New("corrupt rego version")
 					}
+					rv, err := ast.RegoVersionFromIntStrict(int(i))
+					if err != nil {
+						return nil, fmt.Errorf("corrupt rego version: %w", err)
+					}
+					info.RegoVersion = rv
 				}
+			}
+			info.Generated, _ = m0["generated"].(bool)
+			if info != (moduleInfo{}) {
+				versions[k] = info
 			}
 		}
 		return versions, nil
@@ -785,12 +798,14 @@ func erasePolicies(ctx context.Context, store storage.Store, txn storage.Transac
 	}
 
 	parserOptsFor := func(modID string) ast.ParserOptions {
-		info, ok := modulesInfo[strings.TrimPrefix(modID, "/")]
-		if !ok || info.RegoVersion == parserOpts.RegoVersion {
-			return parserOpts
-		}
+		info := modulesInfo[strings.TrimPrefix(modID, "/")]
 		opts := parserOpts
-		opts.RegoVersion = info.RegoVersion
+		if info.RegoVersion != ast.RegoUndefined {
+			opts.RegoVersion = info.RegoVersion
+		}
+		if info.Generated {
+			opts = generatedParserOptions(opts)
+		}
 		return opts
 	}
 
@@ -883,7 +898,7 @@ func writeEtagToStore(opts *ActivateOpts, name, etag string) error {
 	return WriteEtagToStore(opts.Ctx, opts.Store, opts.Txn, name, etag)
 }
 
-func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn storage.Transaction, b *Bundle,
+func writeModuleInfoToStore(ctx context.Context, store storage.Store, txn storage.Transaction, b *Bundle,
 	mf ModuleFile, storagePath string, runtimeRegoVersion ast.RegoVersion,
 ) error {
 	var regoVersion ast.RegoVersion
@@ -892,8 +907,10 @@ func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn
 	}
 
 	if regoVersion == ast.RegoUndefined {
+		// file_rego_versions keys are relative to the bundle root.
+		path := cmp.Or(mf.RelativePath, mf.Path)
 		var err error
-		regoVersion, err = b.RegoVersionForFile(mf.Path, runtimeRegoVersion)
+		regoVersion, err = b.RegoVersionForFile(path, runtimeRegoVersion)
 		if err != nil {
 			return fmt.Errorf("failed to get rego version for module '%s' in bundle: %w", mf.Path, err)
 		}
@@ -904,6 +921,11 @@ func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn
 	if regoVersion != ast.RegoUndefined && (runtimeRegoVersion == ast.RegoUndefined || regoVersion.Int() != runtimeRegoVersion.Int()) {
 		if err := write(ctx, store, txn, moduleRegoVersionPath(storagePath), regoVersion.Int()); err != nil {
 			return fmt.Errorf("failed to write rego version for module '%s': %w", storagePath, err)
+		}
+	}
+	if b.Manifest.Generated {
+		if err := write(ctx, store, txn, moduleGeneratedPath(storagePath), true); err != nil {
+			return fmt.Errorf("failed to write generated flag for module '%s': %w", storagePath, err)
 		}
 	}
 	return nil
@@ -936,7 +958,7 @@ func writeDataAndModules(ctx context.Context, store storage.Store, txn storage.T
 					return err
 				}
 
-				if err := writeModuleRegoVersionToStore(ctx, store, txn, b, mf, path, runtimeRegoVersion); err != nil {
+				if err := writeModuleInfoToStore(ctx, store, txn, b, mf, path, runtimeRegoVersion); err != nil {
 					return err
 				}
 			}
@@ -958,7 +980,7 @@ func writeDataAndModules(ctx context.Context, store storage.Store, txn storage.T
 					if m := f.module; m != nil {
 						// 'f.module.Path' contains the module's path as it relates to the bundle root, and can be used for looking up the rego-version.
 						// 'f.Path' can differ, based on how the bundle reader was initialized.
-						if err := writeModuleRegoVersionToStore(ctx, store, txn, b, *m, p.PolicyID(), runtimeRegoVersion); err != nil {
+						if err := writeModuleInfoToStore(ctx, store, txn, b, *m, p.PolicyID(), runtimeRegoVersion); err != nil {
 							return err
 						}
 					}

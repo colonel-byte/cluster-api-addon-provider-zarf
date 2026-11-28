@@ -336,6 +336,10 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 			}
 		}
 
+		// Comments without a location have no place to be written at, see writeModule.
+		if c, ok := x.(*ast.Comment); ok && c.Location == nil {
+			return false
+		}
 		if opts.IgnoreLocations || x.Loc() == nil {
 			x.SetLoc(defaultLocation(x))
 		}
@@ -548,7 +552,9 @@ func (w *writer) writeModule(module *ast.Module) error {
 	visitor := ast.NewGenericVisitor(func(x any) bool {
 		switch x := x.(type) {
 		case *ast.Comment:
-			comments = append(comments, x)
+			if x.Location != nil {
+				comments = append(comments, x)
+			}
 			return true
 		case *ast.Import, *ast.Rule:
 			others = append(others, x)
@@ -1667,24 +1673,33 @@ func (w *writer) writeFunctionCall(expr *ast.Expr, comments []*ast.Comment) ([]*
 	var err error
 	switch numCallArgs {
 	case numDeclArgs: // Print infix where result is unassigned (e.g., x != y)
-		comments, err = w.writeTerm(terms[1], comments)
+		writeOperand := w.writeRelationOperand
+		if operator == ast.Assign.Name {
+			writeOperand = w.writeTerm
+		}
+		comments, err = writeOperand(terms[1], comments)
 		if err != nil {
 			return nil, err
 		}
 		w.write(" " + bi.Infix + " ")
-		return w.writeTerm(terms[2], comments)
+		if operator == ast.Equality.Name {
+			// The right side of unification already parses as one expression.
+			// Parentheses here add churn to ordinary `x = a == b` cases.
+			return w.writeTerm(terms[2], comments)
+		}
+		return writeOperand(terms[2], comments)
 	case numDeclArgs + 1: // Print infix where result is assigned (e.g., z = x + y)
 		comments, err = w.writeTerm(terms[3], comments)
 		if err != nil {
 			return nil, err
 		}
 		w.write(" " + ast.Equality.Infix + " ")
-		comments, err = w.writeTerm(terms[1], comments)
+		comments, err = w.writeRelationOperand(terms[1], comments)
 		if err != nil {
 			return nil, err
 		}
 		w.write(" " + bi.Infix + " ")
-		comments, err = w.writeTerm(terms[2], comments)
+		comments, err = w.writeRelationOperand(terms[2], comments)
 		if err != nil {
 			return nil, err
 		}
@@ -1756,8 +1771,27 @@ func saveComments(comments []*ast.Comment) *[]*ast.Comment {
 }
 
 func (w *writer) writeTerm(term *ast.Term, comments []*ast.Comment) ([]*ast.Comment, error) {
+	return w.writeTermWithParens(false, term, comments)
+}
+
+// writeRelationOperand groups infix calls nested inside an expression-level
+// infix call. Relations associate to the left, while membership has lower
+// precedence than relations, so either kind of operand needs parentheses.
+func (w *writer) writeRelationOperand(term *ast.Term, comments []*ast.Comment) ([]*ast.Comment, error) {
+	if call, ok := term.Value.(ast.Call); ok {
+		if bi, found := ast.BuiltinMap[call[0].String()]; found {
+			switch bi.Infix {
+			case "==", "!=", "<", ">", "<=", ">=", "in":
+				return w.writeTermWithParens(true, term, comments)
+			}
+		}
+	}
+	return w.writeTerm(term, comments)
+}
+
+func (w *writer) writeTermWithParens(parens bool, term *ast.Term, comments []*ast.Comment) ([]*ast.Comment, error) {
 	if len(comments) == 0 {
-		return w.writeTermParens(false, term, comments)
+		return w.writeTermParens(parens, term, comments)
 	}
 
 	currentLen := w.buf.Len()
@@ -1765,7 +1799,7 @@ func (w *writer) writeTerm(term *ast.Term, comments []*ast.Comment) ([]*ast.Comm
 	currentComments := saveComments(comments)
 	defer commentsSlicePool.Put(currentComments)
 
-	comments, err := w.writeTermParens(false, term, comments)
+	comments, err := w.writeTermParens(parens, term, comments)
 	if err != nil {
 		if isUnexpectedCommentError(err) {
 			w.buf.Truncate(currentLen)
@@ -2091,7 +2125,7 @@ func (w *writer) writeCall(parens bool, x ast.Call, loc *ast.Location, comments 
 	if bi.Infix == "in" {
 		// NOTE(sr): `in` requires special handling, mirroring what happens in the parser,
 		// since there can be one or two lhs arguments.
-		return w.writeInOperator(true, x[1:], comments, loc, bi.Decl)
+		return w.writeInOperator(parens || bi.Decl.Arity() == 3, x[1:], comments, loc, bi.Decl)
 	}
 
 	// TODO(tsandall): improve to consider precedence?
@@ -2139,6 +2173,10 @@ func (w *writer) writeInOperator(parens bool, operands []*ast.Term, comments []*
 	var err error
 	switch len(operands) {
 	case 2:
+		if parens {
+			w.write("(")
+			defer w.write(")")
+		}
 		comments, err = w.writeTermParens(true, operands[0], comments)
 		if err != nil {
 			return nil, err
@@ -2179,11 +2217,15 @@ func (w *writer) writeObject(obj ast.Object, loc *ast.Location, comments []*ast.
 	w.write("{")
 	defer w.write("}")
 
-	s := make([]any, 0, obj.Len())
-	obj.Foreach(func(k, v *ast.Term) {
-		s = append(s, ast.Item(k, v))
-	})
-	return w.writeIterable(s, loc, closingLoc(0, 0, '{', '}', loc), comments, w.objectWriter())
+	sl := make([]any, 0, obj.Len())
+	ki := ast.BorrowKeysIterator(obj)
+
+	for k, more := ki.Next(); more; k, more = ki.Next() {
+		sl = append(sl, ast.Item(k, obj.Get(k)))
+	}
+
+	ast.ReturnKeysIterator(ki)
+	return w.writeIterable(sl, loc, closingLoc(0, 0, '{', '}', loc), comments, w.objectWriter())
 }
 
 func (w *writer) writeArray(arr *ast.Array, loc *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
@@ -2191,9 +2233,9 @@ func (w *writer) writeArray(arr *ast.Array, loc *ast.Location, comments []*ast.C
 	defer w.write("]")
 
 	s := make([]any, 0, arr.Len())
-	arr.Foreach(func(t *ast.Term) {
-		s = append(s, t)
-	})
+	for i := range arr.Len() {
+		s = append(s, arr.Elem(i))
+	}
 	var err error
 	comments, err = w.writeIterable(s, loc, closingLoc(0, 0, '[', ']', loc), comments, w.listWriter(true))
 	if err != nil {
@@ -2653,19 +2695,14 @@ func (w *writer) groupIterable(elements []any, last *ast.Location) ([][]any, err
 	def := false // default location found?
 	for _, elem := range elements {
 		ast.WalkTerms(elem, func(t *ast.Term) bool {
-			if t.Location.File == defaultLocationFile {
-				def = true
-				return true
-			}
-			return false
+			def = def || t.Location.File == defaultLocationFile
+			return def
 		})
 		ast.WalkVars(elem, func(v ast.Var) bool {
-			if v.IsGenerated() {
-				def = true
-				return true
-			}
-			return false
+			def = def || v.IsGenerated()
+			return def
 		})
+
 		if def { // return as-is
 			return [][]any{elements}, nil
 		}

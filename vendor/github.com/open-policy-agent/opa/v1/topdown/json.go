@@ -65,33 +65,32 @@ func jsonRemove(a *ast.Term, b *ast.Term) (*ast.Term, error) {
 	case ast.String, ast.Number, ast.Boolean, ast.Null:
 		return a, nil
 	case ast.Object:
+		ki := ast.BorrowKeysIterator(aValue)
+		defer ast.ReturnKeysIterator(ki)
+
 		newObj := ast.NewObjectWithCapacity(aValue.Len())
-		err := aValue.Iter(func(k *ast.Term, v *ast.Term) error {
+
+		for k, more := ki.Next(); more; k, more = ki.Next() {
 			// recurse and add the diff of sub objects as needed
-			diffValue, err := jsonRemove(v, bObj.Get(k))
-			if err != nil || diffValue == nil {
-				return err
+			diffValue, err := jsonRemove(aValue.Get(k), bObj.Get(k))
+			if err != nil {
+				return nil, err
 			}
-			newObj.Insert(k, diffValue)
-			return nil
-		})
-		if err != nil {
-			return nil, err
+			if diffValue != nil {
+				newObj.Insert(k, diffValue)
+			}
 		}
 		return ast.NewTerm(newObj), nil
 	case ast.Set:
 		newSet := ast.NewSetWithCapacity(aValue.Len())
-		err := aValue.Iter(func(v *ast.Term) error {
-			// recurse and add the diff of sub objects as needed
-			diffValue, err := jsonRemove(v, bObj.Get(v))
-			if err != nil || diffValue == nil {
-				return err
+		for _, term := range aValue.Slice() {
+			diffValue, err := jsonRemove(term, bObj.Get(term))
+			if err != nil {
+				return nil, err
 			}
-			newSet.Add(diffValue)
-			return nil
-		})
-		if err != nil {
-			return nil, err
+			if diffValue != nil {
+				newSet.Add(diffValue)
+			}
 		}
 		return ast.NewTerm(newSet), nil
 	case *ast.Array:
@@ -371,10 +370,24 @@ func builtinJSONPatch(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Ter
 	return iter(patched)
 }
 
+// RFC 6901 says a JSON Pointer is a Unicode string. We do not check for valid UTF-8.
+// Invalid bytes pass through unchanged, as they do with replace.
+var jsonPointerEscaper = strings.NewReplacer("~", "~0", "/", "~1")
+
+func builtinJSONPointerEscape(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+	s, err := builtins.StringOperand(operands[0].Value, 1)
+	if err != nil {
+		return err
+	}
+
+	return iter(ast.StringTerm(jsonPointerEscaper.Replace(string(s))))
+}
+
 func init() {
 	ast.InternStringTerm("op", "path", "from", "value", "add", "remove", "replace", "move", "copy", "test")
 
 	RegisterBuiltinFunc(ast.JSONFilter.Name, builtinJSONFilter)
 	RegisterBuiltinFunc(ast.JSONRemove.Name, builtinJSONRemove)
 	RegisterBuiltinFunc(ast.JSONPatch.Name, builtinJSONPatch)
+	RegisterBuiltinFunc(ast.JSONPointerEscape.Name, builtinJSONPointerEscape)
 }

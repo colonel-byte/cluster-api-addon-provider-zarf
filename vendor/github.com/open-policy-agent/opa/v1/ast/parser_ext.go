@@ -13,11 +13,8 @@ package ast
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"unicode"
-
-	"github.com/open-policy-agent/opa/v1/ast/internal/tokens"
 )
 
 // MustParseBody returns a parsed body.
@@ -218,7 +215,13 @@ func ParseRuleFromExpr(module *Module, expr *Expr) (*Rule, error) {
 		return nil, errors.New("rule name conflicts with built-in function")
 	}
 
-	return ParseRuleFromCallExpr(module, expr.Terms.([]*Term))
+	rule, err := ParseRuleFromCallExpr(module, expr.Terms.([]*Term))
+	if err != nil {
+		return nil, err
+	}
+	// The rule's location is the call's, not just its operator's.
+	rule.Location = expr.Location
+	return rule, nil
 }
 
 func parseCompleteRuleFromEq(module *Module, expr *Expr) (rule *Rule, err error) {
@@ -409,10 +412,11 @@ func ParseRuleFromCallEqExpr(module *Module, lhs, rhs *Term) (*Rule, error) {
 	body := implicitTrueBody(rhs.Location)
 
 	rule := &Rule{
-		Location: lhs.Location,
-		Head:     head,
-		Body:     body,
-		Module:   module,
+		Location:      lhs.Location,
+		Head:          head,
+		Body:          body,
+		Module:        module,
+		generatedBody: true,
 	}
 
 	return rule, nil
@@ -438,10 +442,11 @@ func ParseRuleFromCallExpr(module *Module, terms []*Term) (*Rule, error) {
 	body := implicitTrueBody(loc)
 
 	rule := &Rule{
-		Location: loc,
-		Head:     head,
-		Module:   module,
-		Body:     body,
+		Location:      loc,
+		Head:          head,
+		Module:        module,
+		Body:          body,
+		generatedBody: true,
 	}
 	return rule, nil
 }
@@ -478,7 +483,91 @@ func ParseModuleWithOpts(filename, input string, popts ParserOptions) (*Module, 
 	if err != nil {
 		return nil, err
 	}
-	return parseModule(filename, stmts, comments, popts.RegoVersion)
+	mod, err := parseModule(filename, stmts, comments, popts.RegoVersion)
+	// Without annotations, a compile may still attach some, changing the keys.
+	if err == nil && popts.ProcessAnnotation {
+		setSourceKeys(mod, popts.DropLocations)
+	}
+	if err == nil && popts.DropLocations {
+		if len(mod.Annotations) == 0 { // attached later, by the statements recorded now
+			recordMetadata(mod)
+		}
+		dropLocations(mod)
+	}
+	return mod, err
+}
+
+func dropLocations(mod *Module) {
+	var vis *GenericVisitor
+	vis = NewGenericVisitor(func(x any) bool {
+		switch x := x.(type) {
+		case *Comment:
+			x.Location = nil
+		case *Package:
+			x.Location = nil
+		case *Import:
+			x.Location, x.AliasLocation = nil, nil
+		// Rules and heads walked here, as the visitor would box their slices.
+		case *Rule:
+			x.Location = nil
+			vis.Walk(x.Head)
+			for _, e := range x.Body {
+				vis.Walk(e)
+			}
+			if x.Else != nil {
+				vis.Walk(x.Else)
+			}
+			for _, a := range x.Annotations {
+				vis.Walk(a)
+			}
+			return true
+		case *Head:
+			x.Location = nil
+			for _, t := range x.Reference {
+				vis.Walk(t)
+			}
+			for _, t := range x.Args {
+				vis.Walk(t)
+			}
+			if x.Key != nil {
+				vis.Walk(x.Key)
+			}
+			if x.Value != nil {
+				vis.Walk(x.Value)
+			}
+			return true
+		case *Expr:
+			x.Location = nil
+		case *With:
+			x.Location = nil
+		case *Term:
+			x.Location = nil
+		case *SomeDecl:
+			x.Location = nil
+		case *Every:
+			x.Location = nil
+		case *Not:
+			x.Location = nil
+		case *LogicalAnd:
+			x.Location = nil
+		case *LogicalOr:
+			x.Location = nil
+		case *Annotations:
+			x.Location, x.endLoc = nil, nil
+			for _, s := range x.Schemas {
+				vis.Walk(s.Path)
+				vis.Walk(s.Schema)
+			}
+			if x.Compile != nil {
+				for _, u := range x.Compile.Unknowns {
+					vis.Walk(u)
+				}
+				vis.Walk(x.Compile.MaskRule)
+			}
+		}
+		return false
+	})
+	vis.Walk(mod)
 }
 
 // ParseBody returns exactly one body.
@@ -815,10 +904,6 @@ func statementHeadKeyword(stmt Statement) (string, bool) {
 	return string(name), ok
 }
 
-func ruleDeclarationHasKeyword(rule *Rule, keyword tokens.Token) bool {
-	return slices.Contains(rule.Head.keywords, keyword)
-}
-
 func newScopeAttachmentErr(a *Annotations, want string) *Error {
 	var have string
 	if a.node != nil {
@@ -841,7 +926,6 @@ type ParserErrorDetail struct {
 }
 
 func newParserErrorDetail(bs []byte, offset int) *ParserErrorDetail {
-
 	// Find first non-space character at or before offset position.
 	if offset >= len(bs) {
 		offset = len(bs) - 1
