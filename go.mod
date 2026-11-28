@@ -34,7 +34,7 @@ require (
 	cloud.google.com/go/kms v1.37.0 // indirect
 	cloud.google.com/go/longrunning v1.5.0 // indirect
 	cloud.google.com/go/monitoring v1.32.1 // indirect
-	cloud.google.com/go/storage v1.71.0 // indirect
+	cloud.google.com/go/storage v1.71.1 // indirect
 	connectrpc.com/connect v1.20.0 // indirect
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20261026160121-545c0455168d // indirect
 	cuelang.org/go v0.18.0 // indirect
