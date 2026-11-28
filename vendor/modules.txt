@@ -1370,7 +1370,7 @@ github.com/fluxcd/cli-utils/pkg/object
 # github.com/fluxcd/pkg/apis/acl v0.12.0
 ## explicit; go 1.27.0
 github.com/fluxcd/pkg/apis/acl
-# github.com/fluxcd/pkg/apis/meta v1.39.0
+# github.com/fluxcd/pkg/apis/meta v1.40.0
 ## explicit; go 1.27.0
 github.com/fluxcd/pkg/apis/meta
 # github.com/fluxcd/source-controller/api v1.10.2
@@ -3704,7 +3704,7 @@ k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset
 k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/scheme
 k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1
 k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1beta1
-# k8s.io/apimachinery v0.37.2
+# k8s.io/apimachinery v0.37.3
 ## explicit; go 1.26.0
 k8s.io/apimachinery/pkg/api/equality
 k8s.io/apimachinery/pkg/api/errors
@@ -4207,7 +4207,7 @@ k8s.io/kubectl/pkg/util/podutils
 k8s.io/kubectl/pkg/util/templates
 k8s.io/kubectl/pkg/util/term
 k8s.io/kubectl/pkg/validation
-# k8s.io/streaming v0.37.2
+# k8s.io/streaming v0.37.3
 ## explicit; go 1.26.0
 k8s.io/streaming/pkg/httpstream
 k8s.io/streaming/pkg/httpstream/spdy
