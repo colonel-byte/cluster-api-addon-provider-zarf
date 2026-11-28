@@ -13,7 +13,9 @@ The cost is that the workflow is now a thing to maintain, and that the Renovate 
 
 ## The run is cached, which is what makes it hourly
 
-Renovate resolves every dependency from the registry on each run, and on a 540-module vendored tree that is most of the wall clock - an uncached run takes upwards of twenty minutes. The workflow restores a `RENOVATE_REPOSITORY_CACHE` of resolved versions and changelogs before the Renovate step, which is the only reason an hourly cron is affordable rather than a way to spend the Actions budget re-asking the module proxy the same questions.
+Renovate resolves every dependency from the registry on each run, and on a 540-module vendored tree that is most of the wall clock - an uncached run takes upwards of twenty minutes. The workflow restores Renovate's package cache - resolved versions and changelogs - before the Renovate step, which is the only reason an hourly cron is affordable rather than a way to spend the Actions budget re-asking the module proxy the same questions.
+
+The other cache Renovate keeps, the repository cache of branch SHAs and pull request state, is deliberately disabled (`RENOVATE_REPOSITORY_CACHE: disabled` in the workflow). Restored across runs it goes stale the moment a Renovate pull request merges: the next run sees the merge happen "during" the run, aborts with "Repository has changed during renovation", and - because an aborted run still saves its cache entry - every following run inherits the same stale state and aborts the same way. Re-reading branch and pull request state from the API each run is a handful of list calls, not the twenty minutes the package cache saves.
 
 Two things follow. The cache key carries `github.run_id`, so every run writes a new entry and `restore-keys` picks up the newest previous one; a fixed key would be written once and then never updated. And the `renovate` concurrency group holds `cancel-in-progress: false`, so a run that outlasts its hour queues the next one instead of overlapping it - the schedule degrades to "as often as a run takes" rather than breaking.
 

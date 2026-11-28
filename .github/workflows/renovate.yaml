@@ -8,7 +8,7 @@ on:
     # added there, this has to fire at least as often as that window is open, or the window
     # is a no-op outside the few minutes this workflow happens to run.
     #
-    # Hourly rather than every four hours, which only pays off with the repository cache
+    # Hourly rather than every four hours, which only pays off with the package cache
     # restored below: an uncached run re-resolves all 540 modules and takes upwards of
     # twenty minutes, and the `renovate` concurrency group below makes a run that outlasts
     # its interval queue the next one rather than overlap it. The per-hour pull request
@@ -105,9 +105,15 @@ jobs:
           # installed on, which is not what a per-repository workflow should do.
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_DRY_RUN: ${{ inputs.dryRun == true && 'full' || '' }}
-          # Reuse the cache restored above. Off by default in self-hosted Renovate, so the
-          # cache step alone does nothing without this.
-          RENOVATE_REPOSITORY_CACHE: enabled
+          # The cache restored above holds two separate things: the package cache (resolved
+          # versions and changelogs - the bulk of the size and the whole speedup), and the
+          # repository cache (cached branch SHAs and pull request state). The package cache
+          # works regardless of this setting. The repository cache has to stay disabled: a
+          # run that restores PR state from before a Renovate PR merged sees it "merge
+          # during the run" and aborts with "Repository has changed during renovation", and
+          # because an aborted run still saves its cache, the stale state propagates to
+          # every following run.
+          RENOVATE_REPOSITORY_CACHE: disabled
           # Must agree with the cached path above: the action sets RENOVATE_BASE_DIR to
           # /tmp/renovate, and the cache lives under it.
           RENOVATE_BASE_DIR: /tmp/renovate
