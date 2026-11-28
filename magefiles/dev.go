@@ -71,7 +71,21 @@ func (Dev) VerifyVendor() error {
 		return err
 	}
 	fmt.Println("Verifying vendored osv-scanner overrides")
-	return osv.VerifyVendor()
+	if err := osv.VerifyVendor(); err != nil {
+		return err
+	}
+	// A vendored module's own .gitignore can ignore files `go mod vendor` copied in, and the
+	// root !/vendor/** backstop cannot override a child .gitignore - so a fresh clone would
+	// silently lack those files. The remedy is `git add -f` on each listed file.
+	fmt.Println("Verifying no vendored files are gitignored")
+	out, err := sh.Output("git", "ls-files", "--others", "--ignored", "--exclude-standard", "--", "vendor/")
+	if err != nil {
+		return err
+	}
+	if out != "" {
+		return fmt.Errorf("vendored files are ignored and would be missing from a fresh clone; `git add -f` each:\n%s", out)
+	}
+	return nil
 }
 
 // CheckTables checks that every Markdown table in the tree is padded the way the style guide
